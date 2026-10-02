@@ -1,3 +1,8 @@
+# us
+
+# ignore datasets for now while we are building up the dataset
+datasets/
+
 # ---> macOS
 # General
 .DS_Store
