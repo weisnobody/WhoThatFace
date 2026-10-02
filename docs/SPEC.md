@@ -565,7 +565,8 @@ them, while retaining exact matching as a reference path.
 
 - Do not bundle a managed Python runtime.
 - Do not require a bundled application installation for the MVP.
-- System Python or a separately installed supported Python is the default.
+- System-installed Python 3.11 or a separately installed Python 3.11 is the
+  default prototype/runtime prerequisite.
 - Setup creates a Python virtual environment.
 - Python dependencies are pinned and installed during setup.
 - Model files are downloaded during setup, verified by checksum, and recorded
@@ -576,8 +577,9 @@ them, while retaining exact matching as a reference path.
 - Code signing and notarization are release-hardening work after packaging
   stabilizes.
 
-The exact supported Python version and dependency-locking mechanism must be
-confirmed during the clean-machine setup prototype.
+The prototype pins Python 3.11, InsightFace 2.0.0, and ONNX Runtime 1.30.0.
+The final dependency-locking mechanism must be confirmed during the
+clean-machine setup prototype.
 
 ## 18. Privacy and security
 
@@ -688,8 +690,8 @@ resolved before distribution beyond personal/non-commercial use.
 The following are intentionally not fixed until prototype evidence exists:
 
 - final supported still-image format list
-- exact Python version and dependency lock format
-- exact InsightFace package version
+- final dependency lock format
+- exact production InsightFace package version
 - detection and quality thresholds
 - recognition thresholds and support-count policy values
 - face-quality implementation
