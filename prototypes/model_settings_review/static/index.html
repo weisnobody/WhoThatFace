@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Simplified model-settings review</title>
+  <style>
+    body { font: 14px system-ui; margin: 0; color: #222 }
+    header { padding: 10px 16px; background: #243447; color: white }
+    main { display: grid; grid-template-columns: 250px 1fr 380px; height: calc(100vh - 60px) }
+    aside, section { overflow: auto; padding: 12px; border-right: 1px solid #ddd }
+    .photo { padding: 8px; border-bottom: 1px solid #ddd; cursor: pointer }
+    .photo.selected { background: #dfeeff }
+    .viewer { position: relative; display: inline-block; max-width: 100% }
+    .viewer img { max-width: 100%; max-height: 65vh }
+    .box { position: absolute; border: 2px solid #f00; color: #fff; background: #d00b; padding: 1px; font-size: 12px }
+    .face { padding: 8px; border: 1px solid #ddd; margin: 6px 0 }
+    button, select, input { margin: 3px; padding: 5px }
+    #status { margin-left: 12px }
+    .candidate { font-size: 12px; color: #555 }
+  </style>
+</head>
+<body>
+<header>
+  <b>Simplified model-settings review</b>
+  <label>similarity <input id="sim" value="0.45" size="4"></label>
+  <label>margin <input id="margin" value="0.05" size="4"></label>
+  <label>support <input id="support" value="1" size="2"></label>
+  <label>quality <input id="quality" value="0.25" size="4"></label>
+  <button id="reveal">Reveal candidates</button>
+  <button id="analyze">Analyze</button>
+  <span id="status"></span>
+</header>
+<main>
+  <aside><h3>Photos</h3><div id="photos"></div></aside>
+  <section><h3 id="title">Select a photo</h3><button id="missed">Record missed face</button><div id="viewer"></div></section>
+  <aside>
+    <h3>Faces</h3><div id="faces"></div>
+    <hr><h3>Provisional groups</h3><div id="clusters"></div>
+    <hr><h3>People</h3>
+    <input id="newperson" placeholder="New person label"><button id="create">Create</button>
+    <div id="people"></div>
+  </aside>
+</main>
+<script>
+let state = { people: [], selected: null, faces: [] };
+const $ = id => document.getElementById(id);
+const api = (url, options) => fetch(url, options).then(r => r.json());
+
+function load() {
+  return Promise.all([
+    api('/api/summary').then(s => $('status').textContent = `${s.labeled}/${s.faces} labeled; ${s.people} people`),
+    api('/api/photos').then(items => {
+      $('photos').innerHTML = items.map(x => `<div class="photo" data-id="${x.id}">${x.relative_path}<br><small>${x.face_count} faces</small></div>`).join('');
+      document.querySelectorAll('.photo').forEach(x => x.onclick = () => select(+x.dataset.id));
+    }),
+    api('/api/people').then(items => {
+      state.people = items;
+      $('people').innerHTML = items.map(x => `<div>${x.label}</div>`).join('');
+    }),
+    api('/api/clusters').then(items => {
+      $('clusters').innerHTML = items.map(x => `<div>Group ${x.id}: ${x.face_count} faces</div>`).join('');
+    })
+  ]);
+}
+
+function select(id) {
+  state.selected = id;
+  return api('/api/photo/' + id).then(x => {
+    state.faces = x.faces;
+    $('title').textContent = x.relative_path;
+    $('viewer').innerHTML = `<div class="viewer"><img src="/image/${id}">${x.faces.map(f => {
+      const b = f.box;
+      return `<span class="box" style="left:${b[0]/x.width*100}%;top:${b[1]/x.height*100}%;width:${(b[2]-b[0])/x.width*100}%;height:${(b[3]-b[1])/x.height*100}%">${f.index+1}</span>`;
+    }).join('')}</div>`;
+    renderFaces();
+  });
+}
+
+function renderFaces() {
+  const people = state.people;
+  $('faces').innerHTML = state.faces.map(f => `<div class="face">
+    <b>Face ${f.index + 1}</b> quality ${f.quality}<br>
+    <select id="person-${f.id}"><option value="">Unknown / none</option>
+      ${people.map(p => `<option value="${p.id}" ${f.person_id == p.id ? 'selected' : ''}>${p.label}</option>`).join('')}
+    </select>
+    <select id="kind-${f.id}"><option value="person">Person</option><option value="unknown">Unknown</option><option value="ambiguous">Ambiguous</option><option value="false_detection">False detection</option></select>
+    <select id="role-${f.id}"><option value="evaluation">Evaluation</option><option value="reference">Reference</option></select>
+    <button onclick="saveLabel(${f.id})">Save label</button>
+    ${f.prediction ? `<div><b>Model:</b> ${f.prediction.person_label || 'unknown'} (${f.prediction.category}, ${Number(f.prediction.similarity).toFixed(3)})</div>
+      <div class="candidate">Candidates: ${f.prediction.candidates.map(x => `${x.label} ${Number(x.similarity).toFixed(3)}`).join(', ')}</div>
+      <select id="outcome-${f.id}"><option value="correct">Correct</option><option value="incorrect">Incorrect</option><option value="appropriately_unknown">Appropriately unknown</option><option value="too_cautious">Too cautious</option><option value="too_confident">Too confident</option></select>
+      <button onclick="saveReview(${f.id})">Save model review</button>` : ''}
+  </div>`).join('');
+}
+
+function saveLabel(id) {
+  const person = $('person-' + id).value;
+  const kind = $('kind-' + id).value;
+  if (kind === 'person' && !person) return alert('Choose a person or another label kind');
+  api('/api/label', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({face_id:id, person_id:person ? +person : null, kind, role:$('role-' + id).value)})
+    .then(x => x.error ? alert(x.error) : load().then(() => select(state.selected)));
+}
+function saveReview(id) {
+  api('/api/post-review', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({face_id:id, outcome:$('outcome-' + id).value})})
+    .then(x => x.error && alert(x.error));
+}
+$('missed').onclick = () => {
+  if (!state.selected) return alert('Select a photo first');
+  const note = prompt('Optional note about the missed face:', '');
+  api('/api/missed', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({image_id:state.selected, note})});
+};
+$('create').onclick = () => {
+  const label = $('newperson').value.trim(); if (!label) return;
+  api('/api/people', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label})})
+    .then(() => { $('newperson').value = ''; load(); });
+};
+$('reveal').onclick = () => api('/api/reveal', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+  similarity_threshold:+$('sim').value, margin_threshold:+$('margin').value,
+  min_support:+$('support').value, quality_threshold:+$('quality').value
+})}).then(x => x.error ? alert(x.error) : load().then(() => state.selected && select(state.selected)));
+$('analyze').onclick = () => api('/api/analyze', {method:'POST'}).then(x => alert(x.error || 'Reports written'));
+load();
+</script>
+</body>
+</html>
