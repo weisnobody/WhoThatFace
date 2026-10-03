@@ -23,6 +23,8 @@ added without changing the core architecture.
 - Multiple configured collection roots.
 - Exact duplicate file content is analyzed once but remains visible at every
   discovered filesystem path.
+- Discovery-first identity review: photos can be processed without any
+  pre-existing reference faces, with unfamiliar faces grouped for review.
 
 The initial supported still-image format list is expected to include JPEG,
 PNG, HEIF/HEIC, TIFF, and WebP. This list must be confirmed against the
@@ -35,7 +37,6 @@ chosen Python image-decoding stack before implementation.
 - Apple Photos integration.
 - Cloud processing, telemetry, or remote search.
 - Automatic identity assignment without user confirmation.
-- Automatic clustering during scanning.
 - User-facing person merge/split workflows.
 - A GUI.
 
@@ -49,6 +50,8 @@ chosen Python image-decoding stack before implementation.
 - Detection, analysis, recognition, and identity assignment are separate
   concepts.
 - Unknown is a valid and expected result.
+- Discovery and review are the normal path for unfamiliar faces; reference
+  faces are accumulated through confirmed user decisions over time.
 - Model and preprocessing provenance is retained with derived data.
 - Background processing may be paused, resumed, throttled, or restarted
   without changing results.
@@ -382,9 +385,15 @@ database representation.
 Go performs similarity matching. The initial metric is cosine similarity over
 compatible embeddings.
 
-The initial matcher compares a query face against confirmed examples and uses
-the strongest match plus top-k supporting evidence for each person. A later
-vector index may be added if benchmarks require it.
+The initial matcher compares a query face against confirmed examples when
+examples are available and uses the strongest match plus top-k supporting
+evidence for each person. A later vector index may be added if benchmarks
+require it.
+
+Matching is not required for initial processing. A collection may contain no
+people or no confirmed examples when it is first scanned. In that case, faces
+are retained as unidentified and may be grouped into provisional clusters for
+user review.
 
 ### 10.2 Decision inputs
 
@@ -413,7 +422,37 @@ produce stronger evidence.
 - Rejected suggestions never become matching examples.
 - Rejected suggestions are remembered to avoid repeated presentation.
 
-### 10.4 Assignment history
+### 10.4 Discovery-first workflow
+
+Discovery-first is the normal application workflow, not an exceptional
+fallback. A user can scan and analyze photos without first creating people or
+selecting reference faces.
+
+The workflow is:
+
+1. Detect faces and generate embeddings for all supported photos.
+2. Match faces against existing confirmed examples where possible.
+3. Group unfamiliar or low-confidence faces into provisional clusters.
+4. Let the user review clusters and individual faces, name a person, assign a
+   face to an existing person, mark a face unknown, or reject a false
+   detection.
+5. Treat confirmed and manually assigned faces as future examples for that
+   person.
+
+Provisional clusters never create confirmed identities by themselves. A
+cluster may contain faces from more than one person and must remain explicitly
+reviewable. The initial clustering algorithm and its parameters are deferred,
+but a basic grouping implementation is required for the MVP review workflow.
+
+The application should distinguish at least these states during review:
+
+- known person
+- genuinely unknown person
+- ambiguous or unusable face
+- false detection
+- missed face, recorded during review when applicable
+
+### 10.5 Assignment history
 
 Identity decisions are historical records, not a single mutable
 `face.person_id` field. Records include suggestion, confirmation, rejection,
@@ -424,17 +463,21 @@ events. The current identity is a derived query/view over the history.
 
 ## 11. Clustering
 
-Clustering is user-triggered, not part of normal scanning.
+Clustering is performed after analysis as part of the discovery-first review
+workflow. It may run automatically as a post-scan job or be explicitly
+requested, but it is never an identity assignment.
 
 - It operates on all unknown faces or a user-selected subset.
 - It never silently creates or assigns identities.
 - Bulk assignment requires explicit confirmation.
 - A clustering run stores its input set, pipeline, parameters, algorithm, and
   timestamp.
-- Users may inspect, accept, reject, split, or merge clusters in later UI/CLI
-  work.
+- Users may inspect, accept, and reject provisional clusters in the MVP, and
+  may assign individual faces from a cluster. User-facing merge and split
+  operations remain deferred to a later version.
 - The exact clustering algorithm and parameters are deferred until a
-  prototype dataset is available.
+  prototype dataset is available, but the clustering boundary and review
+  behavior are MVP requirements.
 
 ## 12. Data model
 
@@ -451,6 +494,7 @@ Initial logical entities:
 - `scan_runs`
 - `scan_items`
 - `clustering_runs`
+- provisional cluster and cluster-membership records
 - `schema_migrations`
 - `pipelines`
 
@@ -522,6 +566,7 @@ these workflows:
 - search by person, directory, and capture-date range
 - create/list/rename people
 - inspect unknown faces
+- inspect provisional face clusters
 - inspect, confirm, reject, and manually assign suggestions
 - run and inspect clustering jobs
 - inspect application and worker status
@@ -682,6 +727,12 @@ dataset from a user-provided collection. The instructions must cover:
 Private images, embeddings, and identifying metadata must not be committed to
 source control. A public sample dataset may be created later from
 appropriately licensed images.
+
+The normal application workflow does not require this dataset structure. The
+reference/evaluation separation exists to measure recognition settings without
+using the answer as part of the evidence. The simpler human-review procedure
+for this purpose is documented in
+`docs/protocols/identify_model_settings-simplified.md`.
 
 Recognition evaluation measures false positives, false negatives, unknown
 rejection, precision/recall, similarity distributions, support-count effects,
