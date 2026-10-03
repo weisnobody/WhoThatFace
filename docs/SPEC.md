@@ -311,9 +311,20 @@ the MVP.
 
 ## 8. ML pipeline and model provenance
 
-The initial default is the InsightFace `buffalo_l` package, subject to local
-validation and licensing review. `buffalo_s` may be evaluated only if
-`buffalo_l` is unacceptably expensive in memory, throughput, or startup time.
+The initial ML pipeline is InsightFace 2.0.0 with the `buffalo_l` model pack,
+running under Python 3.11 and ONNX Runtime 1.30.0.
+
+The application uses the trimmed `buffalo_l` configuration with only the
+detection and recognition modules enabled:
+
+```python
+allowed_modules=["detection", "recognition"]
+```
+
+The full model-pack configuration remains available for future features that
+need attributes or additional landmark models. `buffalo_s` is not the default
+fallback because the trimmed `buffalo_l` configuration met the initial
+performance requirements.
 
 InsightFace publishes standard benchmark results for its model packs, but the
 application must calibrate behavior on a representative local dataset. Exact
@@ -333,6 +344,10 @@ A pipeline ID identifies the complete analysis configuration:
 - relevant Python and dependency versions
 
 A change to any of these creates a new pipeline ID.
+
+The validated initial pipeline records Python 3.11, InsightFace 2.0.0, ONNX
+Runtime 1.30.0, `buffalo_l`, the trimmed module list, model-file checksums,
+detector size, and the selected execution provider.
 
 ### 8.2 Analysis versioning
 
@@ -556,6 +571,29 @@ The implementation must benchmark:
 - worker startup and recovery
 - adaptive throttling
 
+### 16.1 Initial benchmark results
+
+The baseline was tested on the same 86-image, 129-face dataset on an Apple
+Silicon M1 with 8 GB RAM and an Apple Silicon M4. Both machines used the
+CoreML execution provider with CPU fallback, and both completed all images
+without errors.
+
+For the trimmed `buffalo_l` configuration:
+
+- M1: 18.80 images/second and 28.20 faces/second.
+- M4: 29.32 images/second and 43.98 faces/second.
+- Peak RSS: approximately 1.19 GiB on M1 and 1.54 GiB on M4.
+- All 129 face counts and bounding boxes matched between machines.
+- Cross-machine embedding cosine similarity was at least
+  `0.999999999999982`.
+- Full and trimmed configurations produced byte-identical embeddings on each
+  machine for all 129 faces.
+
+The trimmed configuration improved warm throughput by approximately 18% on
+the M1 and 13% on the M4, but did not materially reduce peak memory. These
+results establish the configuration as the initial baseline, not as a
+guarantee for all future macOS or Apple Silicon systems.
+
 Ordinary searches should remain interactive for the primary target collection.
 Initial matching may scan all eligible confirmed embeddings. A vector index or
 person-level representative vectors may be introduced if benchmarks justify
@@ -571,6 +609,7 @@ them, while retaining exact matching as a reference path.
 - Python dependencies are pinned and installed during setup.
 - Model files are downloaded during setup, verified by checksum, and recorded
   by pipeline ID.
+- The initial setup pins InsightFace 2.0.0 and ONNX Runtime 1.30.0.
 - Runtime processing works without network access.
 - Docker configuration may be provided as an optional reproducible environment,
   but is not the default macOS runtime.
@@ -657,22 +696,25 @@ setup recovery, offline runtime, and the optional Docker workflow.
 
 ## 20. Model-selection prototype
 
-The initial prototype is intentionally narrow:
+The initial prototype used the following process:
 
-1. Start with InsightFace `buffalo_l`.
+1. Start with Python 3.11, InsightFace 2.0.0, ONNX Runtime 1.30.0, and
+   `buffalo_l`.
 2. Run it on a modest private labeled dataset.
 3. Calibrate similarity, quality, and supporting-example thresholds.
 4. Measure false positives, false negatives, unknown rejection, startup,
    throughput, and memory.
-5. Evaluate `buffalo_s` only if `buffalo_l` is too expensive operationally.
-6. Adopt `buffalo_l` unless local results reveal a material problem.
+5. Compare full and detection-plus-recognition-only `buffalo_l` configurations.
+6. Adopt the trimmed configuration after confirming equivalent outputs and
+   improved throughput.
 
 The prototype must record model and model-file versions, checksums,
 preprocessing, alignment, normalization, Python dependencies, hardware, and
 operating-system details.
 
-The exact InsightFace model license and any redistribution requirements must be
-resolved before distribution beyond personal/non-commercial use.
+The current use case is personal/non-commercial. Any future distribution
+beyond that scope must re-evaluate the InsightFace model license and
+redistribution requirements.
 
 ## 21. Failure handling and recovery
 
@@ -691,7 +733,7 @@ The following are intentionally not fixed until prototype evidence exists:
 
 - final supported still-image format list
 - final dependency lock format
-- exact production InsightFace package version
+- exact production dependency update policy
 - detection and quality thresholds
 - recognition thresholds and support-count policy values
 - face-quality implementation

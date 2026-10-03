@@ -92,17 +92,27 @@ python src/benchmark.py /path/to/photos \
   --output results/M1
 ```
 
-The command recursively discovers all supported image files, loads
-`buffalo_l`, runs one cold full-directory pass, then three warm full-directory
-passes, and writes:
+The command recursively discovers all supported image files, computes a
+content hash for each file, then runs both the full and trimmed `buffalo_l`
+variants. Each variant runs in a separate process so peak memory is measured
+independently. Each variant gets one cold full-directory pass followed by
+three warm full-directory passes.
+
+It writes:
 
 ```text
 results/M1/
-├── runtime.json   # machine, package, provider, model hashes, timings
-├── dataset.json   # stable dataset manifest; paths omitted by default
-├── passes.json    # raw pass-level timing and count results
-├── images.jsonl   # per-image results from the first warm pass
-└── summary.csv    # pass-level spreadsheet-friendly summary
+├── runtime.json                    # overall run and both variant summaries
+├── dataset.json                    # content-hash dataset manifest
+├── passes.json                     # raw pass-level timing/count results
+├── images.jsonl                    # per-image results from both variants
+├── variant-full-runtime.json       # full variant runtime/memory
+├── variant-full-passes.json        # full variant pass summaries
+├── variant-full-images.jsonl       # full variant per-image results
+├── variant-trimmed-runtime.json    # trimmed variant runtime/memory
+├── variant-trimmed-passes.json     # trimmed variant pass summaries
+├── variant-trimmed-images.jsonl    # trimmed variant per-image results
+└── summary.csv                     # pass-level spreadsheet-friendly summary
 ```
 
 Use `--include-paths` only when the result directory is appropriately
@@ -121,9 +131,9 @@ The first inference may include CoreML compilation. Compare `cold_full_directory
 and `warm_full_directory` passes separately. Run the same command and fixture
 set on the M4, changing only `--machine-label` and output directory.
 
-The benchmark does not store embeddings. It records face counts, boxes,
-detection confidence, embedding dimensions/norms, decode/inference timings,
-errors, and aggregate throughput.
+The benchmark does not store embeddings by default. It records face counts,
+boxes, detection confidence, embedding dimensions/norms, decode/inference
+timings, errors, and aggregate throughput.
 
 To store embeddings for cross-machine comparison, add
 `--include-embeddings`:
@@ -157,7 +167,29 @@ Run the same fixture set and record:
 - failures or warnings
 
 The first run may include model loading and CoreML compilation. Report cold
-and warm timings separately.
+and warm timings separately. The trimmed variant loads only the detection and
+recognition modules; its independent peak RSS is reported in
+`variant-trimmed-runtime.json`.
+
+## Generate a comparison report
+
+After running the benchmark on two computers, compare the result directories:
+
+```sh
+python src/compare_results.py \
+  results/M1 \
+  results/M4
+```
+
+The command writes a report alongside the result directories:
+
+```text
+results/comparison-<YYYYMMDD_HHMMSS>.md
+```
+
+The report compares dataset content hashes, both model variants, timings,
+throughput, peak memory, failures, and embedding consistency when embeddings
+were included.
 
 ## Limitations
 
