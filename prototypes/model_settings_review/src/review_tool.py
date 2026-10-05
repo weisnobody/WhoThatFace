@@ -21,6 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 SUPPORTED = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".webp"}
 SCHEMA_VERSION = 1
@@ -36,6 +37,13 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def file_creation_date(path: Path) -> str:
+    """Return the filesystem creation/birth time as an ISO-8601 value."""
+    stat = path.stat()
+    timestamp = getattr(stat, "st_birthtime", stat.st_ctime)
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
 
 
 def path_id(value: str) -> str:
@@ -209,13 +217,16 @@ def import_experiment(args: argparse.Namespace) -> int:
         asset = db.execute("SELECT id FROM assets WHERE content_sha256=?", (digest,)).fetchone()
         path_hash = path_id(str(root) + "\0" + relative)
         db.execute(
-            "INSERT OR IGNORE INTO images(asset_id,root_path,relative_path,absolute_path,path_sha256,status) VALUES(?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO images(asset_id,root_path,relative_path,absolute_path,path_sha256,capture_date,status) VALUES(?,?,?,?,?,?,?)",
             # The review server needs the source path to display the image. The
             # experiment directory is expected to be protected as it contains
             # private dataset metadata.
-            (asset["id"], str(root), relative, "" if args.omit_paths else str(file_path), path_hash, "pending"),
+            (asset["id"], str(root), relative, "" if args.omit_paths else str(file_path), path_hash, file_creation_date(file_path), "pending"),
         )
         image = db.execute("SELECT * FROM images WHERE path_sha256=?", (path_hash,)).fetchone()
+        if not image["capture_date"]:
+            db.execute("UPDATE images SET capture_date=? WHERE id=?", (file_creation_date(file_path), image["id"]))
+            db.commit()
         if image["status"] == "ok":
             continue
         try:
@@ -243,6 +254,25 @@ def import_experiment(args: argparse.Namespace) -> int:
     db.commit()
     (experiment / "experiment.json").write_text(json.dumps({"metadata": {r["key"]: get_meta(db, r["key"]) for r in db.execute("SELECT key FROM metadata")}, "manifest": manifest}, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))
+    return 0
+
+
+def backfill_dates(args: argparse.Namespace) -> int:
+    experiment = args.experiment.resolve()
+    db = connect(experiment)
+    init_db(db)
+    updated = 0
+    missing = 0
+    for row in db.execute("SELECT id,absolute_path FROM images WHERE capture_date IS NULL OR capture_date='' ").fetchall():
+        path = Path(row["absolute_path"])
+        if not path.is_file():
+            missing += 1
+            continue
+        db.execute("UPDATE images SET capture_date=? WHERE id=?", (file_creation_date(path), row["id"]))
+        updated += 1
+    db.commit()
+    db.close()
+    print(json.dumps({"updated": updated, "missing_paths": missing}, indent=2))
     return 0
 
 
@@ -306,6 +336,17 @@ def default_settings() -> dict[str, Any]:
     return {"similarity_threshold": 0.45, "margin_threshold": 0.05, "min_support": 1, "quality_threshold": 0.25}
 
 
+def latest_settings(db: sqlite3.Connection) -> dict[str, Any]:
+    row = db.execute("SELECT settings_json FROM reveal_events ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return default_settings()
+    try:
+        settings = json.loads(row["settings_json"])
+    except (TypeError, json.JSONDecodeError):
+        return default_settings()
+    return {**default_settings(), **settings}
+
+
 def provisional_clusters(db: sqlite3.Connection, threshold: float = 0.55) -> list[dict[str, Any]]:
     """Return a simple review aid; this is deliberately not a final clusterer."""
     groups: list[dict[str, Any]] = []
@@ -329,28 +370,58 @@ def provisional_clusters(db: sqlite3.Connection, threshold: float = 0.55) -> lis
 
 def analyze_db(db: sqlite3.Connection, settings: dict[str, Any]) -> dict[str, Any]:
     rows = db.execute("SELECT p.*,l.kind AS truth_kind,l.person_id AS truth_person_id FROM predictions p JOIN labels l ON l.face_id=p.face_id WHERE l.role='evaluation'").fetchall()
-    counts = {"evaluation_faces": len(rows), "missed_faces_recorded": db.execute("SELECT COUNT(*) FROM missed_faces").fetchone()[0], "correct": 0, "incorrect": 0, "unknown_correct": 0, "unknown_incorrect": 0, "review": 0, "high_confidence": 0}
+    reference_people = {row["person_id"] for row in db.execute("SELECT DISTINCT person_id FROM labels WHERE role='reference' AND kind='person'")}
+    counts = {"evaluation_faces": len(rows), "missed_faces_recorded": db.execute("SELECT COUNT(*) FROM missed_faces").fetchone()[0], "correct": 0, "unknown_correct": 0, "incorrect_prediction": 0, "known_person_without_reference": 0, "review_required": 0, "unknown_prediction": 0, "high_confidence": 0, "high_confidence_false_positive": 0}
+    post_review_names = {"incorrect": "incorrect_review", "appropriately_unknown": "appropriately_unknown_review", "too_cautious": "too_cautious", "too_confident": "too_confident"}
+    for row in db.execute("SELECT outcome,COUNT(*) count FROM post_reviews GROUP BY outcome"):
+        counts[post_review_names.get(row["outcome"], f"{row['outcome']}_review")] = row["count"]
     by_quality: dict[str, dict[str, int]] = {}
     for row in rows:
         bucket = "low" if row["quality"] < 0.35 else "medium" if row["quality"] < 0.65 else "high"
         by_quality.setdefault(bucket, {"total": 0, "correct": 0, "incorrect": 0})["total"] += 1
-        counts[row["category"]] = counts.get(row["category"], 0) + 1
+        if row["category"] == "review":
+            counts["review_required"] += 1
+        elif row["category"] == "unknown":
+            counts["unknown_prediction"] += 1
+        elif row["category"] == "high_confidence":
+            counts["high_confidence"] += 1
         truth_person = row["truth_person_id"] if row["truth_kind"] == "person" else None
-        if row["person_id"] == truth_person and truth_person is not None:
-            counts["correct"] += 1; by_quality[bucket]["correct"] += 1
+        if truth_person is not None and truth_person not in reference_people:
+            classification = "known_person_without_reference"
+        elif row["person_id"] == truth_person and truth_person is not None:
+            classification = "correct"
         elif row["person_id"] is None and truth_person is None:
-            counts["unknown_correct"] += 1; by_quality[bucket]["correct"] += 1
+            classification = "unknown_correct"
         else:
-            counts["incorrect"] += 1; by_quality[bucket]["incorrect"] += 1
+            classification = "incorrect_prediction"
+        counts[classification] += 1
+        if classification in ("correct", "unknown_correct"):
+            by_quality[bucket]["correct"] += 1
+        else:
+            by_quality[bucket]["incorrect"] += 1
+        if row["category"] == "high_confidence" and classification not in ("correct", "unknown_correct"):
+            counts["high_confidence_false_positive"] += 1
     counts["accuracy_on_all"] = round((counts["correct"] + counts["unknown_correct"]) / len(rows), 4) if rows else None
-    counts["high_confidence_false_positives"] = sum(1 for row in rows if row["category"] == "high_confidence" and row["person_id"] != (row["truth_person_id"] if row["truth_kind"] == "person" else None))
     return {"settings": settings, "counts": counts, "quality_buckets": by_quality}
+
+
+def markdown_report(result: dict[str, Any]) -> str:
+    settings = result["settings"]
+    counts = result["counts"]
+    lines = ["# Simplified Model-Settings Review Report", "", f"Generated: `{result.get('generated_at', utc_now())}`", "", "## Settings", "", "| Setting | Value |", "|---|---:|"]
+    lines.extend(f"| {html.escape(key)} | {value} |" for key, value in settings.items())
+    lines += ["", "## Results", "", "| Metric | Value |", "|---|---:|"]
+    lines.extend(f"| {key.replace('_', ' ')} | {value} |" for key, value in counts.items())
+    lines += ["", "## Quality buckets", "", "| Bucket | Total | Correct | Incorrect |", "|---|---:|---:|---:|"]
+    for bucket, values in result["quality_buckets"].items():
+        lines.append(f"| {bucket} | {values['total']} | {values['correct']} | {values['incorrect']} |")
+    return "\n".join(lines) + "\n"
 
 
 def analyze_experiment(args: argparse.Namespace) -> int:
     db = connect(args.experiment.resolve())
     init_db(db)
-    settings = default_settings()
+    settings = latest_settings(db)
     settings.update({k: v for k, v in {"similarity_threshold": args.similarity_threshold, "margin_threshold": args.margin_threshold, "min_support": args.min_support, "quality_threshold": args.quality_threshold}.items() if v is not None})
     sweep_results = []
     if args.sweep:
@@ -387,7 +458,7 @@ def analyze_experiment(args: argparse.Namespace) -> int:
 
 
 HTML = r'''<!doctype html><html><head><meta charset="utf-8"><title>Model settings review</title>
-<style>body{font:14px system-ui;margin:0;color:#222}header{padding:12px 18px;background:#243447;color:white}main{display:grid;grid-template-columns:250px 1fr 330px;height:calc(100vh - 64px)}aside,section{overflow:auto;padding:12px;border-right:1px solid #ddd}.photo{padding:8px;border-bottom:1px solid #ddd;cursor:pointer}.photo.selected{background:#dfeeff}.viewer{position:relative;display:inline-block;max-width:100%}.viewer img{max-width:100%;max-height:65vh}.box{position:absolute;border:2px solid #f00;color:#fff;background:#d00b;padding:1px;font-size:12px}.face{padding:8px;border:1px solid #ddd;margin:6px 0}.hidden{display:none}button,select,input{margin:4px;padding:6px}#status{margin-left:20px}.warn{color:#a33}</style></head><body><header><b>Simplified model-settings review</b><button id="reveal">Reveal candidates</button><button id="analyze">Analyze</button><span id="status"></span></header><main><aside><h3>Photos</h3><div id="photos"></div></aside><section><h3 id="title">Select a photo</h3><div id="viewer"></div></section><aside><h3>Faces</h3><div id="faces"></div><hr><h3>People</h3><input id="newperson" placeholder="New person label"><button id="create">Create</button><div id="people"></div></aside></main><script>
+<style>body{font:14px system-ui;margin:0;color:#222}header{padding:12px 18px;background:#243447;color:white}main{display:grid;grid-template-columns:250px 1fr 330px;height:calc(100vh - 64px)}aside,section{overflow:auto;padding:12px;border-right:1px solid #ddd}.photo{padding:8px;border-bottom:1px solid #ddd;cursor:pointer}.photo.selected{background:#dfeeff}.viewer{position:relative;display:inline-block;max-width:100%}.viewer img{max-width:100%;max-height:65vh}.box{position:absolute;border:2px solid #f00;color:#fff;background:rgba(204, 0, 0, 0.15);padding:1px;font-size:12px}.face{padding:8px;border:1px solid #ddd;margin:6px 0}.hidden{display:none}button,select,input{margin:4px;padding:6px}#status{margin-left:20px}.warn{color:#a33}</style></head><body><header><b>Simplified model-settings review</b><button id="reveal">Reveal candidates</button><button id="analyze">Analyze</button><span id="status"></span></header><main><aside><h3>Photos</h3><div id="photos"></div></aside><section><h3 id="title">Select a photo</h3><div id="viewer"></div></section><aside><h3>Faces</h3><div id="faces"></div><hr><h3>People</h3><input id="newperson" placeholder="New person label"><button id="create">Create</button><div id="people"></div></aside></main><script>
 let state={photos:[],people:[],selected:null,faces:[]};
 const $=id=>document.getElementById(id); const api=(u,o)=>fetch(u,o).then(r=>r.json());
 function load(){return Promise.all([api('/api/summary').then(s=>{$('status').textContent=`${s.labeled}/${s.faces} labeled; ${s.people} people`; }),api('/api/photos').then(p=>{state.photos=p; $('photos').innerHTML=p.map(x=>`<div class="photo" data-id="${x.id}">${x.relative_path}<br><small>${x.face_count} faces</small></div>`).join('');document.querySelectorAll('.photo').forEach(x=>x.onclick=()=>select(+x.dataset.id));}),api('/api/people').then(p=>{state.people=p;$('people').innerHTML=p.map(x=>`<div>${x.label}</div>`).join('');})]);}
@@ -418,20 +489,100 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         db = connect(self.root)
         try:
+            if self.path.startswith("/person/"):
+                static_file = STATIC_DIR / "person.html"
+                data = static_file.read_bytes()
+                self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
             if self.path in ("/", "/index.html"):
                 static_file = STATIC_DIR / "index.html"
                 data = static_file.read_bytes() if static_file.is_file() else HTML.encode()
                 self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
-            if self.path == "/api/summary":
-                faces, labels = reviewed(db); self.send_json({"faces": faces, "labeled": labels, "people": db.execute("SELECT COUNT(*) FROM people").fetchone()[0], "missed_faces": db.execute("SELECT COUNT(*) FROM missed_faces").fetchone()[0], "revealed": bool(db.execute("SELECT 1 FROM reveal_events LIMIT 1").fetchone())}); return
-            if self.path == "/api/photos":
-                rows = db.execute("SELECT i.id,i.relative_path,i.width,i.height,COUNT(f.id) face_count FROM images i LEFT JOIN faces f ON f.image_id=i.id GROUP BY i.id ORDER BY i.relative_path").fetchall(); self.send_json([dict(r) for r in rows]); return
-            if self.path == "/api/people": self.send_json([dict(r) for r in db.execute("SELECT id,label FROM people ORDER BY label")]); return
+            if urlparse(self.path).path == "/api/summary":
+                faces, labels = reviewed(db)
+                photo_progress = db.execute("SELECT COUNT(*) total,COALESCE(SUM(CASE WHEN face_count=labeled_count THEN 1 ELSE 0 END),0) done FROM (SELECT i.id,COUNT(DISTINCT f.id) face_count,COUNT(DISTINCT l.face_id) labeled_count FROM images i LEFT JOIN faces f ON f.image_id=i.id LEFT JOIN labels l ON l.face_id=f.id GROUP BY i.id)").fetchone()
+                query = parse_qs(urlparse(self.path).query)
+                filter_text = query.get("path", [""])[0]
+                filter_status = query.get("status", ["all"])[0]
+                filtered_rows = db.execute("SELECT COUNT(DISTINCT f.id) face_count,COUNT(DISTINCT l.face_id) labeled_count FROM images i LEFT JOIN faces f ON f.image_id=i.id LEFT JOIN labels l ON l.face_id=f.id WHERE i.relative_path LIKE ? GROUP BY i.id", (f"%{filter_text}%",)).fetchall()
+                if filter_status == "pending":
+                    filtered_rows = [row for row in filtered_rows if row["face_count"] > row["labeled_count"]]
+                elif filter_status == "done":
+                    filtered_rows = [row for row in filtered_rows if row["face_count"] == row["labeled_count"]]
+                filtered_total = len(filtered_rows)
+                filtered_done = sum(1 for row in filtered_rows if row["face_count"] == row["labeled_count"])
+                self.send_json({"faces": faces, "labeled": labels, "people": db.execute("SELECT COUNT(*) FROM people").fetchone()[0], "missed_faces": db.execute("SELECT COUNT(*) FROM missed_faces").fetchone()[0], "photos_total": photo_progress["total"], "photos_done": photo_progress["done"], "filtered_photos_total": filtered_total, "filtered_photos_done": filtered_done, "revealed": bool(db.execute("SELECT 1 FROM reveal_events LIMIT 1").fetchone())}); return
+            if urlparse(self.path).path == "/api/photos":
+                parsed = urlparse(self.path)
+                query = parse_qs(parsed.query)
+                sort = query.get("sort", ["filename"])[0]
+                order_column = "i.capture_date" if sort == "creation_date" else "i.relative_path"
+                filter_text = query.get("path", [""])[0]
+                status = query.get("status", ["all"])[0]
+                result_type = query.get("result", ["all"])[0]
+                status_having = ""
+                if status == "pending":
+                    status_having = " HAVING COUNT(DISTINCT f.id) > COUNT(DISTINCT l.face_id)"
+                elif status == "done":
+                    status_having = " HAVING COUNT(DISTINCT f.id) = COUNT(DISTINCT l.face_id)"
+                result_conditions = {
+                    "missed_faces_recorded": "EXISTS (SELECT 1 FROM missed_faces mf WHERE mf.image_id=i.id)",
+                    "incorrect_prediction": "EXISTS (SELECT 1 FROM predictions pr JOIN faces rf ON rf.id=pr.face_id JOIN labels tl ON tl.face_id=rf.id WHERE rf.image_id=i.id AND tl.role='evaluation' AND ((tl.kind='person' AND EXISTS (SELECT 1 FROM labels ref WHERE ref.person_id=tl.person_id AND ref.kind='person' AND ref.role='reference') AND (pr.person_id IS NULL OR pr.person_id<>tl.person_id)) OR (tl.kind<>'person' AND pr.person_id IS NOT NULL)))",
+                    "known_person_without_reference": "EXISTS (SELECT 1 FROM predictions pr JOIN faces rf ON rf.id=pr.face_id JOIN labels tl ON tl.face_id=rf.id WHERE rf.image_id=i.id AND tl.role='evaluation' AND tl.kind='person' AND NOT EXISTS (SELECT 1 FROM labels ref WHERE ref.person_id=tl.person_id AND ref.kind='person' AND ref.role='reference'))",
+                    "unknown_correct": "EXISTS (SELECT 1 FROM predictions pr JOIN faces rf ON rf.id=pr.face_id JOIN labels tl ON tl.face_id=rf.id WHERE rf.image_id=i.id AND tl.role='evaluation' AND tl.kind<>'person' AND pr.person_id IS NULL)",
+                    "review_required": "EXISTS (SELECT 1 FROM predictions pr JOIN faces rf ON rf.id=pr.face_id WHERE rf.image_id=i.id AND pr.category='review')",
+                    "unknown_prediction": "EXISTS (SELECT 1 FROM predictions pr JOIN faces rf ON rf.id=pr.face_id WHERE rf.image_id=i.id AND pr.category='unknown')",
+                    "correct": "EXISTS (SELECT 1 FROM predictions pr JOIN faces rf ON rf.id=pr.face_id JOIN labels tl ON tl.face_id=rf.id WHERE rf.image_id=i.id AND tl.role='evaluation' AND tl.kind='person' AND pr.person_id=tl.person_id)",
+                    "high_confidence": "EXISTS (SELECT 1 FROM predictions pr JOIN faces rf ON rf.id=pr.face_id WHERE rf.image_id=i.id AND pr.category='high_confidence')",
+                    "high_confidence_false_positive": "EXISTS (SELECT 1 FROM predictions pr JOIN faces rf ON rf.id=pr.face_id JOIN labels tl ON tl.face_id=rf.id WHERE rf.image_id=i.id AND tl.role='evaluation' AND pr.category='high_confidence' AND ((tl.kind='person' AND (pr.person_id IS NULL OR pr.person_id<>tl.person_id)) OR (tl.kind<>'person' AND pr.person_id IS NOT NULL)))",
+                    "incorrect_review": "EXISTS (SELECT 1 FROM post_reviews rv JOIN faces rf ON rf.id=rv.face_id WHERE rf.image_id=i.id AND rv.outcome='incorrect')",
+                    "appropriately_unknown_review": "EXISTS (SELECT 1 FROM post_reviews rv JOIN faces rf ON rf.id=rv.face_id WHERE rf.image_id=i.id AND rv.outcome='appropriately_unknown')",
+                    "too_cautious": "EXISTS (SELECT 1 FROM post_reviews rv JOIN faces rf ON rf.id=rv.face_id WHERE rf.image_id=i.id AND rv.outcome='too_cautious')",
+                    "too_confident": "EXISTS (SELECT 1 FROM post_reviews rv JOIN faces rf ON rf.id=rv.face_id WHERE rf.image_id=i.id AND rv.outcome='too_confident')",
+                }
+                result_where = f" AND {result_conditions[result_type]}" if result_type in result_conditions else ""
+                rows = db.execute(
+                    f"SELECT i.id,i.relative_path,i.capture_date,i.width,i.height,COUNT(DISTINCT f.id) face_count,COUNT(DISTINCT l.face_id) labeled_count,COUNT(DISTINCT CASE WHEN l.kind='person' AND l.person_id IS NOT NULL THEN f.id END) assigned_count FROM images i LEFT JOIN faces f ON f.image_id=i.id LEFT JOIN labels l ON l.face_id=f.id WHERE i.relative_path LIKE ?{result_where} GROUP BY i.id{status_having} ORDER BY {order_column} COLLATE NOCASE, i.relative_path COLLATE NOCASE",
+                    (f"%{filter_text}%",),
+                ).fetchall(); self.send_json([dict(r) for r in rows]); return
+            if self.path == "/api/people":
+                people = [dict(r) for r in db.execute("SELECT p.id,p.label,MAX(l.created_at) last_used,COUNT(DISTINCT l.face_id) face_count FROM people p LEFT JOIN labels l ON l.person_id=p.id AND l.kind='person' GROUP BY p.id ORDER BY p.label COLLATE NOCASE")]
+                recent_ids = {person["id"] for person in sorted(people, key=lambda item: (item["last_used"] or "", item["label"].lower()), reverse=True)[:10] if person["last_used"]}
+                for person in people:
+                    person["recent"] = person["id"] in recent_ids
+                people.sort(key=lambda item: (not item["recent"], item["label"].lower()))
+                self.send_json(people); return
+            if self.path.startswith("/api/person/") and self.path.endswith("/photos"):
+                person_id = int(self.path.split("/")[3])
+                person = db.execute("SELECT p.id,p.label,COUNT(DISTINCT CASE WHEN l.role='reference' THEN l.face_id END) reference_count FROM people p LEFT JOIN labels l ON l.person_id=p.id AND l.kind='person' WHERE p.id=? GROUP BY p.id", (person_id,)).fetchone()
+                if not person:
+                    self.send_json({"error": "person not found"}, 404); return
+                rows = db.execute("SELECT i.id image_id,i.relative_path,i.width,i.height,f.id face_id,f.x1,f.y1,f.x2,f.y2,f.face_index,l.role FROM images i JOIN faces f ON f.image_id=i.id JOIN labels l ON l.face_id=f.id AND l.person_id=? AND l.kind='person' ORDER BY i.relative_path,f.face_index", (person_id,)).fetchall()
+                self.send_json({"person": dict(person), "photos": [dict(row) for row in rows]}); return
             if self.path == "/api/clusters": self.send_json(provisional_clusters(db)); return
             if self.path.startswith("/api/photo/"):
                 image_id = int(self.path.rsplit("/", 1)[1]); image = db.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone(); faces=[]
                 for f in db.execute("SELECT f.*,l.kind,l.role,l.person_id,p.label person_label,pr.person_label prediction_label,pr.category,pr.similarity,pr.candidates_json FROM faces f LEFT JOIN labels l ON l.face_id=f.id LEFT JOIN people p ON p.id=l.person_id LEFT JOIN predictions pr ON pr.face_id=f.id WHERE f.image_id=? ORDER BY f.face_index", (image_id,)):
-                    item=dict(f); item["box"]=[item.pop("x1"),item.pop("y1"),item.pop("x2"),item.pop("y2")]; item["prediction"] = None if not item.pop("prediction_label") else {"person_label": item.pop("prediction_label"),"category":item.pop("category"),"similarity":item.pop("similarity"),"candidates":json.loads(item.pop("candidates_json"))}; faces.append(item)
+                    item = {
+                        "id": f["id"],
+                        "index": f["face_index"],
+                        "box": [f["x1"], f["y1"], f["x2"], f["y2"]],
+                        "detection_confidence": f["detection_confidence"],
+                        "quality": f["quality"],
+                        "kind": f["kind"],
+                        "role": f["role"],
+                        "person_id": f["person_id"],
+                        "person_label": f["person_label"],
+                    }
+                    if f["prediction_label"]:
+                        item["prediction"] = {
+                            "person_label": f["prediction_label"],
+                            "category": f["category"],
+                            "similarity": f["similarity"],
+                            "candidates": json.loads(f["candidates_json"]),
+                        }
+                    else:
+                        item["prediction"] = None
+                    faces.append(item)
                 self.send_json({"id":image_id,"relative_path":image["relative_path"],"width":image["width"],"height":image["height"],"faces":faces}); return
             if self.path.startswith("/image/"):
                 image = db.execute("SELECT absolute_path FROM images WHERE id=?", (int(self.path.rsplit("/",1)[1]),)).fetchone(); path=Path(image["absolute_path"])
@@ -458,10 +609,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if self.path == "/api/reveal": self.send_json(generate_predictions(db, {**default_settings(), **{k: payload[k] for k in ("similarity_threshold", "margin_threshold", "min_support", "quality_threshold") if k in payload}})); return
             if self.path == "/api/post-review":
                 db.execute("INSERT OR REPLACE INTO post_reviews(face_id,outcome,note,created_at) VALUES(?,?,?,?)", (int(payload["face_id"]), str(payload["outcome"]), payload.get("note"), utc_now())); db.commit(); self.send_json({"ok": True}); return
+            if self.path == "/api/unassign":
+                db.execute("DELETE FROM labels WHERE face_id=? AND kind='person'", (int(payload["face_id"]),)); db.commit(); self.send_json({"ok": True}); return
+            if self.path == "/api/set-role":
+                role = str(payload["role"])
+                if role not in ("reference", "evaluation"):
+                    self.send_json({"error": "role must be reference or evaluation"}, 400); return
+                db.execute("UPDATE labels SET role=?,created_at=? WHERE face_id=? AND kind='person'", (role, utc_now(), int(payload["face_id"]))); db.commit(); self.send_json({"ok": True}); return
             if self.path == "/api/missed":
                 db.execute("INSERT INTO missed_faces(image_id,note,reviewer,created_at) VALUES(?,?,?,?)", (int(payload["image_id"]), payload.get("note"), "local-user", utc_now())); db.commit(); self.send_json({"ok": True}); return
             if self.path == "/api/analyze":
-                stamp=datetime.now().strftime("%Y%m%d_%H%M%S"); result=analyze_db(db,default_settings()); (self.root/f"report-{stamp}.json").write_text(json.dumps(result,indent=2)+"\n"); self.send_json({"ok":True}); return
+                stamp=datetime.now().strftime("%Y%m%d_%H%M%S"); settings=latest_settings(db); result=analyze_db(db,settings); result["generated_at"] = utc_now(); (self.root/f"report-{stamp}.json").write_text(json.dumps(result,indent=2)+"\n"); (self.root/f"report-{stamp}.md").write_text(markdown_report(result)); self.send_json({"ok":True,"report":f"report-{stamp}"}); return
             self.send_error(404)
         except Exception as exc:
             self.send_json({"error":f"{type(exc).__name__}: {exc}"},400)
@@ -482,6 +640,7 @@ def serve(args: argparse.Namespace) -> int:
 def main() -> int:
     parser=argparse.ArgumentParser(description=__doc__); sub=parser.add_subparsers(dest="command",required=True)
     imp=sub.add_parser("import",help="import photos and run inference"); imp.add_argument("directory",type=Path); imp.add_argument("--experiment",type=Path,required=True); imp.add_argument("--provider",choices=("auto","coreml","cpu"),default="auto"); imp.add_argument("--det-size",type=int,default=640); imp.add_argument("--omit-paths",action="store_true",help="do not store source paths; disables browser image display"); imp.set_defaults(func=import_experiment)
+    dates=sub.add_parser("backfill-dates",help="populate empty capture_date values from file creation times"); dates.add_argument("--experiment",type=Path,required=True); dates.set_defaults(func=backfill_dates)
     srv=sub.add_parser("serve",help="start local review service"); srv.add_argument("--experiment",type=Path,required=True); srv.add_argument("--host",default="127.0.0.1"); srv.add_argument("--port",type=int,default=8765); srv.set_defaults(func=serve)
     ana=sub.add_parser("analyze",help="write analysis reports"); ana.add_argument("--experiment",type=Path,required=True); ana.add_argument("--similarity-threshold",type=float); ana.add_argument("--margin-threshold",type=float); ana.add_argument("--min-support",type=int); ana.add_argument("--quality-threshold",type=float); ana.add_argument("--sweep",action="store_true",help="evaluate a standard threshold/margin/support/quality grid"); ana.set_defaults(func=analyze_experiment)
     args=parser.parse_args(); return args.func(args)
