@@ -351,6 +351,49 @@ detection or embedding generation. This is the preferred way to compare
 several operating points after the blind labels and reference gallery are
 complete.
 
+### Calibration command
+
+To analyze settings before revealing candidates, build a reusable full-gallery
+score matrix and run a policy sweep:
+
+```sh
+python prototypes/model_settings_review/src/review_tool.py calibrate \
+  --experiment /path/to/experiments/sample
+```
+
+The default sweep covers similarity thresholds from `0.25` through `0.55`,
+margin thresholds from `0.00` through `0.15`, support counts `1,2,3`, and
+quality thresholds `0.20,0.25,0.30,0.35`. Narrow or customize the sweep with:
+
+```sh
+python prototypes/model_settings_review/src/review_tool.py calibrate \
+  --experiment /path/to/experiments/sample \
+  --similarity-range 0.25:0.55:0.01 \
+  --margin-range 0.00:0.15:0.01 \
+  --support-values 1,2,3 \
+  --quality-values 0.20,0.25,0.30,0.35 \
+  --near-miss-gap 0.05
+```
+
+Each calibration run creates a timestamped directory containing:
+
+- `score_matrix.jsonl`: full-gallery scores and correct-person ranks;
+- `calibration.json`: all sweep settings and metrics;
+- `report.md`: recommended candidate operating point and interpretation; and
+- `charts.html`: a three-column visual comparison of all faces, faces whose
+  assigned person has reference faces, and faces whose assigned person does
+  not have reference faces; and
+- `charts/{all,reference,non_reference}/`: similarity, margin,
+  threshold-tradeoff, heatmap, and outcome-mix SVG charts for each population.
+  The similarity and margin charts include both full-range and focused views
+  (`0.20–1.00` and `0.10–1.00`, respectively); the focused views note that
+  lower scores were omitted.
+
+Calibration requires complete blind labels and at least one reference face.
+It does not rerun face detection or embedding generation. It separates people
+with no reference examples from normal recognition accuracy and identifies
+near misses where the correct person is close to the winning candidate.
+
 ### Interpreting the generated report
 
 The report contains:

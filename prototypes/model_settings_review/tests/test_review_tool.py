@@ -72,6 +72,27 @@ class ReviewToolTests(unittest.TestCase):
         self.assertEqual(row["person_id"], alice)
         self.assertEqual(row["category"], "high_confidence")
 
+    def test_calibration_classifies_missing_reference_and_near_miss(self):
+        row = {
+            "truth_person_id": 2,
+            "represented": True,
+            "top_person_id": 1,
+            "top_similarity": 0.61,
+            "second_similarity": 0.60,
+            "margin": 0.01,
+            "true_similarity": 0.59,
+            "quality": 0.9,
+            "person_scores": [{"person_id": 1, "support_count": 2}],
+        }
+        result = review_tool.classify_calibration_row(row, {"similarity_threshold": .45, "margin_threshold": .05, "min_support": 1, "quality_threshold": .25}, {2}, .03)
+        self.assertEqual(result["comparison"], "incorrect_prediction")
+        self.assertEqual(result["decision"], "review")
+        self.assertTrue(result["near_miss"])
+
+        row["truth_person_id"] = 3
+        result = review_tool.classify_calibration_row(row, {"similarity_threshold": .45, "margin_threshold": .05, "min_support": 1, "quality_threshold": .25}, {2}, .03)
+        self.assertEqual(result["comparison"], "known_person_without_reference")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -347,6 +348,29 @@ def latest_settings(db: sqlite3.Connection) -> dict[str, Any]:
     return {**default_settings(), **settings}
 
 
+def parse_range(value: str) -> list[float]:
+    parts = [float(part) for part in value.split(":")]
+    if len(parts) == 1:
+        return parts
+    if len(parts) != 3 or parts[2] <= 0:
+        raise ValueError(f"Range must be VALUE or START:STOP:STEP: {value}")
+    start, stop, step = parts
+    values = []
+    current = start
+    while current <= stop + step / 1000:
+        values.append(round(current, 6))
+        current += step
+    return values
+
+
+def parse_int_values(value: str) -> list[int]:
+    return [int(part) for part in value.split(",") if part.strip()]
+
+
+def parse_float_values(value: str) -> list[float]:
+    return [float(part) for part in value.split(",") if part.strip()]
+
+
 def provisional_clusters(db: sqlite3.Connection, threshold: float = 0.55) -> list[dict[str, Any]]:
     """Return a simple review aid; this is deliberately not a final clusterer."""
     groups: list[dict[str, Any]] = []
@@ -366,6 +390,378 @@ def provisional_clusters(db: sqlite3.Connection, threshold: float = 0.55) -> lis
             selected["items"].append(item)
             selected["centroid"] = (selected["centroid"] * (len(selected["items"]) - 1) + current) / len(selected["items"])
     return [{"id": index + 1, "face_count": len(group["items"]), "faces": group["items"]} for index, group in enumerate(groups)]
+
+
+def build_score_matrix(db: sqlite3.Connection) -> tuple[list[dict[str, Any]], set[int]]:
+    total, labeled = reviewed(db)
+    if total != labeled:
+        raise ValueError(f"Blind review incomplete: {labeled}/{total} faces labeled")
+    refs = db.execute("SELECT f.embedding,l.person_id,p.label FROM faces f JOIN labels l ON l.face_id=f.id JOIN people p ON p.id=l.person_id WHERE l.role='reference' AND l.kind='person'").fetchall()
+    if not refs:
+        raise ValueError("At least one reference face is required before calibration")
+    reference_people = {row["person_id"] for row in refs}
+    gallery: dict[int, dict[str, Any]] = {}
+    for row in refs:
+        gallery.setdefault(row["person_id"], {"label": row["label"], "examples": []})["examples"].append(vector(row["embedding"]))
+    evaluations = db.execute("SELECT f.id face_id,f.embedding,f.quality,f.detection_confidence,f.image_id,i.relative_path,l.kind truth_kind,l.person_id truth_person_id FROM faces f JOIN images i ON i.id=f.image_id JOIN labels l ON l.face_id=f.id WHERE l.role='evaluation' ORDER BY f.id").fetchall()
+    matrix: list[dict[str, Any]] = []
+    for row in evaluations:
+        query = vector(row["embedding"])
+        scores = []
+        for person_id, person in gallery.items():
+            values = sorted((cosine(query, example) for example in person["examples"]), reverse=True)
+            scores.append({"person_id": person_id, "label": person["label"], "similarity": values[0], "support_count": len(values)})
+        scores.sort(key=lambda item: item["similarity"], reverse=True)
+        true_person = row["truth_person_id"] if row["truth_kind"] == "person" else None
+        true_score = next((item["similarity"] for item in scores if item["person_id"] == true_person), None)
+        true_rank = next((index + 1 for index, item in enumerate(scores) if item["person_id"] == true_person), None)
+        top = scores[0]
+        second = scores[1]["similarity"] if len(scores) > 1 else 0.0
+        matrix.append({
+            "face_id": row["face_id"], "image_id": row["image_id"], "relative_path": row["relative_path"],
+            "quality": row["quality"], "detection_confidence": row["detection_confidence"],
+            "truth_kind": row["truth_kind"], "truth_person_id": true_person,
+            "represented": true_person in reference_people if true_person is not None else False,
+            "top_person_id": top["person_id"], "top_person_label": top["label"],
+            "top_similarity": top["similarity"], "second_similarity": second,
+            "margin": top["similarity"] - second, "true_similarity": true_score,
+            "true_rank": true_rank, "person_scores": scores,
+        })
+    return matrix, reference_people
+
+
+def classify_calibration_row(row: dict[str, Any], settings: dict[str, Any], reference_people: set[int], near_miss_gap: float) -> dict[str, Any]:
+    true_person = row["truth_person_id"]
+    if row["quality"] < settings["quality_threshold"] or row["top_similarity"] < settings["similarity_threshold"]:
+        decision = "unknown"
+    elif row["margin"] < settings["margin_threshold"] or row["person_scores"][0]["support_count"] < settings["min_support"]:
+        decision = "review"
+    else:
+        decision = "high_confidence"
+    if true_person is not None and true_person not in reference_people:
+        comparison = "known_person_without_reference"
+    elif row["top_person_id"] == true_person and true_person is not None:
+        comparison = "correct"
+    elif true_person is None and decision == "unknown":
+        comparison = "unknown_correct"
+    else:
+        comparison = "incorrect_prediction"
+    near_miss = bool(true_person is not None and row["represented"] and comparison != "correct" and row["true_similarity"] is not None and row["top_similarity"] - row["true_similarity"] <= near_miss_gap)
+    return {"comparison": comparison, "decision": decision, "near_miss": near_miss}
+
+
+def evaluate_calibration(matrix: list[dict[str, Any]], reference_people: set[int], settings: dict[str, Any], near_miss_gap: float) -> dict[str, Any]:
+    counts = Counter({"correct": 0, "unknown_correct": 0, "incorrect_prediction": 0, "known_person_without_reference": 0, "review": 0, "unknown": 0, "high_confidence": 0, "near_miss": 0})
+    represented = 0
+    for row in matrix:
+        result = classify_calibration_row(row, settings, reference_people, near_miss_gap)
+        counts[result["comparison"]] += 1
+        counts[result["decision"]] += 1
+        counts["near_miss"] += int(result["near_miss"])
+        represented += int(row["represented"])
+    total = len(matrix)
+    suggested = counts["high_confidence"]
+    counts["evaluation_faces"] = total
+    counts["represented_faces"] = represented
+    counts["unrepresented_faces"] = total - represented
+    counts["coverage"] = round(suggested / total, 4) if total else 0.0
+    counts["accuracy_on_all"] = round((counts["correct"] + counts["unknown_correct"]) / total, 4) if total else None
+    high_confidence_correct = 0
+    for row in matrix:
+        result = classify_calibration_row(row, settings, reference_people, near_miss_gap)
+        if result["decision"] == "high_confidence" and result["comparison"] in ("correct", "unknown_correct"):
+            high_confidence_correct += 1
+    counts["high_confidence_correct"] = high_confidence_correct
+    counts["high_confidence_precision"] = round(high_confidence_correct / suggested, 4) if suggested else None
+    counts["high_confidence_false_positives"] = sum(1 for row in matrix if classify_calibration_row(row, settings, reference_people, near_miss_gap)["decision"] == "high_confidence" and classify_calibration_row(row, settings, reference_people, near_miss_gap)["comparison"] not in ("correct", "unknown_correct"))
+    return {**dict(counts), **settings, "settings": settings, "near_miss_gap": near_miss_gap}
+
+
+def svg_histogram(path: Path, series: dict[str, list[float]], title: str, minimum: float, maximum: float, x_tick_interval: float = 0.2, note: str | None = None) -> None:
+    width, height = 820, 480
+    left, top, right, bottom = 70, 75, 25, 65
+    plot_width, plot_height = width - left - right, height - top - bottom
+    bins = 20
+    colors = ["#2673c9", "#d64b4b", "#43a047", "#8e5bb7"]
+    counts_by_series = []
+    for values in series.values():
+        counts = [0] * bins
+        for value in values:
+            if value < minimum or value > maximum:
+                continue
+            index = min(bins - 1, max(0, int((value - minimum) / max(1e-9, maximum - minimum) * bins)))
+            counts[index] += 1
+        counts_by_series.append(counts)
+    max_count = max([1] + [count for counts in counts_by_series for count in counts])
+    elements = [f'<text x="{left}" y="28" font-size="18">{html.escape(title)}</text>']
+    for index, (label, _) in enumerate(series.items()):
+        x = left + index * 175
+        elements.append(f'<rect x="{x}" y="43" width="12" height="12" fill="{colors[index % len(colors)]}"/><text x="{x+18}" y="54">{html.escape(label)}</text>')
+    elements.append(f'<rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="#fafafa" stroke="#ddd"/>')
+    for tick in range(6):
+        value = max_count * tick / 5
+        y = top + plot_height - plot_height * tick / 5
+        elements.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left+plot_width}" y2="{y:.1f}" stroke="#ddd"/>')
+        elements.append(f'<text x="{left-8}" y="{y+4:.1f}" text-anchor="end">{value:.0f}</text>')
+    group_width = plot_width / bins
+    bar_width = group_width / max(1, len(series)) * .86
+    for series_index, counts in enumerate(counts_by_series):
+        for index, count in enumerate(counts):
+            bar_height = plot_height * count / max_count
+            x = left + index * group_width + series_index * bar_width
+            y = top + plot_height - bar_height
+            elements.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_width-1:.1f}" height="{bar_height:.1f}" fill="{colors[series_index % len(colors)]}" opacity=".78"/>')
+    for value in _regular_tick_values([minimum, maximum], x_tick_interval):
+        x = left + plot_width * (value - minimum) / max(1e-9, maximum - minimum)
+        elements.append(f'<line x1="{x:.1f}" y1="{top+plot_height}" x2="{x:.1f}" y2="{top+plot_height+5}" stroke="black"/><text x="{x:.1f}" y="{top+plot_height+22}" text-anchor="middle">{value:.2f}</text>')
+    elements.append(f'<text x="{left+plot_width/2}" y="{height-12}" text-anchor="middle">score</text><text x="18" y="{top+plot_height/2}" transform="rotate(-90 18 {top+plot_height/2})" text-anchor="middle">number of faces</text>')
+    if note:
+        elements.append(f'<text x="{left}" y="{height-30}" font-size="11">{html.escape(note)}</text>')
+    path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">{"".join(elements)}</svg>\n')
+
+
+def svg_line_chart(path: Path, rows: list[dict[str, Any]], title: str, x_key: str) -> None:
+    width, height = 820, 480
+    left, top, right, bottom = 70, 75, 25, 65
+    plot_width, plot_height = width - left - right, height - top - bottom
+    if not rows:
+        path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><text x="20" y="30">{html.escape(title)}: no data</text></svg>\n'); return
+    x_values = [float(row[x_key]) for row in rows]
+    series = [("high-confidence precision", "high_confidence_precision", "#2673c9"), ("coverage", "coverage", "#43a047"), ("high-confidence false-positive rate", "high_confidence_false_positives", "#d64b4b"), ("top-1 accuracy", "accuracy_on_all", "#8e5bb7")]
+    elements = [f'<text x="{left}" y="28" font-size="18">{html.escape(title)}</text>', f'<rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" fill="#fafafa" stroke="#ddd"/>']
+    for index, (label, _, color) in enumerate(series):
+        x = left + index * 210
+        elements.append(f'<line x1="{x}" y1="48" x2="{x+14}" y2="48" stroke="{color}" stroke-width="3"/><text x="{x+20}" y="53">{html.escape(label)}</text>')
+    for tick in range(6):
+        value = tick / 5
+        y = top + plot_height - plot_height * value
+        elements.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left+plot_width}" y2="{y:.1f}" stroke="#ddd"/><text x="{left-8}" y="{y+4:.1f}" text-anchor="end">{value:.1f}</text>')
+    for label, key, color in series:
+        points = []
+        for row in rows:
+            value = float(row.get(key, 0))
+            if key == "high_confidence_false_positives": value = value / max(1, row.get("evaluation_faces", 1))
+            x = left + (float(row[x_key]) - min(x_values)) / max(1e-9, max(x_values) - min(x_values)) * plot_width
+            y = top + plot_height - value * plot_height
+            points.append(f"{x:.1f},{y:.1f}")
+        elements.append(f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" stroke-width="2"/>')
+    tick_values = [round(value, 2) for value in _regular_tick_values(x_values, 0.05)]
+    for value in tick_values:
+        position = (value - min(x_values)) / max(1e-9, max(x_values) - min(x_values))
+        x = left + position * plot_width
+        elements.append(f'<line x1="{x:.1f}" y1="{top+plot_height}" x2="{x:.1f}" y2="{top+plot_height+5}" stroke="black"/><text x="{x:.1f}" y="{top+plot_height+22}" text-anchor="middle">{value:.2f}</text>')
+    elements.append(f'<text x="{left+plot_width/2}" y="{height-12}" text-anchor="middle">{html.escape(x_key.replace("_", " "))}</text><text x="18" y="{top+plot_height/2}" transform="rotate(-90 18 {top+plot_height/2})" text-anchor="middle">rate</text>')
+    path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">{"".join(elements)}</svg>\n')
+
+
+def _regular_tick_values(values: list[float], interval: float) -> list[float]:
+    """Return values in the input range at a readable, fixed interval."""
+    if not values:
+        return []
+    minimum = min(values)
+    maximum = max(values)
+    first = math.ceil((minimum - 1e-9) / interval) * interval
+    ticks = []
+    value = first
+    while value <= maximum + 1e-9:
+        ticks.append(round(value, 10))
+        value += interval
+    return ticks or [minimum]
+
+
+def _heatmap_color(score: float) -> str:
+    """Use a fixed 0.90-1.00 scale with distinct color bands."""
+    stops = [
+        (0.90, (139, 58, 58)),   # dark red
+        (0.92, (199, 119, 43)),  # orange
+        (0.94, (217, 182, 74)),  # gold
+        (0.96, (139, 195, 74)),  # yellow-green
+        (0.98, (67, 160, 71)),   # green
+        (1.00, (0, 200, 83)),     # bright green
+    ]
+    if score <= stops[0][0]:
+        return f"rgb({','.join(str(value) for value in stops[0][1])})"
+    if score >= stops[-1][0]:
+        return f"rgb({','.join(str(value) for value in stops[-1][1])})"
+    for (low_score, low_color), (high_score, high_color) in zip(stops, stops[1:]):
+        if score <= high_score:
+            normalized = (score - low_score) / (high_score - low_score)
+            color = [round(low_color[index] + (high_color[index] - low_color[index]) * normalized) for index in range(3)]
+            return f"rgb({','.join(str(value) for value in color)})"
+    # Defensive fallback; all finite scores are handled by the branches above.
+    color = stops[-1][1]
+    return f"rgb({','.join(str(value) for value in color)})"
+
+
+def svg_heatmap(path: Path, rows: list[dict[str, Any]], title: str, score_precision: int = 2) -> None:
+    width, height = 920, 500
+    left, top, right, bottom = 85, 75, 110, 80
+    plot_width, plot_height = width - left - right, height - top - bottom
+    if not rows:
+        path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}"><text x="20" y="30">{html.escape(title)}: no data</text></svg>\n'); return
+    x_values = sorted({row["similarity_threshold"] for row in rows})
+    y_values = sorted({row["margin_threshold"] for row in rows})
+    lookup = {(row["similarity_threshold"], row["margin_threshold"]): row for row in rows}
+    cell_width = plot_width / max(1, len(x_values))
+    cell_height = plot_height / max(1, len(y_values))
+    elements = [f'<text x="{left}" y="28" font-size="18">{html.escape(title)}</text>']
+    for yi, y_value in enumerate(y_values):
+        for xi, x_value in enumerate(x_values):
+            row = lookup.get((x_value, y_value))
+            score = float(row.get("high_confidence_precision") or 0) if row else 0.0
+            elements.append(f'<rect x="{left + xi*cell_width:.1f}" y="{top + plot_height-(yi+1)*cell_height:.1f}" width="{cell_width+0.5:.1f}" height="{cell_height+0.5:.1f}" fill="{_heatmap_color(score)}"/>')
+            if cell_width > 18 and cell_height > 14:
+                elements.append(f'<text x="{left + (xi+0.5)*cell_width:.1f}" y="{top + plot_height-(yi+0.5)*cell_height+4:.1f}" text-anchor="middle" font-size="10">{score:.{score_precision}f}</text>')
+    for value in _regular_tick_values(x_values, 0.05):
+        index = min(range(len(x_values)), key=lambda candidate: abs(x_values[candidate] - value))
+        x = left + (index + .5) * cell_width
+        elements.append(f'<text x="{x:.1f}" y="{top+plot_height+20}" text-anchor="middle">{value:.2f}</text>')
+    for index, value in enumerate(y_values):
+        y = top + plot_height - (index + .5) * cell_height
+        elements.append(f'<text x="{left-8}" y="{y+4:.1f}" text-anchor="end">{value:.2f}</text>')
+    for index in range(6):
+        score = 0.90 + index * 0.02
+        x = left + plot_width + 12
+        y = top + plot_height - score * plot_height
+        # The legend is positioned independently of the chart's 0-1 y scale.
+        legend_y = top + plot_height - index * plot_height / 5
+        elements.append(f'<rect x="{x}" y="{legend_y-6:.1f}" width="12" height="12" fill="{_heatmap_color(score)}"/><text x="{x+16}" y="{legend_y+4:.1f}">{score:.2f}</text>')
+    elements.append(f'<text x="{left+plot_width/2}" y="{height-25}" text-anchor="middle">similarity threshold</text><text x="18" y="{top+plot_height/2}" transform="rotate(-90 18 {top+plot_height/2})" text-anchor="middle">margin threshold</text><text x="{left+plot_width+5}" y="{top-10}">precision</text>')
+    path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">{"".join(elements)}</svg>\n')
+
+
+def svg_outcome_bars(path: Path, rows: list[dict[str, Any]], title: str, x_key: str) -> None:
+    width, height = 820, 500
+    left, top, right, bottom = 70, 75, 25, 70
+    plot_width, plot_height = width - left - right, height - top - bottom
+    colors = [("high_confidence", "#2673c9"), ("review", "#e0a21a"), ("unknown", "#999999")]
+    bar_width = plot_width / max(1, len(rows)) * 0.72
+    elements = [f'<text x="{left}" y="28" font-size="18">{html.escape(title)}</text>']
+    for index, (key, color) in enumerate(colors):
+        x = left + index * 150
+        elements.append(f'<rect x="{x}" y="43" width="12" height="12" fill="{color}"/><text x="{x+18}" y="54">{key.replace("_", " ")}</text>')
+    for index, row in enumerate(rows):
+        total = max(1, row.get("evaluation_faces", 1))
+        x = left + index * plot_width / max(1, len(rows)) + (plot_width / max(1, len(rows)) - bar_width) / 2
+        bottom = top + plot_height
+        for key, color in colors:
+            value = row.get(key, 0) / total
+            bar_height = value * plot_height
+            bottom -= bar_height
+            elements.append(f'<rect x="{x:.1f}" y="{bottom:.1f}" width="{bar_width:.1f}" height="{bar_height:.1f}" fill="{color}"/>')
+    for value in _regular_tick_values([float(row[x_key]) for row in rows], 0.05):
+        index = min(range(len(rows)), key=lambda candidate: abs(float(rows[candidate][x_key]) - value))
+        x = left + index * plot_width / max(1, len(rows)) + plot_width / max(1, len(rows)) / 2
+        elements.append(f'<line x1="{x:.1f}" y1="{top+plot_height}" x2="{x:.1f}" y2="{top+plot_height+5}" stroke="black"/><text x="{x:.1f}" y="{top+plot_height+22}" text-anchor="middle">{value:.2f}</text>')
+    for tick in range(6):
+        value = tick / 5
+        y = top + plot_height - value * plot_height
+        elements.append(f'<line x1="{left}" y1="{y:.1f}" x2="{left+plot_width}" y2="{y:.1f}" stroke="#ddd"/><text x="{left-8}" y="{y+4:.1f}" text-anchor="end">{value:.1f}</text>')
+    elements.append(f'<text x="{left+plot_width/2}" y="{height-15}" text-anchor="middle">{html.escape(x_key.replace("_", " "))}</text><text x="18" y="{top+plot_height/2}" transform="rotate(-90 18 {top+plot_height/2})" text-anchor="middle">proportion of evaluation faces</text>')
+    path.write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">{"".join(elements)}</svg>\n')
+
+
+def render_chart_set(charts: Path, matrix: list[dict[str, Any]], sweep: list[dict[str, Any]]) -> None:
+    """Render one chart set for a selected population of evaluation faces."""
+    charts.mkdir(parents=True, exist_ok=True)
+    correct_scores = [row["top_similarity"] for row in matrix if row["top_person_id"] == row["truth_person_id"] and row["truth_person_id"] is not None]
+    other_scores = [row["top_similarity"] for row in matrix if row["top_person_id"] != row["truth_person_id"] or row["truth_person_id"] is None]
+    correct_margins = [row["margin"] for row in matrix if row["top_person_id"] == row["truth_person_id"] and row["truth_person_id"] is not None]
+    other_margins = [row["margin"] for row in matrix if row["top_person_id"] != row["truth_person_id"] or row["truth_person_id"] is None]
+    svg_histogram(charts / "similarity.svg", {"top correct": correct_scores, "other": other_scores}, "Top similarity scores", 0.0, 1.0, x_tick_interval=0.1)
+    svg_histogram(charts / "similarity_020_100.svg", {"top correct": correct_scores, "other": other_scores}, "Top similarity scores (0.20–1.00)", 0.2, 1.0, x_tick_interval=0.1, note="Scores below 0.20 are omitted from this chart.")
+    svg_histogram(charts / "margin.svg", {"correct": correct_margins, "other": other_margins}, "Top-two margins", 0.0, 1.0, x_tick_interval=0.1)
+    svg_histogram(charts / "margin_010_100.svg", {"correct": correct_margins, "other": other_margins}, "Top-two margins (0.10–1.00)", 0.1, 1.0, x_tick_interval=0.1, note="Scores below 0.10 are omitted from this chart.")
+    if not matrix:
+        return
+    margin_values = sorted({row["margin_threshold"] for row in sweep})
+    support_values = sorted({row["min_support"] for row in sweep})
+    quality_values = sorted({row["quality_threshold"] for row in sweep})
+    curve = [row for row in sweep if row["margin_threshold"] == (0.05 if 0.05 in margin_values else margin_values[0]) and row["min_support"] == (1 if 1 in support_values else support_values[0]) and row["quality_threshold"] == (0.25 if 0.25 in quality_values else quality_values[0])]
+    curve.sort(key=lambda row: row["similarity_threshold"])
+    svg_line_chart(charts / "threshold_curve.svg", curve, "Similarity threshold tradeoffs", "similarity_threshold")
+    heatmap_rows = [row for row in sweep if row["min_support"] == (1 if 1 in support_values else support_values[0]) and row["quality_threshold"] == (0.25 if 0.25 in quality_values else quality_values[0])]
+    svg_heatmap(charts / "similarity_margin_heatmap.svg", heatmap_rows, "High-confidence precision by similarity and margin")
+    focused_heatmap_rows = [row for row in heatmap_rows if 0.25 <= row["similarity_threshold"] <= 0.35]
+    svg_heatmap(charts / "similarity_margin_heatmap_025_035.svg", focused_heatmap_rows, "High-confidence precision by similarity and margin (0.25–0.35)", score_precision=4)
+    svg_outcome_bars(charts / "outcome_thresholds.svg", curve, "Outcome mix by similarity threshold", "similarity_threshold")
+
+
+def write_chart_index(output: Path) -> None:
+    """Write a visual comparison page for all, reference, and non-reference faces."""
+    columns = [("All faces", "all"), ("Faces with reference people", "reference"), ("Faces without reference people", "non_reference")]
+    rows = [
+        ("Top similarity scores", "similarity.svg", "similarity_020_100.svg"),
+        ("Top-two margins", "margin.svg", "margin_010_100.svg"),
+        ("Similarity threshold tradeoffs", "threshold_curve.svg", None),
+        ("Precision by similarity and margin", "similarity_margin_heatmap.svg", "similarity_margin_heatmap_025_035.svg"),
+        ("Outcome mix by similarity threshold", "outcome_thresholds.svg", None),
+    ]
+    lines = ["<!doctype html>", '<html lang="en"><head><meta charset="utf-8"><title>Calibration chart comparison</title>', "<style>body{font-family:system-ui,sans-serif;margin:1rem} table{border-collapse:collapse;width:100%;table-layout:fixed} th,td{border:1px solid #ccc;vertical-align:top;padding:.5rem} th{background:#f4f4f4} td img{width:100%;height:auto;display:block;margin-bottom:.75rem} h1{font-size:1.4rem} h2{font-size:1rem}</style>", "</head><body>", "<h1>Calibration chart comparison</h1>", "<p>Each column uses the same chart and calibration settings, filtered by evaluation-face population.</p>", '<table><thead><tr><th width="75">Graph</th>']
+    lines.extend(f"<th>{html.escape(label)}</th>" for label, _ in columns)
+    lines.append("</tr></thead><tbody>")
+    for title, full_name, focused_name in rows:
+        lines.append(f"<tr><th>{html.escape(title)}</th>")
+        for _, directory in columns:
+            images = [f'<img src="charts/{directory}/{full_name}" alt="{html.escape(title)} — {directory}">']
+            if focused_name:
+                images.append(f'<img src="charts/{directory}/{focused_name}" alt="Focused {html.escape(title)} — {directory}">')
+            lines.append(f"<td>{''.join(images)}</td>")
+        lines.append("</tr>")
+    lines += ["</tbody></table>", "</body></html>", ""]
+    (output / "charts.html").write_text("\n".join(lines))
+
+
+def calibrate_experiment(args: argparse.Namespace) -> int:
+    experiment = args.experiment.resolve()
+    db = connect(experiment)
+    init_db(db)
+    matrix, reference_people = build_score_matrix(db)
+    similarity_values = parse_range(args.similarity_range)
+    margin_values = parse_range(args.margin_range)
+    support_values = parse_int_values(args.support_values)
+    quality_values = parse_float_values(args.quality_values)
+    sweep = []
+    for similarity in similarity_values:
+        for margin in margin_values:
+            for support in support_values:
+                for quality in quality_values:
+                    settings = {"similarity_threshold": similarity, "margin_threshold": margin, "min_support": support, "quality_threshold": quality}
+                    sweep.append(evaluate_calibration(matrix, reference_people, settings, args.near_miss_gap))
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = experiment / f"calibration-{stamp}"
+    charts = output / "charts"
+    charts.mkdir(parents=True, exist_ok=True)
+    with (output / "score_matrix.jsonl").open("w") as stream:
+        for row in matrix:
+            stream.write(json.dumps(row) + "\n")
+    summary = {"generated_at": utc_now(), "experiment": get_meta(db, "experiment_id"), "reference_people": len(reference_people), "evaluation_faces": len(matrix), "grid": {"similarity": similarity_values, "margin": margin_values, "support": support_values, "quality": quality_values}, "near_miss_gap": args.near_miss_gap, "results": sweep}
+    (output / "calibration.json").write_text(json.dumps(summary, indent=2) + "\n")
+    populations = {
+        "all": matrix,
+        "reference": [row for row in matrix if row["represented"]],
+        "non_reference": [row for row in matrix if not row["represented"]],
+    }
+    for name, population in populations.items():
+        population_sweep = [evaluate_calibration(population, reference_people, row["settings"], args.near_miss_gap) for row in sweep]
+        render_chart_set(charts / name, population, population_sweep)
+    write_chart_index(output)
+    eligible = [row for row in sweep if row["high_confidence_false_positives"] == 0]
+    if eligible:
+        best = max(eligible, key=lambda row: (row["accuracy_on_all"] or 0, row["coverage"]))
+        recommendation_note = "This operating point has no observed high-confidence false positives in the reviewed dataset."
+    else:
+        lowest_false_positive_count = min(row["high_confidence_false_positives"] for row in sweep)
+        safest = [row for row in sweep if row["high_confidence_false_positives"] == lowest_false_positive_count]
+        best = max(safest, key=lambda row: (row["accuracy_on_all"] or 0, row["coverage"]))
+        recommendation_note = f"No sweep point eliminated high-confidence false positives; this point has the lowest observed count ({lowest_false_positive_count})."
+    lines = ["# Model Settings Calibration Report", "", f"Generated: `{summary['generated_at']}`", "", "## Summary", "", f"- Reference people: {len(reference_people)}", f"- Evaluation faces: {len(matrix)}", f"- Near-miss gap: `{args.near_miss_gap}`", f"- Score matrix: `score_matrix.jsonl`", "", "## Recommended candidate operating point", "", recommendation_note, "", "| Setting | Value |", "|---|---:|"]
+    lines.extend(f"| {key} | {value} |" for key, value in best["settings"].items())
+    lines += ["", f"The selected point has `{best['high_confidence_false_positives']}` high-confidence false positives, `{best['accuracy_on_all']}` overall accuracy, and `{best['coverage']}` high-confidence coverage.", "", "## Charts", "", "- [HTML chart comparison](charts.html)", "- [All-face charts](charts/all/)", "- [Reference-backed charts](charts/reference/)", "- [Non-reference charts](charts/non_reference/)", "", "## Interpretation", "", "Results are face-level. People without reference examples are reported separately as `known_person_without_reference` and are not a fair recognition-accuracy test. Validate the selected point using candidate reveal and human review before adopting it.", "", "## Best settings result", "", "| Metric | Value |", "|---|---:|"]
+    lines.extend(f"| {key} | {value} |" for key, value in best.items() if key != "settings")
+    (output / "report.md").write_text("\n".join(lines) + "\n")
+    print(json.dumps({"output": str(output), "evaluation_faces": len(matrix), "sweep_points": len(sweep), "recommended": best["settings"]}, indent=2))
+    return 0
 
 
 def analyze_db(db: sqlite3.Connection, settings: dict[str, Any]) -> dict[str, Any]:
@@ -641,6 +1037,7 @@ def main() -> int:
     parser=argparse.ArgumentParser(description=__doc__); sub=parser.add_subparsers(dest="command",required=True)
     imp=sub.add_parser("import",help="import photos and run inference"); imp.add_argument("directory",type=Path); imp.add_argument("--experiment",type=Path,required=True); imp.add_argument("--provider",choices=("auto","coreml","cpu"),default="auto"); imp.add_argument("--det-size",type=int,default=640); imp.add_argument("--omit-paths",action="store_true",help="do not store source paths; disables browser image display"); imp.set_defaults(func=import_experiment)
     dates=sub.add_parser("backfill-dates",help="populate empty capture_date values from file creation times"); dates.add_argument("--experiment",type=Path,required=True); dates.set_defaults(func=backfill_dates)
+    cal=sub.add_parser("calibrate",help="build a score matrix and sweep model settings"); cal.add_argument("--experiment",type=Path,required=True); cal.add_argument("--similarity-range",default="0.25:0.55:0.01",help="START:STOP:STEP"); cal.add_argument("--margin-range",default="0.00:0.15:0.01",help="START:STOP:STEP"); cal.add_argument("--support-values",default="1,2,3",help="comma-separated support counts"); cal.add_argument("--quality-values",default="0.20,0.25,0.30,0.35",help="comma-separated quality thresholds"); cal.add_argument("--near-miss-gap",type=float,default=0.05); cal.set_defaults(func=calibrate_experiment)
     srv=sub.add_parser("serve",help="start local review service"); srv.add_argument("--experiment",type=Path,required=True); srv.add_argument("--host",default="127.0.0.1"); srv.add_argument("--port",type=int,default=8765); srv.set_defaults(func=serve)
     ana=sub.add_parser("analyze",help="write analysis reports"); ana.add_argument("--experiment",type=Path,required=True); ana.add_argument("--similarity-threshold",type=float); ana.add_argument("--margin-threshold",type=float); ana.add_argument("--min-support",type=int); ana.add_argument("--quality-threshold",type=float); ana.add_argument("--sweep",action="store_true",help="evaluate a standard threshold/margin/support/quality grid"); ana.set_defaults(func=analyze_experiment)
     args=parser.parse_args(); return args.func(args)
