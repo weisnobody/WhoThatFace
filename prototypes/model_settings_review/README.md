@@ -394,6 +394,38 @@ It does not rerun face detection or embedding generation. It separates people
 with no reference examples from normal recognition accuracy and identifies
 near misses where the correct person is close to the winning candidate.
 
+### Grouping benchmark
+
+To compare mutual-k-nearest-neighbor grouping on the reviewed faces, run:
+
+```sh
+python prototypes/model_settings_review/src/review_tool.py group-benchmark \
+  --experiment /path/to/experiments/sample \
+  --k-values 5,10,20,40 \
+  --similarity-threshold 0.45 \
+  --review-quality-threshold 0.70 \
+  --review-detection-threshold 0.70
+```
+
+The command performs exact batched neighbor search, keeps mutual edges, and
+forms connected components for each `k`. It creates a timestamped
+`grouping-small-YYYYMMDD_HHMMSS/` directory containing:
+
+- `grouping_results.json`: configuration, metrics, and timings;
+- `grouping_results.csv`: one row per `k` and population;
+- `clusters-k5.jsonl`, `clusters-k10.jsonl`, `clusters-k20.jsonl`, and
+  `clusters-k40.jsonl`: browsable cluster membership summaries;
+- `report.md`: Markdown comparison and interpretation; and
+- `report.html`: sortable result tables and expandable cluster summaries.
+
+Results include all faces, people with reference faces, and people without
+reference faces. The benchmark reports purity, pair precision and recall,
+cluster counts, mixed-person clusters, fragmentation, low-quality faces,
+low-detection faces, low-signal faces, very-low-signal faces, low-signal faces
+inside mixed clusters, neighbor comparisons, timing, memory, and order
+stability. Low-signal counts are review-priority indicators, not proof that a
+face is incorrectly grouped.
+
 ### Interpreting the generated report
 
 The report contains:

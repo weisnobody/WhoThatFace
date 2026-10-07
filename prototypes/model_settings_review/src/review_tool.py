@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import hashlib
 import html
 import http.server
@@ -390,6 +391,394 @@ def provisional_clusters(db: sqlite3.Connection, threshold: float = 0.55) -> lis
             selected["items"].append(item)
             selected["centroid"] = (selected["centroid"] * (len(selected["items"]) - 1) + current) / len(selected["items"])
     return [{"id": index + 1, "face_count": len(group["items"]), "faces": group["items"]} for index, group in enumerate(groups)]
+
+
+def load_grouping_faces(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """SELECT f.id face_id,f.embedding,f.image_id,f.face_index,f.x1,f.y1,f.x2,f.y2,
+                  f.quality,f.detection_confidence,
+                  l.kind,l.person_id,p.label person_label,l.role,
+                  i.relative_path,i.absolute_path,i.width image_width,i.height image_height
+           FROM faces f JOIN labels l ON l.face_id=f.id
+           LEFT JOIN people p ON p.id=l.person_id
+           JOIN images i ON i.id=f.image_id ORDER BY f.id"""
+    ).fetchall()
+    if not rows:
+        raise ValueError("No labeled faces are available for grouping")
+    return [dict(row) for row in rows]
+
+
+def normalized_embeddings(rows: list[dict[str, Any]]) -> Any:
+    import numpy as np
+
+    vectors = np.vstack([np.frombuffer(row["embedding"], dtype="<f4") for row in rows]).astype("<f4", copy=False)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return vectors / norms
+
+
+def exact_top_neighbors(face_ids: list[int], embeddings: Any, max_k: int, batch_size: int = 512) -> tuple[list[list[tuple[int, float]]], int]:
+    """Return exact top neighbors without retaining a dense all-pairs matrix."""
+    import numpy as np
+
+    count = len(face_ids)
+    if count < 2:
+        return [[] for _ in face_ids], 0
+    max_k = min(max_k, count - 1)
+    neighbors: list[list[tuple[int, float]]] = []
+    comparisons = 0
+    for start in range(0, count, batch_size):
+        stop = min(count, start + batch_size)
+        scores = embeddings[start:stop] @ embeddings.T
+        scores[np.arange(stop - start), np.arange(start, stop)] = -np.inf
+        candidate_count = min(max_k, count - 1)
+        candidate_indices = np.argpartition(-scores, candidate_count - 1, axis=1)[:, :candidate_count]
+        for row_index, candidates in enumerate(candidate_indices):
+            source_index = start + row_index
+            ordered = sorted(
+                ((int(index), float(scores[row_index, index])) for index in candidates),
+                key=lambda item: (-item[1], face_ids[item[0]]),
+            )
+            neighbors.append(ordered)
+        comparisons += (stop - start) * (count - 1)
+    return neighbors, comparisons
+
+
+def mutual_knn_groups(face_ids: list[int], neighbors: list[list[tuple[int, float]]], k: int, similarity_threshold: float) -> tuple[list[dict[str, Any]], dict[int, int], int]:
+    """Build connected components from mutual top-k relationships."""
+    count = len(face_ids)
+    k = min(k, max(0, count - 1))
+    parent = list(range(count))
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = parent[value]
+        return value
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    directed = [{index for index, score in row[:k] if score >= similarity_threshold} for row in neighbors]
+    mutual_edges = 0
+    for source, row in enumerate(neighbors):
+        for target, score in row[:k]:
+            if score >= similarity_threshold and source in directed[target]:
+                if source < target:
+                    mutual_edges += 1
+                union(source, target)
+
+    groups_by_root: dict[int, list[int]] = {}
+    for index in range(count):
+        groups_by_root.setdefault(find(index), []).append(index)
+    ordered_groups = sorted(groups_by_root.values(), key=lambda group: min(face_ids[index] for index in group))
+    clusters = [{"cluster_id": cluster_id, "indices": group} for cluster_id, group in enumerate(ordered_groups, start=1)]
+    assignments = {face_ids[index]: cluster["cluster_id"] for cluster in clusters for index in cluster["indices"]}
+    return clusters, assignments, mutual_edges
+
+
+def grouping_population_rows(rows: list[dict[str, Any]], reference_people: set[int], population: str) -> list[dict[str, Any]]:
+    if population == "all":
+        return rows
+    if population == "reference":
+        return [row for row in rows if row["kind"] == "person" and row["person_id"] in reference_people]
+    return [row for row in rows if not (row["kind"] == "person" and row["person_id"] in reference_people)]
+
+
+def reference_candidates(rows: list[dict[str, Any]], embeddings: Any, maximum: int = 5) -> dict[int, list[dict[str, Any]]]:
+    """Return reference-gallery candidates for report display only."""
+    references: dict[int, list[tuple[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        if row["role"] == "reference" and row["kind"] == "person" and row["person_id"] is not None:
+            references.setdefault(int(row["person_id"]), []).append((row["person_label"] or str(row["person_id"]), embeddings[index]))
+    candidates: dict[int, list[dict[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        scores = []
+        for person_id, examples in references.items():
+            label = examples[0][0]
+            similarity = max(cosine(embeddings[index], example) for _, example in examples)
+            scores.append({"person_id": person_id, "person": label, "similarity": round(similarity, 4), "support": len(examples)})
+        scores.sort(key=lambda item: (-item["similarity"], item["person"]))
+        candidates[int(row["face_id"])] = scores[:maximum]
+    return candidates
+
+
+def grouping_metrics(rows: list[dict[str, Any]], assignments: dict[int, int], clusters: list[dict[str, Any]], reference_people: set[int], population: str, review_quality_threshold: float = 0.70, review_detection_threshold: float = 0.70) -> dict[str, Any]:
+    selected = grouping_population_rows(rows, reference_people, population)
+    selected_ids = {row["face_id"] for row in selected}
+    selected_clusters = [cluster for cluster in clusters if any(rows[index]["face_id"] in selected_ids for index in cluster["indices"])]
+    known = [row for row in selected if row["kind"] == "person" and row["person_id"] is not None]
+    cluster_counts: dict[int, Counter[int]] = {}
+    for row in known:
+        cluster_counts.setdefault(assignments[row["face_id"]], Counter())[int(row["person_id"])] += 1
+    purity_correct = sum(max(counts.values()) for counts in cluster_counts.values() if counts)
+    true_pairs = predicted_pairs = true_positive = 0
+    for index, left in enumerate(known):
+        for right in known[index + 1:]:
+            same_person = left["person_id"] == right["person_id"]
+            same_cluster = assignments[left["face_id"]] == assignments[right["face_id"]]
+            true_pairs += int(same_person)
+            predicted_pairs += int(same_cluster)
+            true_positive += int(same_person and same_cluster)
+    people_clusters: dict[int, set[int]] = {}
+    for row in known:
+        people_clusters.setdefault(int(row["person_id"]), set()).add(assignments[row["face_id"]])
+    mixed_clusters = sum(1 for counts in cluster_counts.values() if len(counts) > 1)
+    unknown = [row for row in selected if row["kind"] != "person" or row["person_id"] is None]
+    all_cluster_people: dict[int, set[int]] = {}
+    for row in rows:
+        if row["kind"] == "person" and row["person_id"] is not None:
+            all_cluster_people.setdefault(assignments[row["face_id"]], set()).add(int(row["person_id"]))
+    mixed_cluster_ids = {cluster_id for cluster_id, people in all_cluster_people.items() if len(people) > 1}
+    low_quality = [row for row in selected if row.get("quality") is not None and row["quality"] < review_quality_threshold]
+    low_detection = [row for row in selected if row.get("detection_confidence") is not None and row["detection_confidence"] < review_detection_threshold]
+    low_quality_ids = {row["face_id"] for row in low_quality}
+    low_detection_ids = {row["face_id"] for row in low_detection}
+    low_signal_ids = {row["face_id"] for row in low_quality} | {row["face_id"] for row in low_detection}
+    very_low_signal_ids = low_quality_ids & low_detection_ids
+    cluster_sizes = {cluster["cluster_id"]: len(cluster["indices"]) for cluster in clusters}
+
+    def cluster_count(face_ids: set[int]) -> tuple[int, int]:
+        cluster_ids = {assignments[face_id] for face_id in face_ids}
+        return len(cluster_ids), sum(1 for cluster_id in cluster_ids if cluster_sizes[cluster_id] > 1)
+
+    low_quality_clusters, low_quality_multi_clusters = cluster_count(low_quality_ids)
+    low_detection_clusters, low_detection_multi_clusters = cluster_count(low_detection_ids)
+    low_signal_clusters, low_signal_multi_clusters = cluster_count(low_signal_ids)
+    very_low_signal_clusters, very_low_signal_multi_clusters = cluster_count(very_low_signal_ids)
+    low_signal_mixed_ids = {row["face_id"] for row in selected if row["face_id"] in low_signal_ids and assignments[row["face_id"]] in mixed_cluster_ids}
+    low_signal_mixed_clusters, low_signal_mixed_multi_clusters = cluster_count(low_signal_mixed_ids)
+    return {
+        "faces": len(selected),
+        "people": len(people_clusters),
+        "clusters_with_population": len(selected_clusters),
+        "singleton_clusters": sum(1 for cluster in selected_clusters if sum(rows[index]["face_id"] in selected_ids for index in cluster["indices"]) == 1),
+        "known_faces": len(known),
+        "unknown_faces": len(unknown),
+        "purity": round(purity_correct / len(known), 4) if known else None,
+        "pair_precision": round(true_positive / predicted_pairs, 4) if predicted_pairs else None,
+        "pair_recall": round(true_positive / true_pairs, 4) if true_pairs else None,
+        "pair_f1": round(2 * true_positive / (predicted_pairs + true_pairs), 4) if predicted_pairs + true_pairs else None,
+        "mixed_person_clusters": mixed_clusters,
+        "mixed_person_cluster_rate": round(mixed_clusters / len(cluster_counts), 4) if cluster_counts else 0.0,
+        "people_split_across_clusters": sum(1 for group_ids in people_clusters.values() if len(group_ids) > 1),
+        "mean_clusters_per_person": round(sum(len(group_ids) for group_ids in people_clusters.values()) / len(people_clusters), 4) if people_clusters else None,
+        "estimated_cluster_assignments": len(selected_clusters),
+        "low_quality_faces": len(low_quality),
+        "low_detection_faces": len(low_detection),
+        "low_signal_faces": len(low_signal_ids),
+        "very_low_signal_faces": len(very_low_signal_ids),
+        "low_signal_mixed_faces": len(low_signal_mixed_ids),
+        "low_quality_clusters": low_quality_clusters,
+        "low_quality_multi_clusters": low_quality_multi_clusters,
+        "low_detection_clusters": low_detection_clusters,
+        "low_detection_multi_clusters": low_detection_multi_clusters,
+        "low_signal_clusters": low_signal_clusters,
+        "low_signal_multi_clusters": low_signal_multi_clusters,
+        "very_low_signal_clusters": very_low_signal_clusters,
+        "very_low_signal_multi_clusters": very_low_signal_multi_clusters,
+        "low_signal_mixed_clusters": low_signal_mixed_clusters,
+        "low_signal_mixed_multi_clusters": low_signal_mixed_multi_clusters,
+    }
+
+
+def format_low_signal_metric(metrics: dict[str, Any], name: str) -> str:
+    return f"{metrics[name + '_faces']} ({metrics[name + '_clusters']}/{metrics[name + '_multi_clusters']})"
+
+
+def grouping_memory_mb() -> float | None:
+    try:
+        import resource
+        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return round(value / (1024 * 1024) if sys.platform == "darwin" else value / 1024, 2)
+    except (ImportError, AttributeError):
+        return None
+
+
+def grouping_report_markdown(summary: dict[str, Any]) -> str:
+    lines = ["# Mutual-kNN Face Grouping Benchmark", "", f"Generated: `{summary['generated_at']}`", "", "## Configuration", "", f"- Input faces: {summary['input_faces']}", f"- Similarity threshold: `{summary['similarity_threshold']}`", f"- Review quality threshold: `{summary['review_quality_threshold']}`", f"- Review detection threshold: `{summary['review_detection_threshold']}`", f"- Candidate k values: `{', '.join(str(value) for value in summary['k_values'])}`", f"- Order stable: `{summary['order_stable']}`", "", "## Recommendation", "", f"- Recommended k: `{summary['recommendation']['k']}`", "- Rule: select the highest all-population pair F1, then prefer higher pair precision and fewer low-signal faces.", "", "## Results", "", "| k | Faces | Clusters | Mutual edges | All purity | All pair precision | All pair recall | All pair F1 | Low-signal faces | Low-quality faces | Low-detection faces | Very-low-signal faces | Low-signal mixed faces | Mixed clusters | Cluster > 1 | Cluster > 2 |", "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for result in summary["results"]:
+        metrics = result["populations"]["all"]
+        lines.append(f"| {result['k']} | {result['face_count']} | {result['cluster_count']} | {result['mutual_edges']} | {metrics['purity']} | {metrics['pair_precision']} | {metrics['pair_recall']} | {metrics['pair_f1']} | {format_low_signal_metric(metrics, 'low_signal')} | {format_low_signal_metric(metrics, 'low_quality')} | {format_low_signal_metric(metrics, 'low_detection')} | {format_low_signal_metric(metrics, 'very_low_signal')} | {format_low_signal_metric(metrics, 'low_signal_mixed')} | {result['mixed_clusters']} | {result['clusters_gt_1']} | {result['clusters_gt_2']} |")
+    lines += ["", "## Population comparison", "", "| k | Population | Faces | Clusters | Purity | Pair precision | Pair recall | Pair F1 | Low-signal faces | Low-quality faces | Low-detection faces | Very-low-signal faces | Low-signal mixed faces | Mixed clusters | People split | Mean clusters/person |", "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
+    for result in summary["results"]:
+        for population, metrics in result["populations"].items():
+            lines.append(f"| {result['k']} | {population} | {metrics['faces']} | {metrics['clusters_with_population']} | {metrics['purity']} | {metrics['pair_precision']} | {metrics['pair_recall']} | {metrics['pair_f1']} | {format_low_signal_metric(metrics, 'low_signal')} | {format_low_signal_metric(metrics, 'low_quality')} | {format_low_signal_metric(metrics, 'low_detection')} | {format_low_signal_metric(metrics, 'very_low_signal')} | {format_low_signal_metric(metrics, 'low_signal_mixed')} | {metrics['mixed_person_clusters']} | {metrics['people_split_across_clusters']} | {metrics['mean_clusters_per_person']} |")
+    lines += ["", "## Interpretation", "", "Purity measures the proportion of known-person faces assigned to the dominant person in their cluster. Pair precision measures whether faces grouped together belong to the same person; pair recall measures whether faces belonging to the same person were grouped together. High precision with lower recall indicates clean but fragmented groups.", "", "Low-signal faces have quality or detection confidence below the configured review thresholds. They are review-priority indicators, not proof that a face is incorrectly grouped. Low-signal mixed-cluster faces deserve particular attention.", "", "The recommended k should prioritize high pair precision and a low mixed-cluster rate, then use pair recall and low-signal review effort to break ties.", ""]
+    return "\n".join(lines)
+
+
+def write_cluster_pages(output: Path, cluster_summaries: dict[str, list[dict[str, Any]]]) -> None:
+    for k, clusters in cluster_summaries.items():
+        directory = output / f"clusters-k{k}"
+        directory.mkdir(parents=True, exist_ok=True)
+        for cluster in clusters:
+            page_name = f"cluster-{cluster['cluster_id']:04d}.html"
+            cluster["page"] = f"clusters-k{k}/{page_name}"
+            lines = [
+                "<!doctype html>",
+                '<html lang="en"><head><meta charset="utf-8"><title>Face cluster</title>',
+                "<style>body{font-family:system-ui,sans-serif;margin:1rem}.photo{margin:1.5rem 0;border-bottom:1px solid #ccc;padding-bottom:1rem}.frame{position:relative;display:inline-block;max-width:100%}.frame img{display:block;max-width:100%;max-height:75vh}.box{position:absolute;border:3px solid #d00;box-sizing:border-box}.candidate{margin:.25rem 0 0 1rem}</style>",
+                "</head><body>",
+                f"<h1>Cluster {cluster['cluster_id']} ({cluster['face_count']} faces)</h1>",
+                f"<p>k={html.escape(str(k))}; mixed-person cluster: {html.escape(str(cluster['mixed']))}</p>",
+            ]
+            images: dict[int, list[dict[str, Any]]] = {}
+            for face in cluster["faces"]:
+                images.setdefault(int(face["image_id"]), []).append(face)
+            for faces in images.values():
+                first = faces[0]
+                image_path = Path(first["absolute_path"])
+                try:
+                    image_uri = image_path.resolve().as_uri()
+                except ValueError:
+                    image_uri = image_path.as_posix()
+                overlays = []
+                for face in faces:
+                    width = max(1, float(face["image_width"] or 1))
+                    height = max(1, float(face["image_height"] or 1))
+                    x1, y1, x2, y2 = (float(face[key]) for key in ("x1", "y1", "x2", "y2"))
+                    overlays.append(f'<span class="box" style="left:{x1 / width * 100:.3f}%;top:{y1 / height * 100:.3f}%;width:{(x2-x1) / width * 100:.3f}%;height:{(y2-y1) / height * 100:.3f}%"></span>')
+                lines.append(f'<section class="photo"><div class="frame"><img src="{html.escape(image_uri)}" alt="{html.escape(first["relative_path"])}">{"".join(overlays)}</div><p>{html.escape(first["relative_path"])}</p>')
+                for face in faces:
+                    label = face["person_label"] or face["kind"] or "unknown"
+                    candidates = ", ".join(f"{item['person']} {item['similarity']:.4f}" for item in face["candidates"]) or "none available"
+                    lines.append(f"<div class=\"candidate\"><b>Face {face['face_index'] + 1}</b>: {html.escape(str(label))}; quality {face['quality']}; detection {face['detection_confidence']}; candidates: {html.escape(candidates)}</div>")
+                lines.append("</section>")
+            lines += ["</body></html>", ""]
+            (directory / page_name).write_text("\n".join(lines))
+
+
+def grouping_report_html(summary: dict[str, Any], cluster_files: dict[int, str]) -> str:
+    sortable = "<script>function sortTable(header){const table=header.closest('table');const rows=Array.from(table.querySelectorAll('tr:nth-child(n+2)'));const index=Array.from(header.parentNode.children).indexOf(header);const numeric=rows.every(row=>!Number.isNaN(Number(row.children[index].textContent.trim())));rows.sort((a,b)=>{const av=a.children[index].textContent.trim(),bv=b.children[index].textContent.trim();return numeric?Number(av)-Number(bv):av.localeCompare(bv)});rows.forEach(row=>table.appendChild(row))}</script>"
+    lines = ["<!doctype html>", '<html lang="en"><head><meta charset="utf-8"><title>Mutual-kNN face grouping benchmark</title>', "<style>body{font-family:system-ui,sans-serif;margin:1rem}table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:.35rem}th{background:#f4f4f4;cursor:pointer}details{margin:.5rem 0}code{font-size:.9em}.photo{margin:1rem 0}.frame{position:relative;display:inline-block;max-width:100%}.frame img{display:block;max-width:100%;max-height:70vh}.box{position:absolute;border:3px solid #d00;box-sizing:border-box}.candidate{margin:.25rem 0 0 1rem}</style>", "</head><body>", "<h1>Mutual-kNN face grouping benchmark</h1>", f"<p>{summary['input_faces']} faces; similarity threshold {summary['similarity_threshold']}; review thresholds: quality &lt; {summary['review_quality_threshold']}, detection &lt; {summary['review_detection_threshold']}; order stable: {html.escape(str(summary['order_stable']))}</p>", f"<p><b>Recommended k:</b> {summary['recommendation']['k']} (highest all-population pair F1, with precision and low-signal review effort as tie-breakers)</p>", "<h2>Results</h2>", '<table><tr><th onclick="sortTable(this)">k</th><th onclick="sortTable(this)">Faces</th><th onclick="sortTable(this)">Clusters</th><th onclick="sortTable(this)">Mutual edges</th><th onclick="sortTable(this)">All purity</th><th onclick="sortTable(this)">Pair precision</th><th onclick="sortTable(this)">Pair recall</th><th onclick="sortTable(this)">Pair F1</th><th onclick="sortTable(this)">Low-signal faces</th><th onclick="sortTable(this)">Low-quality faces</th><th onclick="sortTable(this)">Low-detection faces</th><th onclick="sortTable(this)">Very-low-signal faces</th><th onclick="sortTable(this)">Low-signal mixed faces</th><th onclick="sortTable(this)">Mixed clusters</th><th onclick="sortTable(this)">Cluster &gt; 1</th><th onclick="sortTable(this)">Cluster &gt; 2</th></tr>']
+    for result in summary["results"]:
+        metrics = result["populations"]["all"]
+        lines.append(f"<tr><td>{result['k']}</td><td>{result['face_count']}</td><td>{result['cluster_count']}</td><td>{result['mutual_edges']}</td><td>{metrics['purity']}</td><td>{metrics['pair_precision']}</td><td>{metrics['pair_recall']}</td><td>{metrics['pair_f1']}</td><td>{format_low_signal_metric(metrics, 'low_signal')}</td><td>{format_low_signal_metric(metrics, 'low_quality')}</td><td>{format_low_signal_metric(metrics, 'low_detection')}</td><td>{format_low_signal_metric(metrics, 'very_low_signal')}</td><td>{format_low_signal_metric(metrics, 'low_signal_mixed')}</td><td>{result['mixed_clusters']}</td><td>{result['clusters_gt_1']}</td><td>{result['clusters_gt_2']}</td></tr>")
+    lines.append('</table><h2>Population comparison</h2><table><tr><th onclick="sortTable(this)">k</th><th onclick="sortTable(this)">Population</th><th onclick="sortTable(this)">Faces</th><th onclick="sortTable(this)">Clusters</th><th onclick="sortTable(this)">Purity</th><th onclick="sortTable(this)">Pair precision</th><th onclick="sortTable(this)">Pair recall</th><th onclick="sortTable(this)">Low-signal faces</th><th onclick="sortTable(this)">Low-quality faces</th><th onclick="sortTable(this)">Low-detection faces</th><th onclick="sortTable(this)">Very-low-signal faces</th><th onclick="sortTable(this)">Low-signal mixed faces</th><th onclick="sortTable(this)">Mixed clusters</th></tr>')
+    for result in summary["results"]:
+        for population, metrics in result["populations"].items():
+            lines.append(f"<tr><td>{result['k']}</td><td>{population}</td><td>{metrics['faces']}</td><td>{metrics['clusters_with_population']}</td><td>{metrics['purity']}</td><td>{metrics['pair_precision']}</td><td>{metrics['pair_recall']}</td><td>{format_low_signal_metric(metrics, 'low_signal')}</td><td>{format_low_signal_metric(metrics, 'low_quality')}</td><td>{format_low_signal_metric(metrics, 'low_detection')}</td><td>{format_low_signal_metric(metrics, 'very_low_signal')}</td><td>{format_low_signal_metric(metrics, 'low_signal_mixed')}</td><td>{metrics['mixed_person_clusters']}</td></tr>")
+    lines.append("</table><h2>Cluster summaries</h2>")
+    for k, filename in cluster_files.items():
+        lines.append(f'<details><summary>k={k} clusters</summary><p><a href="{html.escape(filename)}">Download JSONL</a></p>')
+        for cluster in summary["cluster_summaries"][str(k)]:
+            people = ", ".join(f"{label} ({count})" for label, count in cluster["people"].items()) or "unknown faces"
+            link = cluster.get("page", "")
+            lines.append(f"<details><summary>Cluster {cluster['cluster_id']} — {cluster['face_count']} faces — {html.escape(people)}</summary><p><a href=\"{html.escape(link)}\">Open cluster photos</a></p><p>{html.escape(', '.join(cluster['paths']))}</p></details>")
+        lines.append("</details>")
+    lines += [sortable, "</body></html>", ""]
+    return "\n".join(lines)
+
+
+def group_benchmark_experiment(args: argparse.Namespace) -> int:
+    import numpy as np
+
+    experiment = args.experiment.resolve()
+    db = connect(experiment)
+    init_db(db)
+    rows = load_grouping_faces(db)
+    rows.sort(key=lambda row: int(row["face_id"]))
+    face_ids = [int(row["face_id"]) for row in rows]
+    embeddings = normalized_embeddings(rows)
+    candidates_by_face = reference_candidates(rows, embeddings)
+    k_values = sorted(set(args.k_values))
+    if not k_values:
+        raise ValueError("At least one k value is required")
+    if args.batch_size <= 0:
+        raise ValueError("batch size must be positive")
+    if any(k <= 0 for k in k_values):
+        raise ValueError("k values must be positive")
+    max_k = min(max(k_values), len(rows) - 1)
+    if max_k < max(k_values):
+        raise ValueError(f"The dataset has only {len(rows)} faces; largest k must be less than that")
+    reference_people = {int(row["person_id"]) for row in rows if row["role"] == "reference" and row["kind"] == "person" and row["person_id"] is not None}
+    search_start = time.perf_counter()
+    neighbors, comparisons = exact_top_neighbors(face_ids, embeddings, max_k, args.batch_size)
+    search_elapsed = time.perf_counter() - search_start
+    results = []
+    cluster_summaries: dict[str, list[dict[str, Any]]] = {}
+    cluster_files: dict[int, str] = {}
+    for k in k_values:
+        graph_start = time.perf_counter()
+        clusters, assignments, mutual_edges = mutual_knn_groups(face_ids, neighbors, k, args.similarity_threshold)
+        graph_elapsed = time.perf_counter() - graph_start
+        population_metrics = {population: grouping_metrics(rows, assignments, clusters, reference_people, population, args.review_quality_threshold, args.review_detection_threshold) for population in ("all", "reference", "non_reference")}
+        results.append({
+            "k": k,
+            "face_count": len(rows),
+            "cluster_count": len(clusters),
+            "mutual_edges": mutual_edges,
+            "candidate_neighbor_relationships": len(rows) * k,
+            "clusters_gt_1": sum(1 for cluster in clusters if len(cluster["indices"]) > 1),
+            "clusters_gt_2": sum(1 for cluster in clusters if len(cluster["indices"]) > 2),
+            "mixed_clusters": 0,
+            "populations": population_metrics,
+            "timings": {"graph_seconds": round(graph_elapsed, 6)},
+        })
+        summaries = []
+        for cluster in clusters:
+            members = [rows[index] for index in cluster["indices"]]
+            people = Counter(str(row["person_label"] or row["person_id"]) for row in members if row["kind"] == "person" and row["person_id"] is not None)
+            face_details = []
+            for row in members:
+                face_details.append({
+                    "face_id": row["face_id"], "image_id": row["image_id"], "face_index": row["face_index"],
+                    "relative_path": row["relative_path"], "absolute_path": row["absolute_path"],
+                    "image_width": row["image_width"], "image_height": row["image_height"],
+                    "x1": row["x1"], "y1": row["y1"], "x2": row["x2"], "y2": row["y2"],
+                    "kind": row["kind"], "person_label": row["person_label"], "quality": row["quality"],
+                    "detection_confidence": row["detection_confidence"], "candidates": candidates_by_face[row["face_id"]],
+                })
+            summaries.append({"cluster_id": cluster["cluster_id"], "face_count": len(members), "mixed": len(people) > 1, "people": dict(people), "paths": [row["relative_path"] for row in members], "faces": face_details})
+        summaries.sort(key=lambda cluster: (not cluster["mixed"], -cluster["face_count"], cluster["cluster_id"]))
+        cluster_summaries[str(k)] = summaries
+        results[-1]["mixed_clusters"] = sum(1 for cluster in summaries if cluster["mixed"])
+    order_stable = True
+    reversed_rows = list(reversed(rows))
+    reversed_embeddings = normalized_embeddings(reversed_rows)
+    reversed_ids = [int(row["face_id"]) for row in reversed_rows]
+    reversed_neighbors, _ = exact_top_neighbors(reversed_ids, reversed_embeddings, max_k, args.batch_size)
+    for k in k_values:
+        forward_clusters, _, _ = mutual_knn_groups(face_ids, neighbors, k, args.similarity_threshold)
+        backward_clusters, _, _ = mutual_knn_groups(reversed_ids, reversed_neighbors, k, args.similarity_threshold)
+        forward_sets = {frozenset(face_ids[index] for index in cluster["indices"]) for cluster in forward_clusters}
+        backward_sets = {frozenset(reversed_ids[index] for index in cluster["indices"]) for cluster in backward_clusters}
+        order_stable = order_stable and forward_sets == backward_sets
+    recommended = max(
+        results,
+        key=lambda result: (
+            result["populations"]["all"]["pair_f1"] or 0.0,
+            result["populations"]["all"]["pair_precision"] or 0.0,
+            -result["populations"]["all"]["estimated_cluster_assignments"],
+        ),
+    )
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = experiment / f"grouping-small-{stamp}"
+    output.mkdir(parents=True, exist_ok=True)
+    write_cluster_pages(output, cluster_summaries)
+    for result in results:
+        k = result["k"]
+        filename = f"clusters-k{k}.jsonl"
+        cluster_files[k] = filename
+        with (output / filename).open("w") as stream:
+            for cluster in cluster_summaries[str(k)]:
+                stream.write(json.dumps(cluster) + "\n")
+    summary = {"generated_at": utc_now(), "experiment": get_meta(db, "experiment_id"), "input_faces": len(rows), "reference_people": len(reference_people), "k_values": k_values, "similarity_threshold": args.similarity_threshold, "review_quality_threshold": args.review_quality_threshold, "review_detection_threshold": args.review_detection_threshold, "batch_size": args.batch_size, "comparisons": comparisons, "timings": {"neighbor_search_seconds": round(search_elapsed, 6), "peak_memory_mb": grouping_memory_mb()}, "order_stable": order_stable, "recommendation": {"k": recommended["k"], "pair_f1": recommended["populations"]["all"]["pair_f1"], "pair_precision": recommended["populations"]["all"]["pair_precision"], "low_signal_faces": recommended["populations"]["all"]["low_signal_faces"]}, "results": results, "cluster_summaries": cluster_summaries}
+    (output / "grouping_results.json").write_text(json.dumps(summary, indent=2) + "\n")
+    with (output / "grouping_results.csv").open("w", newline="") as stream:
+        fieldnames = ["k", "population", "faces", "clusters", "purity", "pair_precision", "pair_recall", "pair_f1", "low_signal_faces", "low_quality_faces", "low_detection_faces", "very_low_signal_faces", "low_signal_mixed_faces", "mixed_person_clusters", "people_split_across_clusters", "mean_clusters_per_person"]
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for result in results:
+            for population, metrics in result["populations"].items():
+                writer.writerow({"k": result["k"], "population": population, "faces": metrics["faces"], "clusters": metrics["clusters_with_population"], **{key: metrics[key] for key in fieldnames[4:]}})
+    (output / "report.md").write_text(grouping_report_markdown(summary) + "\n")
+    (output / "report.html").write_text(grouping_report_html(summary, cluster_files))
+    print(json.dumps({"output": str(output), "input_faces": len(rows), "k_values": k_values, "order_stable": order_stable}, indent=2))
+    return 0
 
 
 def build_score_matrix(db: sqlite3.Connection) -> tuple[list[dict[str, Any]], set[int]]:
@@ -1038,9 +1427,13 @@ def main() -> int:
     imp=sub.add_parser("import",help="import photos and run inference"); imp.add_argument("directory",type=Path); imp.add_argument("--experiment",type=Path,required=True); imp.add_argument("--provider",choices=("auto","coreml","cpu"),default="auto"); imp.add_argument("--det-size",type=int,default=640); imp.add_argument("--omit-paths",action="store_true",help="do not store source paths; disables browser image display"); imp.set_defaults(func=import_experiment)
     dates=sub.add_parser("backfill-dates",help="populate empty capture_date values from file creation times"); dates.add_argument("--experiment",type=Path,required=True); dates.set_defaults(func=backfill_dates)
     cal=sub.add_parser("calibrate",help="build a score matrix and sweep model settings"); cal.add_argument("--experiment",type=Path,required=True); cal.add_argument("--similarity-range",default="0.25:0.55:0.01",help="START:STOP:STEP"); cal.add_argument("--margin-range",default="0.00:0.15:0.01",help="START:STOP:STEP"); cal.add_argument("--support-values",default="1,2,3",help="comma-separated support counts"); cal.add_argument("--quality-values",default="0.20,0.25,0.30,0.35",help="comma-separated quality thresholds"); cal.add_argument("--near-miss-gap",type=float,default=0.05); cal.set_defaults(func=calibrate_experiment)
+    group=sub.add_parser("group-benchmark",help="benchmark mutual-kNN face grouping"); group.add_argument("--experiment",type=Path,required=True); group.add_argument("--k-values",default="5,10,20,40",help="comma-separated k values"); group.add_argument("--similarity-threshold",type=float,default=0.45); group.add_argument("--review-quality-threshold",type=float,default=0.70); group.add_argument("--review-detection-threshold",type=float,default=0.70); group.add_argument("--batch-size",type=int,default=512); group.set_defaults(func=group_benchmark_experiment)
     srv=sub.add_parser("serve",help="start local review service"); srv.add_argument("--experiment",type=Path,required=True); srv.add_argument("--host",default="127.0.0.1"); srv.add_argument("--port",type=int,default=8765); srv.set_defaults(func=serve)
     ana=sub.add_parser("analyze",help="write analysis reports"); ana.add_argument("--experiment",type=Path,required=True); ana.add_argument("--similarity-threshold",type=float); ana.add_argument("--margin-threshold",type=float); ana.add_argument("--min-support",type=int); ana.add_argument("--quality-threshold",type=float); ana.add_argument("--sweep",action="store_true",help="evaluate a standard threshold/margin/support/quality grid"); ana.set_defaults(func=analyze_experiment)
-    args=parser.parse_args(); return args.func(args)
+    args=parser.parse_args()
+    if args.command == "group-benchmark":
+        args.k_values = [int(value) for value in args.k_values.split(",") if value.strip()]
+    return args.func(args)
 
 
 if __name__ == "__main__": raise SystemExit(main())

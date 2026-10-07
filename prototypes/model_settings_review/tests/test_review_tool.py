@@ -93,6 +93,37 @@ class ReviewToolTests(unittest.TestCase):
         result = review_tool.classify_calibration_row(row, {"similarity_threshold": .45, "margin_threshold": .05, "min_support": 1, "quality_threshold": .25}, {2}, .03)
         self.assertEqual(result["comparison"], "known_person_without_reference")
 
+    def test_mutual_knn_groups_and_metrics(self):
+        import numpy as np
+
+        face_ids = [10, 20, 30, 40]
+        embeddings = np.array([[1., 0.], [.99, .1], [0., 1.], [0., .99]], dtype="<f4")
+        embeddings /= np.linalg.norm(embeddings, axis=1, keepdims=True)
+        neighbors, comparisons = review_tool.exact_top_neighbors(face_ids, embeddings, 1)
+        self.assertEqual(comparisons, 12)
+        clusters, assignments, edges = review_tool.mutual_knn_groups(face_ids, neighbors, 1, .99)
+        self.assertEqual(edges, 2)
+        self.assertEqual({frozenset(face_ids[index] for index in cluster["indices"]) for cluster in clusters}, {frozenset({10, 20}), frozenset({30, 40})})
+        rows = [{"face_id": face_id, "kind": "person", "person_id": person_id} for face_id, person_id in zip(face_ids, (1, 1, 2, 2))]
+        metrics = review_tool.grouping_metrics(rows, assignments, clusters, {1}, "all")
+        self.assertEqual(metrics["purity"], 1.0)
+        self.assertEqual(metrics["pair_precision"], 1.0)
+        self.assertEqual(metrics["pair_recall"], 1.0)
+        self.assertEqual(metrics["mixed_person_clusters"], 0)
+
+    def test_grouping_population_excludes_unrepresented_people(self):
+        rows = [
+            {"face_id": 1, "kind": "person", "person_id": 10},
+            {"face_id": 2, "kind": "person", "person_id": 20},
+            {"face_id": 3, "kind": "unknown", "person_id": None},
+        ]
+        assignments = {1: 1, 2: 2, 3: 3}
+        clusters = [{"cluster_id": index, "indices": [index - 1]} for index in range(1, 4)]
+        reference = review_tool.grouping_population_rows(rows, {10}, "reference")
+        non_reference = review_tool.grouping_population_rows(rows, {10}, "non_reference")
+        self.assertEqual([row["face_id"] for row in reference], [1])
+        self.assertEqual([row["face_id"] for row in non_reference], [2, 3])
+
 
 if __name__ == "__main__":
     unittest.main()
