@@ -94,6 +94,8 @@ The Go application owns:
 - People and identity-event management.
 - Embedding persistence and compatible-pipeline checks.
 - Similarity matching and recognition decisions.
+- Face-to-face similarity search and clustering, with the initial grouping
+  implementation preferred in Go.
 - Search.
 - Worker lifecycle, protocol handling, timeout, restart, and retry logic.
 - Adaptive resource control.
@@ -112,7 +114,6 @@ The Python worker owns:
 - Face detection and alignment.
 - Embedding generation.
 - Face-quality metrics.
-- Experimental clustering support.
 
 The worker communicates through the versioned NDJSON protocol described in
 `SPEC.md`. stdout is reserved for protocol messages; diagnostics use stderr.
@@ -182,12 +183,13 @@ For each new photo, the system:
 1. Detects faces and records bounding boxes, detection confidence, quality
    metrics, and embeddings.
 2. If reference faces exist, compares eligible faces with the reference gallery.
-3. Records recognition results for tracked people as high-confidence,
-   provisional, or unconfirmed according to the assignment policy.
+3. Records recognition results for tracked people as `assigned-system`,
+   `provisional`, or `unknown` according to the assignment policy.
 4. Groups all eligible newly detected faces using the configured clustering
    workflow. A later configuration may restrict grouping to faces without a
    high-confidence recognition result.
-5. Generates reference-face recommendations for confirmed faces.
+5. Generates reference-face recommendations for faces with a person
+   assignment, including system-assigned and user-assigned faces.
 
 Recognition and grouping are separate evidence paths. Recognition compares a
 face with person reference examples. Grouping compares faces with other faces.
@@ -200,8 +202,9 @@ When cluster consistency, face quality, detection confidence, and recognition
 evidence agree that the faces likely belong to one person, the system may take
 one of these dispositions:
 
-- If the recognized person is in the `don't track` pool and the stricter
-  don't-track thresholds are satisfied, place the cluster in that pool.
+- If the recognized person is in the `don't track` pool, retain the person
+  assignment and the independent don't-track state; don't-track does not alter
+  recognition or grouping eligibility.
 - If the cluster joins an existing cluster that has already been manually
   assigned to a person, provisionally assign new faces to that person.
 - Otherwise, provisionally associate the cluster's faces with the suggested
@@ -218,8 +221,10 @@ not automatically promote every face to the reference gallery.
 
 ### 2.2 Reference recommendations
 
-After processing and assignment, the system may recommend confirmed faces as
-reference candidates. Recommendations consider face quality, detection
+After processing and assignment, the system may recommend faces with a person
+assignment as reference candidates, including system-assigned or
+user-assigned faces. A don't-track disposition does not exclude a face that
+has a person assignment. Recommendations consider face quality, detection
 confidence, similarity to the person's embedding center, cluster consistency,
 diversity, and duplicate risk. Recommendations are advisory; the user approves
 which faces become references.
@@ -332,7 +337,7 @@ change recognition or review correctness.
 
 ```text
 query face
-  → compatible confirmed examples
+  → compatible approved reference faces
   → cosine similarity
   → person-level evidence aggregation
   → threshold, margin, support-count, and quality checks
@@ -368,21 +373,27 @@ the initial implementation. Connected components form the provisional groups.
 ## Assignment and membership states
 
 The system records the evidence and user disposition separately, while
-exposing the following operational states:
+exposing the following operational states. Stored assignment states are shown
+in parentheses where the display label differs:
 
-- **Recognized/high-confidence:** clustering and recognition evidence are high
+- **Recognized/high-confidence (`assigned-system`):** clustering and recognition evidence are high
   quality and agree on the person.
-- **Provisional person association:** clustering and recognition evidence are at
+- **Provisional person association (`provisional`):** clustering and recognition evidence are at
   least medium quality and agree on the person, but the user has not confirmed
   the assignment.
-- **User-confirmed assignment:** the user explicitly assigned the face to the
+- **User-confirmed assignment (`assigned-user`):** the user explicitly assigned the face to the
   person.
-- **Unconfirmed:** evidence is low, or clustering and recognition disagree.
-- **Unknown:** no person is defined for the face.
-- **Ambiguous:** the user reviewed the face but could not identify the person.
-- **Mixed-cluster membership:** the face belongs to a cluster containing faces
+- **Unassigned or unknown (`unassigned`/`unknown`):** no effective person
+  assignment exists.
+- **Ambiguous (`ambiguous`):** the user reviewed the face but could not identify
+  the person.
+- **Incorrect assignment (`incorrect-assignment`):** the detected face is real,
+  but the system's proposed person is wrong.
+- **False detection (`false-detection`):** the detected region is not a usable
+  face.
+- **Mixed-cluster membership (derived):** the face belongs to a cluster containing faces
   assigned to different people.
-- **Don't-track membership:** the user indicated that the person is not
+- **Don't-track membership (independent disposition):** the user indicated that the person is not
   important to track. A face may have a person assignment and also be marked
   don't-track, or may be marked don't-track without a person assignment.
 
@@ -503,8 +514,20 @@ MVP. A future protocol may support cooperative cancellation if needed.
 
 ## Runtime data layout
 
-The exact platform paths are an implementation detail to finalize during the
-packaging prototype. The design separates runtime data into these categories:
+The default macOS runtime data root is
+`~/Library/Application Support/face_me_bro/`. The database is
+`face_me_bro.sqlite3` under that root. Configuration, models, logs, temporary
+files, exports, and backups use separate subdirectories.
+
+The CLI supports an alternate configuration file or configuration location.
+That configuration may set an alternate runtime data root, including a root on
+an external drive. Status and diagnostic commands report the resolved
+configuration file, runtime data root, database path, model path, and active
+pipeline.
+
+Platform-specific default paths are provided through a path-resolution
+adapter; configured paths and application behavior remain platform independent.
+The design separates runtime data into these categories:
 
 - SQLite database.
 - Configuration.
@@ -570,9 +593,9 @@ service, with exact matching retained as a correctness/reference path.
 
 ### Presentation layers
 
-The CLI is the first presentation layer. Future GUI or API layers should call
-the same application services and job model rather than access SQLite or the
-Python worker directly.
+The CLI and authenticated web review service are the MVP presentation layers.
+Future native GUI or additional API layers should call the same application
+services and job model rather than access SQLite or the Python worker directly.
 
 ## Key design tradeoffs
 
@@ -601,11 +624,12 @@ keeps normal queries simple without losing audit history.
 
 ### Confirmation versus automatic assignment
 
-Recognition produces suggestions. User confirmation is required for identity
-assignment in the MVP. Confirmed or manually assigned faces are eligible for
-reference recommendations, but only faces explicitly approved and marked as
-references become future matching examples. This prevents false positives or
-poor-quality faces from silently entering the recognition gallery.
+Recognition produces suggestions and may record provisional or
+system-assigned states. User confirmation is required before an identity is
+treated as user-confirmed in the MVP. Faces with a person assignment are
+eligible for reference recommendations, but only faces explicitly approved and
+marked as references become future matching examples. This prevents false
+positives or poor-quality faces from silently entering the recognition gallery.
 
 ### Python worker versus direct model execution
 

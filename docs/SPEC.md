@@ -41,7 +41,7 @@ component is not processed in the MVP.
 - Animated-image frame extraction or animation tracking.
 - Apple Photos integration.
 - Cloud processing, telemetry, or remote search.
-- Automatic identity assignment without user confirmation.
+- Automatic promotion to a user-confirmed identity without user confirmation.
 - User-facing person merge/split workflows.
 - A native desktop GUI. The MVP web review service is included separately.
 
@@ -80,6 +80,9 @@ worker.
 - People management.
 - Face records and embedding storage.
 - Similarity matching and recognition decisions.
+- Face-to-face similarity search and clustering. The initial grouping
+  implementation is preferred in Go; a Python-worker implementation is
+  acceptable if required by the selected libraries or prototype results.
 - Identity history and user confirmation.
 - Search.
 - Scan, analysis, recognition, and clustering job orchestration.
@@ -139,6 +142,8 @@ collection
 ### 4.1 Asset identity
 
 - A photo asset is identified by the complete file-content SHA-256 hash.
+- For motion-photo containers, the hash covers the complete source file, not
+  only the extracted still-image pixels.
 - The same content hash maps to one asset.
 - Exact duplicates are deduplicated regardless of path or collection.
 - Visually similar but byte-different files are distinct assets.
@@ -159,6 +164,9 @@ Path records contain, at minimum:
 - modification timestamp
 - first-seen and last-seen timestamps
 - referenced asset ID
+- media kind (`still`, `live_photo`, or `motion_photo`), when applicable
+- motion-photo container/pair information and the still component used for
+  analysis
 
 Directory search operates on path records. Face and embedding analysis
 operates on assets.
@@ -204,12 +212,22 @@ require a full restart. A scan can be paused, resumed, cancelled, or retried.
 
 - Embedded image metadata belongs to the deduplicated asset.
 - Directory and path belong to the path record.
-- Embedded capture date is the canonical capture date when present.
-- Filesystem timestamps may be retained separately but are not the primary
-  capture date unless embedded capture date is unavailable.
+- Capture date selection uses this order: embedded EXIF data, filesystem
+  creation time, filesystem modification time, then null.
+- The selected capture date and its source are retained so users can determine
+  why a date was chosen.
+- If a filesystem does not provide a reliable creation time, the application
+  uses whatever creation date the filesystem reports or continues to the next
+  fallback; if no timestamp is available, capture date is null.
 - For supported Live Photo and motion-photo containers, metadata and analysis
   use the reference still image; motion/video metadata is not required in the
   MVP.
+- A supported Live Photo or motion photo is one user-visible path/asset record.
+  The record retains the container or pair format, still component source,
+  companion motion/video component when present, and extraction
+  method/version. Companion motion/video files are not separate
+  face-analysis assets. An unassociated or unsupported companion is ignored as
+  unsupported input.
 
 ## 6. Go/Python worker contract
 
@@ -256,14 +274,23 @@ not required for the MVP.
       },
       "detection_confidence": 0.997,
       "quality": 0.81,
-      "embedding": "..."
+      "embedding": {
+        "encoding": "base64",
+        "dtype": "float32",
+        "byte_order": "little",
+        "dimension": 512,
+        "normalized": true,
+        "data": "..."
+      }
     }
   ]
 }
 ```
 
-The embedding representation in the wire protocol may be base64 or another
-explicit binary-safe encoding. JSON is not the storage representation.
+Embeddings use standard Base64 containing contiguous little-endian float32
+values. The response includes the encoding, dtype, byte order, dimension, and
+normalization state. Go validates that the decoded length equals
+`dimension * 4`; JSON is not the storage representation.
 
 ### 6.3 Error response
 
@@ -292,8 +319,50 @@ explicit binary-safe encoding. JSON is not the storage representation.
 - Model and preprocessing provenance is returned or negotiated.
 - Go validates that the analyzed file still corresponds to the expected asset.
 - One request is in flight per worker in the MVP.
+- `detection_confidence` and `quality` are required numbers in `[0.0, 1.0]`.
+- NaN, infinity, malformed boxes, invalid dimensions, and embedding length
+  mismatches are protocol/data errors.
+- Optional metrics are explicitly nullable rather than ambiguously omitted.
+- The worker does not return an informal `signal` metric without a defined
+  calculation and version.
 
-### 6.5 Worker failures
+### 6.5 Worker capabilities and protocol compatibility
+
+At startup, the worker sends capabilities containing the protocol version,
+pipeline ID, model family/version, model-file checksums, enabled modules,
+detector configuration, preprocessing/orientation behavior, embedding
+properties, execution provider and version, supported commands, and resource
+limits. Go validates these capabilities against the requested pipeline before
+submitting analysis.
+
+Protocol versions have explicit major and minor components. Unsupported major
+versions are rejected; compatible minor versions may be negotiated. Requests
+and responses contain the negotiated version and request ID. Unknown response
+fields are ignored for forward compatibility, while missing required fields or
+pipeline mismatches fail before analysis begins. Protocol changes require
+contract tests and documented compatibility rules.
+
+### 6.6 Analysis result rules
+
+An image with no detected faces returns a successful response with
+`"faces": []`, image dimensions, pipeline ID, and provenance. It is persisted
+as a completed no-face analysis rather than an error. Decode failures,
+unsupported formats, and resource-limit failures are structured errors.
+
+Live Photo and motion-photo handling occurs before face analysis. A media
+adapter identifies or extracts the reference still image, and the worker
+receives that still image for normal analysis. The original collection path
+remains the single user-visible asset/path record, while provenance records the
+container type, still component, and extraction method/version. Failure to
+identify or extract the still component is an unsupported-format result.
+
+Maximum decoded pixels and width/height are configurable safety limits. The
+worker reports source and inference dimensions and maps boxes back to oriented
+source-image coordinates. Exceeding a hard limit returns a non-retryable
+`resource_limit` error containing the source dimensions and configured limit.
+The MVP uses one image per request; protocol-level batching is deferred.
+
+### 6.7 Worker failures
 
 Each request has a timeout. On timeout, malformed output, or worker crash:
 
@@ -396,15 +465,23 @@ database representation.
 Go performs similarity matching. The initial metric is cosine similarity over
 compatible embeddings.
 
-The initial matcher compares a query face against confirmed examples when
-examples are available and uses the strongest match plus top-k supporting
-evidence for each person. A later vector index may be added if benchmarks
-require it.
+The initial matcher compares a query face against approved reference faces
+when references are available and uses the strongest match plus top-k
+supporting evidence for each person. A later vector index may be added if
+benchmarks require it.
 
 Matching is not required for initial processing. A collection may contain no
-people or no confirmed examples when it is first scanned. In that case, faces
-are retained as unidentified and may be grouped into provisional clusters for
-user review.
+people or no approved references when it is first scanned. In that case, faces
+are grouped into provisional clusters. The system may create an unnamed
+provisional person record as the candidate/association target for a group until
+the user confirms, renames, rejects, or otherwise disposes of it.
+
+When clustering is not being used, the standalone matcher uses a similarity
+threshold of `0.25` and margin of `0.05` for people with approved references,
+and a similarity threshold of `0.40` and margin of `0.05` for faces without
+approved references when evaluating a provisional person/candidate. These are
+configurable matching defaults; they are distinct from the clustering evidence
+categories in Section 10.2.
 
 ### 10.2 Decision inputs
 
@@ -412,16 +489,23 @@ Recognition decisions may consider:
 
 - absolute similarity
 - margin over the second-best person
-- number of supporting confirmed examples
+- number of supporting approved reference faces
 - face quality
 - detection confidence
 
 Threshold values are configurable and may be recalibrated from labeled data.
+When clustering is disabled, the standalone recognition matcher uses the
+configured similarity and margin defaults for people with and without approved
+references. When clustering is enabled, the evidence categories below are
+used to evaluate a face against each candidate person; the categories combine
+recognition and grouping evidence.
 
-The initial production evidence categories are defined as follows. A category
-is based on the applicable row values; `either` means that the evidence may be
-present or absent without determining that category by itself. The thresholds
-are independently configurable.
+The initial production evidence categories are defined as follows. High
+evidence requires every applicable non-`either` criterion to be high. Medium
+evidence requires every applicable non-`either` criterion to be at least
+medium. A category is based on the applicable row values; `either` means that
+the evidence may be present or absent without determining that category by
+itself. The thresholds are independently configurable.
 
 | Evidence | High | Medium | Low |
 | --- | --- | --- | --- |
@@ -435,18 +519,29 @@ are independently configurable.
 | Recognition/grouping agreement | true | either | either |
 
 Similarity below 0.25 is outside the low-evidence range and requires manual
-review. The system must retain the component values used for each decision.
+review. Missing metrics are treated as `0.0`. `Either` means that the metric
+does not affect the category whether its value is true or false. One low
+metric lowers the overall evidence to the level of that metric. Recognition
+and grouping disagreement requires cluster review. Purity and connectivity
+use the definitions established by the grouping benchmark protocol. Support is
+the number of approved reference faces for the candidate person. Thresholds
+are evaluated independently for each candidate person being considered for a
+face, not once globally for the face. High evidence may produce an
+`assigned-system` suggestion, but medium and low evidence require user review
+and confirmation before a person assignment is treated as user-confirmed. The
+system retains all component values used for each decision.
 
-The cold-start policy permits a person with one confirmed example to produce a
-lower-confidence suggestion. Multiple independent confirmed examples can
-produce stronger evidence.
+The cold-start policy permits a person with one approved reference to produce
+a lower-confidence suggestion. Multiple independent approved reference faces
+produce stronger support evidence.
 
 ### 10.3 Assignment policy
 
 - The MVP never silently assigns an identity.
 - High-confidence results are suggestions.
 - Users explicitly confirm or reject suggestions.
-- Ambiguous or low-confidence results remain unknown.
+- Low-confidence results remain provisional or unknown and require review;
+  ambiguous is an explicit user state.
 - Manual assignment is allowed even when the model provides no suggestion.
 - Confirmed and manually assigned faces become eligible for reference
   recommendations.
@@ -464,6 +559,20 @@ Each face has an assignment state with one of these values:
 - `assigned-system`: the system has sufficient confidence that the face is
   that person, but the user has not confirmed it.
 - `assigned-user`: the user assigned the face to that person.
+- `unknown`: recognition and grouping did not produce an acceptable person
+  candidate.
+- `ambiguous`: the user cannot determine who the face belongs to.
+
+Face-level dispositions are tracked independently from assignment state:
+
+- `incorrect-assignment`: the face is real, but the system's proposed person
+  is incorrect;
+- `false-detection`: the detected region is not a usable face;
+- `dont-track`: the user does not want the face/person tracked.
+
+Mixed-cluster membership and needs-review are derived flags, not assignment
+states. `incorrect-assignment` is recorded as a user rejection/disposition and
+does not imply that the detected face itself was invalid.
 
 Reference status is tracked independently with two boolean fields:
 
@@ -474,6 +583,35 @@ An assignment state is not itself reference status. In particular, a
 user-confirmed face may be recommended but is not used for matching until
 `reference` is true.
 
+Assignment-state transitions are:
+
+- A newly detected face starts `unassigned`.
+- High recognition and grouping evidence that agree on a person produces
+  `assigned-system`.
+- Medium recognition and grouping evidence that agree on a person produces
+  `provisional`.
+- A user assignment of a face or cluster produces `assigned-user`.
+- Rejecting an `assigned-system` face without assigning a person returns it to
+  its prior state, normally `unassigned` or `provisional`, and records an
+  `incorrect-assignment` disposition.
+- Rejecting an `assigned-user` assignment without a replacement restores the
+  previous state, which may be `unassigned`, `provisional`, or
+  `assigned-system`, and records the user disposition.
+- If recognition and grouping cannot produce an acceptable candidate, an
+  unassigned face becomes `unknown`.
+- A user who cannot identify the person may change an unknown or unassigned
+  face to `ambiguous`.
+
+All assignment states are searchable, subject to default filters. Don't-track
+is independent of assignment state. A face assigned by the system to a person
+remains assigned even when that person is marked don't-track; the don't-track
+disposition controls visibility and tracking behavior separately.
+
+`recognized/high-confidence`, `provisional person association`, and
+`user-confirmed assignment` are display labels for the corresponding
+`assigned-system`, `provisional`, and `assigned-user` states. `unconfirmed` is
+not a stored assignment state; it is a derived review category.
+
 ### 10.4 Discovery-first workflow
 
 Discovery-first is the normal application workflow, not an exceptional
@@ -483,7 +621,7 @@ selecting reference faces.
 The workflow is:
 
 1. Detect faces and generate embeddings for all supported photos.
-2. Match faces against existing confirmed examples where possible.
+2. Match faces against existing approved reference faces where possible.
 3. Group all eligible faces into provisional clusters by default. A configured
    unresolved-only mode may instead group only faces without a high-confidence
    recognition result.
@@ -504,9 +642,10 @@ The application should distinguish at least these states during review:
 - recognized/high-confidence assignment
 - provisional person association
 - user-confirmed assignment
-- unconfirmed assignment
+- needs-review assignment
 - genuinely unknown person
 - ambiguous or unusable face
+- incorrect assignment
 - false detection
 - mixed-cluster membership
 - don't-track membership
@@ -528,8 +667,11 @@ or manually assigned to a person. A face-level don't-track disposition does
 not prevent a face with a person assignment from being recommended as a
 reference; this can improve recognition for that person. An unassigned
 don't-track face is not eligible for a person-specific reference
-recommendation. Each recommendation is retained as a
-historical record, including:
+recommendation. Faces with explicit individual assignments remain eligible
+even when their cluster is mixed. Unknown, ambiguous, unassigned, false
+detections, duplicate or near-duplicate images, and faces with very low
+quality, detection confidence, or uncertain person correspondence are not
+eligible. Each recommendation is retained as a historical record, including:
 
 - recommendation score and component metrics;
 - face quality and detection confidence;
@@ -545,6 +687,16 @@ historical record, including:
 When a new recommendation is generated, the prior recommendation remains
 auditable and is marked non-current. Recommendation history does not by itself
 make a face eligible for matching; the user must set its reference status.
+
+Recommendations are ranked using face quality, detection confidence,
+recognition similarity, support, margin, cluster purity/connectivity, distance
+from existing references, and diversity across photos, dates, clusters, poses,
+and lighting. Recommendations are advisory and never automatically become
+references. The user may approve or reject each recommendation. Approved
+references remain references until explicitly unselected. Rejected
+recommendations remain historical and non-current, but may be reconsidered if
+the policy or evidence changes. The review UI displays up to 20 current
+recommendation candidates per person by default.
 
 ### 10.7 Don't-track state
 
@@ -567,6 +719,26 @@ face with a person assignment remains eligible for reference recommendation.
 The behavior of don't-track assignments during bulk review remains subject to
 the cluster-review rules defined separately.
 
+### 10.8 Reference-change reprocessing
+
+When a user approves a new reference face, the system reprocesses faces that
+are currently considering the affected person and clusters affected by those
+faces. Faces with `assigned-user` identity assignments are excluded from
+automatic identity reassignment and cluster-disposition changes. They remain
+eligible for refreshed reference recommendations and search-index updates.
+
+Reference-change work is queued in this priority order:
+
+1. recognition predictions;
+2. cluster dispositions;
+3. provisional person assignments;
+4. reference recommendations;
+5. search indexes.
+
+The system retains prior predictions and provisional assignments as history or
+marks them stale so results produced before and after the reference change can
+be distinguished.
+
 ## 11. Clustering
 
 Clustering is performed after analysis as part of the discovery-first review
@@ -587,6 +759,8 @@ requested, but it is never an identity assignment.
   policy, input face-set definition and snapshot, cluster memberships,
   component identifiers, review status, mixed-cluster state, timestamp, and
   superseded/replaced run identifiers.
+- Clustering runs use the statuses `queued`, `running`, `completed`, `active`,
+  `superseded`, `failed`, and `cancelled`.
 - A new run becomes the active run for new pages and operations after it is
   accepted. Existing pages may continue to use the prior run. If a user opens
   an old-run page later, it must clearly state that the page is based on a
@@ -596,6 +770,27 @@ requested, but it is never an identity assignment.
   operations remain deferred to a later version.
 
 ### 11.1 Cluster review semantics
+
+Cluster review uses the statuses `unreviewed`, `in-progress`,
+`partially-reviewed`, `reviewed`, `needs-review`, and `superseded`.
+
+Opening a cluster does not change its status. Editing a face or selecting a
+cluster default marks the review `in-progress`. Saving some dispositions makes
+it `partially-reviewed`; saving an explicit disposition for every face makes
+it `reviewed`. A new clustering run starts with fresh review statuses. An old
+run's matching membership may be shown as a suggestion, but must not
+automatically mark a new cluster reviewed.
+
+A clustering run owns immutable cluster memberships. Each cluster stores the
+system-proposed person, candidate evidence, mixed-cluster state, and review
+status. A user-selected cluster default is retained as a review event for
+audit, but does not itself assign every face. Saving the cluster creates
+individual face-assignment events for eligible faces. Individual face
+assignments are authoritative over the cluster default and system suggestion.
+A face may instead be assigned to another person, unknown, ambiguous, or
+don't-track without changing other members. Mixed-cluster state is derived
+from effective person assignments, and cluster review status is an aggregate
+of face dispositions and explicit review actions.
 
 For a pure cluster, bulk confirmation is allowed only when the cluster is not
 mixed and all faces have the same proposed person. Saving the confirmation
@@ -664,6 +859,7 @@ Initial logical entities:
 - `people`
 - `identity_events` or `identity_assignments`
 - reference recommendations and recommendation-history records
+- reference-selection events and current-reference projections
 - `scan_runs`
 - `scan_items`
 - `clustering_runs`
@@ -672,6 +868,11 @@ Initial logical entities:
 - review accounts, collection permissions, and audit events
 - `schema_migrations`
 - `pipelines`
+
+People may be created provisionally during discovery when a group of faces has
+no approved reference gallery. A provisional person has no user-provided name
+and exists to provide a stable candidate/association target until the user
+confirms, renames, rejects, or otherwise disposes of it.
 
 ### 12.1 Invariants
 
@@ -682,12 +883,41 @@ Initial logical entities:
 - Embeddings belong to faces and inherit pipeline provenance.
 - A face has at most one current confirmed identity.
 - Assignment state and reference status are tracked independently.
+- People have an independent current don't-track state and corresponding
+  history. Faces have an independent don't-track disposition and history.
 - A face may have a person assignment and a don't-track disposition, or may be
   don't-track without a person assignment.
 - A rejected suggestion is not a matching example.
 - Revoked assignments are not matching examples.
 - Deleting a path does not delete an asset referenced by another path.
 - Asset deletion requires no remaining path references and is explicit.
+
+Filesystem creation and modification dates belong to path records. Embedded
+EXIF capture date belongs to the deduplicated asset. The selected capture date
+and its source are derived from those values using the documented fallback
+order.
+
+Identity and assignment events include an event ID, face-observation ID,
+nullable person ID, previous and new assignment state/person, actor type,
+optional account ID, source pipeline ID, action/reason, timestamp, and an
+optional superseded-event ID. System events retain the recognition evidence
+snapshot (similarity, margin, support, quality, and detection confidence) and
+the grouping evidence snapshot (clustering run, cluster, purity/connectivity,
+and agreement). The current face-assignment projection points to the latest
+effective event; the event history is immutable.
+
+Reference-selection events record the face-observation ID, person ID, account,
+timestamp, prior and new reference state, related recommendation event when
+applicable, action/reason, and any superseded event. A current-reference
+projection supports matching queries. Only the current effective
+`reference=true` projection enters the matching gallery; unselected references
+remain historical but are excluded from matching.
+
+Current assignment, reference, recommendation, and review states are
+materialized projections maintained transactionally with their immutable
+events. Normal review and search queries use these indexed projections rather
+than reconstructing the full event history. Maintenance tooling can rebuild
+projections from history and validate that they agree with the event stream.
 
 ### 12.2 People lifecycle
 
@@ -767,6 +997,9 @@ these workflows:
 - run and inspect clustering jobs
 - inspect application and worker status
 - configure processing and model settings
+- create, list, disable, enable, and manage accounts and collection access
+- reset account passwords
+- purge audit events by age (system-admin only)
 - export and purge derived data
 
 The CLI is organized around command families for collections, scans and jobs,
@@ -796,9 +1029,11 @@ The MVP authorization roles are:
 
 - `system-admin`: manages accounts, global settings, and all collections;
 - `collection-manager`: grants access to assigned collections, manages people,
-  and may undo review actions within those collections;
+  may create accounts only with permissions below their own, and may undo
+  review actions within those collections;
 - `reviewer`: reviews clusters and faces, assigns people, confirms identities,
-  selects references, and marks faces unknown, ambiguous, or don't-track;
+  selects references, marks faces unknown, ambiguous, or don't-track, and may
+  create people;
 - `viewer`: has read-only access to permitted collections.
 
 Access is granted per collection, with viewing and modification permissions
@@ -816,13 +1051,123 @@ must remain replaceable so OIDC/SSO or client-certificate authentication can
 be added later. A proxy certificate or network location is not sufficient
 authorization by itself.
 
+The first-run bootstrap creates a `system-admin` account named `admin` with a
+temporary password of `admin`. The account must require a password change
+before any other web-service operation is allowed. The replacement password
+must meet the minimum eight-character letters-and-numbers rule. The service
+must warn while temporary bootstrap credentials remain active. Password reset
+is available to system administrators through the web service and through an
+explicit CLI command. Account creation, password reset, disablement, and
+re-enablement are audit events.
+
+An account is automatically disabled after 10 failed login attempts within any
+30-minute period. System administrators may disable and re-enable accounts.
+Audit events are retained until manually purged by a system administrator
+through the CLI or administration page, using an age-based purge criterion.
+
+All image, thumbnail, face-crop, and metadata requests go through
+authenticated application endpoints. Browsers never receive unrestricted
+filesystem paths or direct file-server access. Collection permissions are
+checked before returning image content, face crops, relative paths, directory
+metadata, capture metadata, or person/assignment information. If a
+deduplicated asset has paths in multiple collections, access through one
+permitted collection may return the asset, but only paths and metadata from
+permitted collections are shown.
+
+The service prevents path traversal, symlink or junction escape, and access
+through unapproved alternate paths using canonical path checks and
+collection-root boundaries. Worker and database paths are never exposed as
+downloadable URLs. Authorization is rechecked for every request, including
+requests from old review pages. Revoked collection access takes effect for
+new requests immediately.
+
+Undo targets a specific audit event and creates a new compensating event; it
+never deletes the original event. For a face/person assignment, if the current
+state still equals the state created by the targeted event, undo restores the
+recorded previous state. If later changes exist, the system reports a conflict
+and requires explicit confirmation before replacing the current state. If no
+previous state is available, undo resets the face to `unassigned` and records
+that fallback.
+
+Undoing a reference selection removes the reference status created by the
+targeted event. Faces linked to that person that were processed after the
+reference was added are queued for reprocessing. Existing `assigned-user`
+identities are not automatically changed; provisional and system assignments
+may be recomputed, and recommendations and search indexes are refreshed.
+Users have undo permission by default, but an administrator may revoke it for
+an account. Collection managers may undo actions within managed collections
+unless their permission was revoked. Undo records the actor, target event,
+conflict status, and resulting state.
+
 ### 14.2 Search state filters
 
 By default, searches and lists exclude don't-track faces and people. An
 explicit include-don't-track filter includes them. Other assignment states,
 including unassigned, provisional, assigned-system, assigned-user, unknown,
 ambiguous, and mixed-cluster membership, are included by default where
-applicable and must have filters that allow them to be excluded.
+applicable and must have filters that allow them to be excluded. Ordinary
+person/photo searches include `assigned-user` and `assigned-system` results by
+default. Provisional results require an explicit provisional filter. Unknown
+and ambiguous results are excluded from ordinary search results unless their
+specific filters are enabled. Faces that are not confirmed may be included
+when the selected search/filter set includes them, and searches provide
+filters for only-confirmed and only-not-confirmed results.
+
+Review-mode searches include provisional faces by default because they still
+require user review. A provisional face may appear under its associated person
+but must be visibly marked provisional. Changing it to `assigned-user` removes
+it from the default unconfirmed-review result set; changing it to unknown,
+ambiguous, or don't-track moves it into that corresponding review category.
+
+Review-mode searches exclude `assigned-user` and `assigned-system` results by
+default. Separate filters can include either or both of those states.
+
+Unassigned faces appear in review-mode searches by default under an Unassigned
+category. This state represents a newly detected face not yet processed, a
+system assignment rejected without a replacement, or a face reset when no
+previous state can be restored. An unassigned face may be assigned by the
+user, become `unknown` after recognition and grouping finish without an
+acceptable candidate, or be changed to `ambiguous` or don't-track. Later
+processing may also change it to `provisional` or `assigned-system` when the
+evidence meets those thresholds. An explicit unassigned filter can show only
+these faces or exclude them.
+
+Unknown faces appear by default in review-mode searches under an Unknown
+category. An unassigned face becomes `unknown` after recognition and grouping
+fail to produce an acceptable person candidate. Later processing, including a
+reference change, may transition an unknown face to `provisional` or
+`assigned-system` when the new evidence meets the corresponding thresholds;
+it remains `unknown` when no acceptable candidate is produced. A user may
+override the result by assigning the face, marking it ambiguous, or marking it
+don't-track.
+
+An `ambiguous` face is an explicit user decision that the person cannot be
+identified. It appears in review-mode searches by default and has its own
+filter. Automatic recognition or clustering reprocessing must not silently
+change it, but new candidates may be displayed for the user to reconsider. The
+user may later assign it to a person, change it to unknown, mark it
+don't-track, or leave it ambiguous.
+
+An `assigned-system` face has high recognition and grouping evidence for the
+same person, but the user has not confirmed it. It is excluded from default
+review-mode results and appears when the `assigned-system` filter is enabled.
+Later processing may retain the state, weaken it to `provisional`, change it
+to `unknown`, or suggest another person when that person has stronger evidence.
+Rejecting it without assigning another person returns it to its previous state,
+normally `unassigned` or `provisional`. A user assignment changes it to
+`assigned-user` and protects it from automatic identity reassignment. An
+assigned-system face with a person assignment remains eligible for reference
+recommendation.
+
+Faces in mixed clusters remain visible by default when their assignment state
+requires review, including `unassigned`, `provisional`, `unknown`, and
+`ambiguous`. Mixed-cluster membership is independently filterable. The review
+UI supports both showing all faces with mixed-cluster membership and showing
+only faces that still need review within a mixed cluster. Faces with
+`assigned-system` or `assigned-user` state follow their normal assignment-state
+filters. Mixed-cluster membership does not change an individual face's
+assignment state; the cluster view displays the other assigned people and the
+reason the cluster is mixed.
 
 ## 15. Background processing and resource policy
 
