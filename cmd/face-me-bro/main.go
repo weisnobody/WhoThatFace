@@ -303,6 +303,26 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		fmt.Fprintln(stdout, "ok")
 		return nil
 	}
+	if args[0] == "grant" {
+		flags := flag.NewFlagSet("account grant", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		accountID := flags.String("account-id", "", "account ID")
+		collectionID := flags.String("collection-id", "", "collection ID")
+		view := flags.Bool("view", true, "grant view permission")
+		modify := flags.Bool("modify", false, "grant modify permission")
+		undo := flags.Bool("undo", true, "grant undo permission")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *accountID == "" || *collectionID == "" {
+			return fmt.Errorf("grant requires --account-id and --collection-id")
+		}
+		if err := store.SetCollectionPermission(ctx, *accountID, *collectionID, *view, *modify, *undo); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "ok")
+		return nil
+	}
 	if args[0] != "reset-password" {
 		return fmt.Errorf("unknown account command %q", args[0])
 	}

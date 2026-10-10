@@ -95,6 +95,15 @@ func (s Store) SetDisabled(ctx context.Context, accountID string, disabled bool)
 	return err
 }
 
+func (s Store) SetCollectionPermission(ctx context.Context, accountID, collectionID string, view, modify, undo bool) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO collection_permissions (account_id, collection_id, can_view, can_modify, can_undo, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(account_id, collection_id) DO UPDATE SET can_view = excluded.can_view, can_modify = excluded.can_modify, can_undo = excluded.can_undo, updated_at = excluded.updated_at`, accountID, collectionID, boolInt(view), boolInt(modify), boolInt(undo), now, now)
+	return err
+}
+
 // Authenticate updates lockout state transactionally. Ten failures inside a
 // rolling thirty-minute window disable the account.
 func (s Store) Authenticate(ctx context.Context, username, password string) (Account, error) {
