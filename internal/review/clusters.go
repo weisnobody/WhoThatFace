@@ -103,5 +103,5 @@ func (s Store) ReviewCluster(ctx context.Context, clusterID string, defaultPerso
 			}
 		}
 	}
-	return audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: actor.AccountID, Action: "cluster-review", EntityType: "cluster", EntityID: clusterID, New: map[string]any{"status": status, "default_person_id": defaultPersonID, "decisions": len(decisions)}})
+	return audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: actor.AccountID, TargetEventID: eventID, Action: "cluster-review", EntityType: "cluster", EntityID: clusterID, New: map[string]any{"status": status, "default_person_id": defaultPersonID, "decisions": len(decisions)}})
 }
