@@ -21,9 +21,9 @@ complete in the current implementation audit. It is intended to supplement
       and pipeline compatibility at startup.
 - [ ] Implement explicit protocol minor-version negotiation.
 - [x] Validate expected file identity before accepting analysis results.
-- [ ] Restart workers after timeout, malformed output, or process failure.
+- [x] Restart workers after timeout, malformed output, or process failure.
 - [ ] Persist bounded retry attempts and permanent failures.
-- [ ] Implement cancellation through worker termination and restart.
+- [x] Implement cancellation through worker termination and restart.
 - [ ] Implement EXIF orientation and coordinate mapping in the inference path.
 - [ ] Support pipeline-specific model configuration and checksum validation.
 

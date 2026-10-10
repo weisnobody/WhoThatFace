@@ -36,6 +36,10 @@ func NewClient(command string, args ...string) *Client {
 func (c *Client) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.startLocked(ctx)
+}
+
+func (c *Client) startLocked(ctx context.Context) error {
 	if c.process != nil {
 		return fmt.Errorf("worker is already running")
 	}
@@ -108,6 +112,7 @@ func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxP
 		return Message{}, err
 	}
 	if err := c.sendLocked(Message{Type: "analyze", ID: requestID, ImagePath: imagePath, ExpectedSHA256: identity.sha256, ExpectedSize: identity.size, PipelineID: pipelineID, MaxPixels: maxPixels}); err != nil {
+		_ = c.restartLocked()
 		return Message{}, err
 	}
 	responseChannel := make(chan struct {
@@ -125,18 +130,33 @@ func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxP
 	select {
 	case result := <-responseChannel:
 		if result.err != nil {
+			_ = c.restartLocked()
 			return Message{}, fmt.Errorf("read worker response: %w", result.err)
 		}
 		if result.message.ID != requestID {
+			_ = c.restartLocked()
 			return Message{}, fmt.Errorf("worker response ID %q does not match request", result.message.ID)
 		}
 		if result.message.Type == "error" {
+			if result.message.Error != nil && result.message.Error.Retryable {
+				_ = c.restartLocked()
+			}
 			return result.message, workerError(result.message.Error)
 		}
 		return result.message, nil
 	case <-ctx.Done():
+		_ = c.restartLocked()
 		return Message{}, ctx.Err()
 	}
+}
+
+func (c *Client) restartLocked() error {
+	if err := c.stopLocked(); err != nil {
+		// A killed worker commonly returns a non-zero exit status; the restart
+		// is still useful and the original request remains failed.
+		_ = err
+	}
+	return c.startLocked(context.Background())
 }
 
 type fileIdentity struct {
@@ -177,6 +197,7 @@ func (c *Client) stopLocked() error {
 		return nil
 	}
 	_ = c.input.Close()
+	_ = c.process.Process.Kill()
 	err := c.process.Wait()
 	c.process = nil
 	c.input = nil
