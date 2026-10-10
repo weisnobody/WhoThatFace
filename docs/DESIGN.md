@@ -12,6 +12,17 @@ the `docs/plans/` directory.
 face_me_bro/
 ├── AGENTS.md
 ├── README.md
+├── cmd/
+│   ├── face-me-bro/
+│   └── face-me-bro-benchmark/
+├── internal/
+│   ├── analysis/
+│   ├── clustering/
+│   ├── jobs/
+│   ├── media/
+│   ├── recognition/
+│   ├── review/
+│   └── web/
 ├── docs/
 │   ├── DESIGN.md
 │   ├── SPEC.md
@@ -21,23 +32,27 @@ face_me_bro/
 ├── schemas/
 │   ├── schema/
 │   └── migrations/
-├── cli/
-│   ├── README.md
-│   ├── cmd/
-│   └── internal/
 ├── worker/
-│   ├── README.md
-│   ├── requirements.txt
-│   ├── src/
-│   ├── tests/
-│   └── docs/
+│   ├── insightface_worker.py
+│   ├── requirements.in
+│   ├── requirements.lock
+│   └── platforms.json
+├── scripts/
+│   ├── setup_worker.sh
+│   └── setup_models.py
+├── docker/
+│   └── Dockerfile
 └── ...
 ```
 
 ### Top-level directory responsibilities
 
-- `cli/` contains the Go application and command-line interface.
-- `worker/` contains the Python ML adapter and its tests.
+- `cmd/` contains Go entry points for the application and benchmark command.
+- `internal/` contains the Go application services and package boundaries.
+- `worker/` contains the Python ML adapter, dependency locks, and provider
+  metadata.
+- `scripts/` contains environment and model setup automation.
+- `docker/` contains the optional worker-container configuration.
 - `schemas/schema/` contains the canonical database schema definitions or
   schema artifacts.
 - `schemas/migrations/` contains ordered, immutable database migrations.
@@ -658,7 +673,7 @@ ONNX/CoreML execution if packaging or performance requires it.
 | `docs/DESIGN.md` | Architecture, implementation boundaries, repository layout, and tradeoffs |
 | `docs/PLAN.md` | Larger implementation milestones |
 | `docs/plans/` | Plans for smaller tasks, features, and bug fixes |
-| `cli/README.md` | CLI-specific development and usage details |
+| `docs/installation.md` | Installation, model setup, and worker startup |
 | `worker/README.md` | Worker-specific setup and development details |
 
 When these documents conflict, the approved specification defines required

@@ -122,6 +122,21 @@ complete in the current implementation audit. It is intended to supplement
 - [x] Remove or revise the obsolete implementation-gate language.
 - [x] Verify the worker response example does not contain the previously
       reported duplicated `image` object.
-- [ ] Mark completed, partial, and deferred requirements explicitly as the
+- [x] Mark completed, partial, and deferred requirements explicitly as the
       implementation progresses.
-- [ ] Update README.md with informaiton on requirements, setup, and running things.
+- [x] Update README.md with information on requirements, setup, and running
+      things.
+
+## Implementation status
+
+The completed sections above describe implemented MVP behavior. The following
+items remain explicitly partial or deferred:
+
+- Performance targets and representative-library results remain validation
+  work; the benchmark harness currently provides deterministic synthetic
+  workloads.
+- ANN search is an evaluation prototype and remains configurable; its
+  production default requires recall, grouping-quality, and workload
+  validation.
+- Future features such as video/RAW/animated media, body tagging, merge/split
+  operations, groups, and favorites remain outside the MVP.

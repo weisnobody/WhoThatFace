@@ -1238,6 +1238,12 @@ targets are deferred until these measurements are available. The MVP remains
 functionally targeted at approximately 100,000 images; one million images is
 a later scalability target.
 
+The repository benchmark command exercises these populations with deterministic
+synthetic embeddings and records scan, database, memory, query, throttling,
+worker-lifecycle, and exact-versus-ANN measurements. Synthetic results validate
+the harness and scaling behavior only; representative private photo libraries
+remain necessary for final application-performance targets.
+
 ### 16.1 Initial benchmark results
 
 The baseline was tested on the same 86-image, 129-face dataset on an Apple
@@ -1282,11 +1288,12 @@ runtime, memory, and incremental-update cost.
   default prototype/runtime prerequisite.
 - Setup creates a Python virtual environment.
 - Direct Python dependencies are maintained in `requirements.in`.
-- Setup installs from a generated, fully pinned `requirements.txt` lock file,
-  with hashes where practical.
+- Setup installs the pinned direct dependencies from
+  `worker/requirements.lock` and records a complete environment-specific
+  freeze in `.venv/requirements.lock.txt`.
 - Development-only dependencies use a separate requirements input and lock
   file when needed.
-- The lock metadata records the supported Python version, platform, and
+- `worker/platforms.json` records the supported Python version, platforms, and
   execution-provider constraints.
 - The project does not require Poetry, `uv`, Conda, or another managed Python
   environment.
@@ -1312,7 +1319,8 @@ runtime, memory, and incremental-update cost.
   application externally and are release-hardening work after packaging
   stabilizes.
 
-The prototype pins Python 3.11, InsightFace 2.0.0, and ONNX Runtime 1.30.0.
+The implementation pins Python 3.11, InsightFace 2.0.0, and ONNX Runtime
+1.30.0 for the initial CPU-provider profile.
 Lock files are regenerated deliberately when dependencies change and are
 reviewed as part of setup validation.
 
@@ -1460,12 +1468,16 @@ redistribution requirements.
 - Partial completion is visible through status commands.
 - Failed items remain inspectable and can be retried explicitly.
 
-## 22. Open decisions and prototype gates
+## 22. Remaining validation and prototype gates
 
-The following items remain open and must be resolved before implementation
-approval:
+Implementation is authorized and underway. The following validation work
+remains before final performance claims and release-hardening decisions:
 
-- final performance numbers and large-library validation;
+- final application performance numbers on representative libraries;
+- large-library validation using real scan/analysis workloads;
+- final provider-specific throughput and long-term code-signing/notarization
+  decisions;
+- optimization of reference-recommendation ranking.
 
 The following decisions are settled initial defaults but remain configurable
 and may be recalibrated through the documented evaluation workflows:

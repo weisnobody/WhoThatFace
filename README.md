@@ -1,7 +1,65 @@
 # face_me_bro
 
-Local Facial Recognition and Identification
+Local facial recognition and identification with a Go application and an
+InsightFace Python worker.
 
-## Notes ##
+## Requirements
 
-* Initially started as a discussion within ChatGPT (web) 
+- Go toolchain supported by the repository's `go.mod`.
+- System Python 3.11. The project creates a local virtual environment; it does
+  not bundle or manage a Python distribution.
+- Network access during first-time setup to download Python packages and the
+  configured InsightFace model. Runtime processing works offline afterward.
+
+## Setup
+
+From the repository root:
+
+```sh
+./scripts/setup_worker.sh
+source .venv/bin/activate
+```
+
+This installs the pinned worker dependencies, downloads and verifies the
+`buffalo_l` model, and records the complete environment freeze. See
+[`docs/installation.md`](docs/installation.md) for configuration overrides,
+offline validation, and the optional Docker worker.
+
+## Run and test
+
+Check the configured runtime:
+
+```sh
+go run ./cmd/face-me-bro setup check
+```
+
+Start the local review service:
+
+```sh
+go run ./cmd/face-me-bro serve
+```
+
+Run the scale/performance harness:
+
+```sh
+go run ./cmd/face-me-bro-benchmark --output performance.json
+```
+
+Run all Go tests and static checks:
+
+```sh
+go test ./...
+go vet ./...
+```
+
+The worker communicates with the Go application through the documented NDJSON
+protocol on stdin/stdout. Use `--config PATH` to select an alternate
+configuration file or directory and runtime data root.
+
+## Documentation
+
+- [`docs/SPEC.md`](docs/SPEC.md) — requirements and acceptance criteria.
+- [`docs/DESIGN.md`](docs/DESIGN.md) — architecture and boundaries.
+- [`docs/plans/`](docs/plans/) — implementation and feature plans.
+- [`docs/protocols/performance_evaluation.md`](docs/protocols/performance_evaluation.md)
+  — benchmark procedure.
