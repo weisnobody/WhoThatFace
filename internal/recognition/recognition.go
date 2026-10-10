@@ -113,6 +113,21 @@ func Classify(candidate Candidate, thresholds Thresholds) EvidenceLevel {
 	return level
 }
 
+// ClassifyStandalone applies recognition-only evidence. Cluster metrics are
+// intentionally not involved when the clustering stage has not run.
+func ClassifyStandalone(candidate Candidate, thresholds Thresholds) EvidenceLevel {
+	if candidate.Similarity < thresholds.LowSimilarity {
+		return EvidenceManual
+	}
+	level := EvidenceHigh
+	level = lower(level, levelFor(candidate.Similarity, thresholds.HighSimilarity, thresholds.MediumSimilarity, thresholds.LowSimilarity))
+	level = lower(level, levelFor(candidate.Margin, thresholds.Margin, thresholds.Margin, thresholds.Margin))
+	level = lower(level, levelForInt(candidate.Support, thresholds.HighSupport, thresholds.MediumSupport))
+	level = lower(level, levelFor(candidate.Quality, thresholds.HighQuality, thresholds.MediumQuality, 0))
+	level = lower(level, levelFor(candidate.Detection, thresholds.HighDetection, thresholds.MediumDetection, 0))
+	return level
+}
+
 func cosine(left, right []float32) float32 {
 	var dot, leftNorm, rightNorm float64
 	for index := range left {
