@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -357,7 +358,27 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 			if len(args) != 2 {
 				return fmt.Errorf("scan %s requires a scan run ID", args[0])
 			}
-			if err := store.SetScanControl(ctx, args[1], args[0]); err != nil {
+			if args[0] == "resume" || args[0] == "retry" {
+				var collectionID, root string
+				if err := application.DB.QueryRowContext(ctx, `SELECT sr.collection_id, c.root_path FROM scan_runs sr JOIN collections c ON c.id = sr.collection_id WHERE sr.id = ?`, args[1]).Scan(&collectionID, &root); err != nil {
+					return err
+				}
+				if err := store.SetScanControl(ctx, args[1], args[0]); err != nil {
+					return err
+				}
+				records, err := (media.Scanner{}).Scan(root)
+				if err != nil {
+					_ = store.FinishScan(ctx, args[1], "failed", err.Error())
+					return err
+				}
+				if err := store.PersistScanRun(ctx, collectionID, args[1], records); err != nil {
+					_ = store.FinishScan(ctx, args[1], "failed", err.Error())
+					return err
+				}
+				if err := store.FinishScan(ctx, args[1], "completed", ""); err != nil {
+					return err
+				}
+			} else if err := store.SetScanControl(ctx, args[1], args[0]); err != nil {
 				return err
 			}
 			if jsonOutput {
@@ -414,13 +435,23 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 	if err := application.DB.QueryRowContext(ctx, "SELECT root_path FROM collections WHERE id = ?", *collectionID).Scan(&root); err != nil {
 		return err
 	}
-	records, err := (media.Scanner{}).Scan(root)
-	if err != nil {
-		return err
-	}
 	mediaStore := media.NewStore(application.DB)
 	scanRunID, err := mediaStore.StartScan(ctx, *collectionID)
 	if err != nil {
+		return err
+	}
+	scanner := media.Scanner{Control: func() (string, error) {
+		var status string
+		err := application.DB.QueryRowContext(ctx, `SELECT status FROM scan_runs WHERE id = ?`, scanRunID).Scan(&status)
+		return status, err
+	}}
+	records, err := scanner.ScanContext(ctx, root)
+	if err != nil {
+		status := "failed"
+		if errors.Is(err, context.Canceled) {
+			status = "cancelled"
+		}
+		_ = mediaStore.FinishScan(ctx, scanRunID, status, err.Error())
 		return err
 	}
 	if err := mediaStore.PersistScanRun(ctx, *collectionID, scanRunID, records); err != nil {

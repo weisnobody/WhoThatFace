@@ -102,6 +102,40 @@ func TestScanMarksCorruptStandardImage(t *testing.T) {
 	}
 }
 
+func TestScanDetectsPairedLivePhotoAndIgnoresSymlink(t *testing.T) {
+	root := t.TempDir()
+	photo := filepath.Join(root, "IMG_0001.JPG")
+	writePNG(t, photo)
+	if err := os.WriteFile(filepath.Join(root, "IMG_0001.MOV"), []byte("motion"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(photo, filepath.Join(root, "link.JPG")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	records, err := (Scanner{}).Scan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records=%d, want 2", len(records))
+	}
+	var found bool
+	for _, record := range records {
+		if record.RelativePath == "IMG_0001.JPG" {
+			found = true
+			if record.MediaKind != MediaLivePhoto || record.MotionMetadataJSON == "" {
+				t.Fatalf("record=%+v", record)
+			}
+		}
+		if record.RelativePath == "link.JPG" {
+			t.Fatalf("symlink was scanned: %+v", record)
+		}
+	}
+	if !found {
+		t.Fatal("paired still was not found")
+	}
+}
+
 func writePNG(t *testing.T, path string) {
 	t.Helper()
 	file, err := os.Create(path)

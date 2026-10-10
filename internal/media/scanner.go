@@ -3,9 +3,11 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -60,6 +62,7 @@ type FileRecord struct {
 	Width                int
 	Height               int
 	Error                string
+	MotionMetadataJSON   string
 }
 
 // Scanner recursively scans one collection root.
@@ -67,11 +70,18 @@ type Scanner struct {
 	// StabilityDelay allows callers to avoid files currently being copied. A
 	// zero duration is useful for tests and otherwise means no delay.
 	StabilityDelay time.Duration
+	// Control is polled between filesystem entries. It may return running,
+	// paused, or cancelled for a persisted scan run.
+	Control func() (string, error)
 }
 
 // Scan returns records sorted by relative path. Hidden files are included;
 // callers can apply collection-specific policy after scanning.
 func (s Scanner) Scan(root string) ([]FileRecord, error) {
+	return s.ScanContext(context.Background(), root)
+}
+
+func (s Scanner) ScanContext(ctx context.Context, root string) ([]FileRecord, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve scan root: %w", err)
@@ -86,10 +96,16 @@ func (s Scanner) Scan(root string) ([]FileRecord, error) {
 
 	var records []FileRecord
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := s.waitForControl(ctx); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
 		if entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		record, err := s.inspect(root, path, entry)
@@ -103,6 +119,41 @@ func (s Scanner) Scan(root string) ([]FileRecord, error) {
 		return nil, fmt.Errorf("scan %q: %w", root, err)
 	}
 	return records, nil
+}
+
+func (s Scanner) waitForControl(ctx context.Context) error {
+	if s.Control == nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	for {
+		status, err := s.Control()
+		if err != nil {
+			return err
+		}
+		if status == "cancelled" {
+			return context.Canceled
+		}
+		if status != "paused" {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				return nil
+			}
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (s Scanner) inspect(root, path string, entry fs.DirEntry) (FileRecord, error) {
@@ -121,6 +172,11 @@ func (s Scanner) inspect(root, path string, entry fs.DirEntry) (FileRecord, erro
 		ByteSize:             info.Size(),
 		FilesystemModifiedAt: info.ModTime(),
 		FilesystemCreatedAt:  filesystemCreatedAt(info),
+	}
+	if companion, kind := motionCompanion(path); companion != "" {
+		record.MediaKind = kind
+		metadata, _ := json.Marshal(map[string]string{"companion_path": filepath.Base(companion), "still_source": "paired-reference-still", "extraction_method": "paired-file-v1"})
+		record.MotionMetadataJSON = string(metadata)
 	}
 	if !isSupported(path) {
 		return record, nil
@@ -307,4 +363,22 @@ func mediaKind(path string) MediaKind {
 	// Live/motion metadata is detected by the metadata extractor in the full
 	// pipeline. Ordinary stills remain the safe default at scan time.
 	return MediaStill
+}
+
+func motionCompanion(path string) (string, MediaKind) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".jpg" && ext != ".jpeg" {
+		return "", MediaStill
+	}
+	base := strings.TrimSuffix(path, filepath.Ext(path))
+	for _, candidate := range []struct {
+		ext  string
+		kind MediaKind
+	}{{".mov", MediaLivePhoto}, {".mp4", MediaMotionPhoto}} {
+		companion := base + candidate.ext
+		if info, err := os.Stat(companion); err == nil && !info.IsDir() {
+			return companion, candidate.kind
+		}
+	}
+	return "", MediaStill
 }

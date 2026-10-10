@@ -124,7 +124,7 @@ func (s Store) PersistScanRun(ctx context.Context, collectionID, runID string, r
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_items (id, scan_run_id, relative_path, status, content_sha256, error_message, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, itemID, runID, record.RelativePath, record.Status, record.ContentSHA256, record.Error, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_items (id, scan_run_id, relative_path, status, content_sha256, error_message, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?) ON CONFLICT(scan_run_id, relative_path) DO UPDATE SET status = excluded.status, content_sha256 = excluded.content_sha256, error_message = excluded.error_message, updated_at = excluded.updated_at`, itemID, runID, record.RelativePath, record.Status, record.ContentSHA256, record.Error, now); err != nil {
 			return err
 		}
 		if record.Status != StatusSupported || record.ContentSHA256 == "" {
@@ -143,7 +143,7 @@ func (s Store) PersistScanRun(ctx context.Context, collectionID, runID string, r
 				id, collection_id, asset_id, relative_path, filesystem_created_at,
 				filesystem_modified_at, first_seen_at, last_seen_at, missing_at,
 				file_size, media_kind, motion_metadata_json
-			) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL, ?, ?, NULL)
+			) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL, ?, ?, NULLIF(?, ''))
 			ON CONFLICT(collection_id, relative_path) DO UPDATE SET
 				asset_id = excluded.asset_id,
 				filesystem_created_at = excluded.filesystem_created_at,
@@ -151,10 +151,11 @@ func (s Store) PersistScanRun(ctx context.Context, collectionID, runID string, r
 				last_seen_at = excluded.last_seen_at,
 				missing_at = NULL,
 				file_size = excluded.file_size,
-				media_kind = excluded.media_kind`,
+				media_kind = excluded.media_kind,
+				motion_metadata_json = excluded.motion_metadata_json`,
 			pathID, collectionID, assetID, record.RelativePath,
 			formatTime(record.FilesystemCreatedAt), formatTime(record.FilesystemModifiedAt),
-			now, now, record.ByteSize, record.MediaKind); err != nil {
+			now, now, record.ByteSize, record.MediaKind, record.MotionMetadataJSON); err != nil {
 			return fmt.Errorf("persist path %q: %w", record.RelativePath, err)
 		}
 		seen[record.RelativePath] = struct{}{}
