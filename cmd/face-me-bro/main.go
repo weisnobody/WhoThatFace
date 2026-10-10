@@ -201,8 +201,47 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 }
 
 func jobCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("job requires list, get, pause, resume, cancel, or retry")
+	}
+	store := jobs.NewStore(application.DB)
+	if args[0] == "get" {
+		if len(args) != 2 {
+			return fmt.Errorf("job get requires an ID")
+		}
+		job, err := store.Get(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("job get", job))
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\n", job.ID, job.Kind, job.Status, job.Priority)
+		return nil
+	}
+	if len(args) == 2 && (args[0] == "pause" || args[0] == "resume" || args[0] == "cancel" || args[0] == "retry") {
+		var err error
+		switch args[0] {
+		case "pause":
+			err = store.Pause(ctx, args[1])
+		case "resume":
+			err = store.Resume(ctx, args[1])
+		case "cancel":
+			err = store.Cancel(ctx, args[1])
+		case "retry":
+			err = store.Retry(ctx, args[1])
+		}
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("job "+args[0], map[string]any{"id": args[1], "status": args[0]}))
+		}
+		fmt.Fprintln(stdout, "ok")
+		return nil
+	}
 	if len(args) != 1 || args[0] != "list" {
-		return fmt.Errorf("job requires list")
+		return fmt.Errorf("job requires list, get, pause, resume, cancel, or retry")
 	}
 	rows, err := application.DB.QueryContext(ctx, "SELECT id, kind, priority, status, created_at FROM jobs ORDER BY created_at DESC")
 	if err != nil {

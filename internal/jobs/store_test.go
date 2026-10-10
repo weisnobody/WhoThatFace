@@ -62,3 +62,32 @@ func TestClaimReturnsHighestPriorityFirst(t *testing.T) {
 		t.Errorf("claimed %q, want %q", claimed.ID, high.ID)
 	}
 }
+
+func TestPauseResumeAndRetry(t *testing.T) {
+	database, err := db.Open(context.Background(), t.TempDir()+"/job-controls.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewStore(database)
+	job, err := store.Enqueue(context.Background(), "test", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Pause(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Resume(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetStatus(context.Background(), job.ID, Failed, "test", "failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Retry(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(context.Background(), job.ID)
+	if err != nil || got.Status != Pending {
+		t.Fatalf("got %+v, error=%v", got, err)
+	}
+}

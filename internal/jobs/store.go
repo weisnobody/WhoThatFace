@@ -153,6 +153,18 @@ func (s Store) Cancel(ctx context.Context, jobID string) error {
 	return err
 }
 
+func (s Store) Resume(ctx context.Context, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ? WHERE id = ? AND status = ?`, Pending, jobID, Paused)
+	return err
+}
+
+// Retry returns a failed, cancelled, or completed-with-errors job to the
+// pending queue while retaining its original payload and history timestamps.
+func (s Store) Retry(ctx context.Context, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, error_code = NULL, error_message = NULL, started_at = NULL, completed_at = NULL WHERE id = ? AND status IN (?, ?, ?)`, Pending, jobID, Failed, Cancelled, CompletedWithError)
+	return err
+}
+
 func parseNullableTime(value sql.NullString) (*time.Time, error) {
 	if !value.Valid || value.String == "" {
 		return nil, nil
