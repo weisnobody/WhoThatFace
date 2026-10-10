@@ -3,26 +3,30 @@ package web
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"net/http"
+	"path/filepath"
 
 	"github.com/pjg/face_me_bro/internal/auth"
+	"github.com/pjg/face_me_bro/internal/search"
 )
 
 type Server struct {
 	auth      auth.Store
+	db        *sql.DB
 	templates *template.Template
 }
 
-func NewServer(authStore auth.Store) (*Server, error) {
+func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
 	page := template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{{.Title}}</title>
 <style>body{font-family:system-ui,sans-serif;max-width:70rem;margin:2rem auto;padding:0 1rem}nav{display:flex;justify-content:space-between}table{border-collapse:collapse}td,th{padding:.4rem;border:1px solid #ccc}input,button{padding:.4rem;margin:.2rem 0}.error{color:#a00}</style></head>
 <body><nav><a href="/">Face-Me-Bro</a>{{if .Account}}<span>{{.Account.Username}} ({{.Account.Role}}) <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
-	return &Server{auth: authStore, templates: page}, nil
+	return &Server{auth: authStore, db: database, templates: page}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -31,6 +35,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /login", s.loginPage)
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("POST /logout", s.logout)
+	mux.HandleFunc("GET /api/photos", s.photos)
+	mux.HandleFunc("GET /api/photos/{pathID}", s.photo)
 	mux.HandleFunc("GET /", s.dashboard)
 	return securityHeaders(mux)
 }
@@ -93,6 +99,69 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		"Title": "Review dashboard", "Account": account, "CSRF": csrf,
 		"Body": template.HTML(`<h1>Review dashboard</h1><p>Authenticated review service is ready.</p><ul><li>Photo and face review endpoints are available to application services.</li><li>Cluster review and reference selection are protected by account permissions.</li></ul>`),
 	})
+}
+
+func (s *Server) photos(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAccount(w, r); !ok {
+		return
+	}
+	query := r.URL.Query()
+	options := search.Options{
+		CollectionID: query.Get("collection_id"), PersonID: query.Get("person_id"),
+		RelativePrefix: query.Get("directory"), CaptureDateFrom: query.Get("capture_date_from"),
+		CaptureDateUntil:   query.Get("capture_date_until"),
+		IncludeProvisional: query.Get("include_provisional") == "true",
+		IncludeUnknown:     query.Get("include_unknown") == "true",
+		IncludeAmbiguous:   query.Get("include_ambiguous") == "true",
+		IncludeDontTrack:   query.Get("include_dont_track") == "true",
+		OnlyConfirmed:      query.Get("only_confirmed") == "true",
+		OnlyUnconfirmed:    query.Get("only_unconfirmed") == "true",
+	}
+	result, err := search.NewStore(s.db).Photos(r.Context(), options)
+	if err != nil {
+		http.Error(w, "search failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) photo(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	pathID := r.PathValue("pathID")
+	var collectionID, root, relative string
+	err := s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id, c.root_path, pp.relative_path FROM photo_paths pp JOIN collections c ON c.id = pp.collection_id WHERE pp.id = ? AND pp.missing_at IS NULL`, pathID).Scan(&collectionID, &root, &relative)
+	if err == sql.ErrNoRows {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "photo lookup failed", http.StatusInternalServerError)
+		return
+	}
+	allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, false, false)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		http.Error(w, "invalid collection root", http.StatusInternalServerError)
+		return
+	}
+	target, err := filepath.Abs(filepath.Join(root, filepath.FromSlash(relative)))
+	if err != nil {
+		http.Error(w, "invalid photo path", http.StatusInternalServerError)
+		return
+	}
+	within, err := filepath.Rel(root, target)
+	if err != nil || within == ".." || len(within) >= 3 && within[:3] == ".."+string(filepath.Separator) {
+		http.Error(w, "invalid photo path", http.StatusForbidden)
+		return
+	}
+	http.ServeFile(w, r, target)
 }
 
 func (s *Server) requireAccount(w http.ResponseWriter, r *http.Request) (auth.Account, bool) {

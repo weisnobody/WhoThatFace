@@ -23,7 +23,7 @@ func TestLoginRequiresCSRFAndCreatesSession(t *testing.T) {
 	if _, err := authStore.CreateAccount(context.Background(), "alice", "Password1", auth.Reviewer, false); err != nil {
 		t.Fatal(err)
 	}
-	server, err := NewServer(authStore)
+	server, err := NewServer(authStore, database)
 	if err != nil {
 		t.Fatal(err)
 	}
