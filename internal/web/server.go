@@ -219,24 +219,107 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clusterID := r.PathValue("clusterID")
-	rows, err := s.db.QueryContext(r.Context(), `SELECT cm.face_id, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, '') FROM cluster_memberships cm LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id WHERE cm.cluster_id = ? ORDER BY cm.face_id`, clusterID)
+	var runStatus, supersededBy, reviewStatus, collectionID string
+	var reviewVersion int
+	err := s.db.QueryRowContext(r.Context(), `
+		SELECT cr.status, COALESCE(cr.superseded_by, ''), c.review_status, c.review_version,
+		       (SELECT pp.collection_id FROM cluster_memberships cm
+				JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id
+				JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
+				WHERE cm.cluster_id = c.id LIMIT 1)
+		FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE c.id = ?`, clusterID).
+		Scan(&runStatus, &supersededBy, &reviewStatus, &reviewVersion, &collectionID)
+	if err == sql.ErrNoRows {
+		http.NotFound(w, r)
+		return
+	}
 	if err != nil {
-		http.Error(w, "cluster lookup failed", 500)
+		http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
+		return
+	}
+	allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, false, false)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `
+		SELECT cm.face_id, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''),
+		       COALESCE(pp.id, ''), COALESCE(pa.width, 0), COALESCE(pa.height, 0),
+		       f.box_left, f.box_top, f.box_right, f.box_bottom
+		FROM cluster_memberships cm
+		JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id
+		JOIN photo_assets pa ON pa.id = a.asset_id
+		LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id
+		LEFT JOIN photo_paths pp ON pp.asset_id = pa.id AND pp.collection_id = ?
+		WHERE cm.cluster_id = ? ORDER BY cm.face_id`, collectionID, clusterID)
+	if err != nil {
+		http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 	var body strings.Builder
-	body.WriteString(`<h1>Cluster ` + template.HTMLEscapeString(clusterID) + `</h1><table><tr><th>Face</th><th>State</th><th>Person</th></tr>`)
+	body.WriteString(`<style>.cluster-face{display:inline-block;vertical-align:top;width:24rem;margin:1rem;padding:1rem;border:4px solid}.photo-frame{position:relative;display:inline-block;max-width:22rem}.photo-frame img{display:block;max-width:22rem;max-height:18rem}.face-box{position:absolute;border:3px solid #d00;box-sizing:border-box}.candidate{font-size:.9rem}</style>`)
+	body.WriteString(`<h1>Cluster ` + template.HTMLEscapeString(clusterID) + `</h1>`)
+	body.WriteString(`<p>Review status: ` + template.HTMLEscapeString(reviewStatus) + `; version ` + fmt.Sprint(reviewVersion) + `; run: ` + template.HTMLEscapeString(runStatus) + `</p>`)
+	if runStatus == "superseded" {
+		body.WriteString(`<p class="error">This is a historical clustering run. A newer run is active`)
+		if supersededBy != "" {
+			body.WriteString(` (` + template.HTMLEscapeString(supersededBy) + `)`)
+		}
+		body.WriteString(`. Review changes are still recorded against this historical cluster.</p>`)
+	}
+	body.WriteString(`<form method="post" action="/api/clusters/` + template.HTMLEscapeString(clusterID) + `/review"><input type="hidden" name="csrf" value="` + template.HTMLEscapeString(csrfCookie(r)) + `"><input type="hidden" name="expected_version" value="` + fmt.Sprint(reviewVersion) + `"><table><tr><th>Face</th><th>State</th><th>Person</th><th>Candidate evidence</th></tr>`)
 	for rows.Next() {
-		var faceID, state, personID string
-		if err := rows.Scan(&faceID, &state, &personID); err != nil {
-			http.Error(w, "cluster lookup failed", 500)
+		var faceID, state, personID, pathID string
+		var width, height int
+		var left, top, right, bottom float64
+		if err := rows.Scan(&faceID, &state, &personID, &pathID, &width, &height, &left, &top, &right, &bottom); err != nil {
+			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
-		body.WriteString(`<tr><td>` + template.HTMLEscapeString(faceID) + `</td><td>` + template.HTMLEscapeString(state) + `</td><td>` + template.HTMLEscapeString(personID) + `</td></tr>`)
+		color := faceStateColor(state)
+		body.WriteString(`<tr><td><div class="cluster-face" style="border-color:` + color + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="` + template.HTMLEscapeString(faceID) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div></div><br>` + template.HTMLEscapeString(faceID) + `</td><td>` + template.HTMLEscapeString(state) + `</td><td>` + template.HTMLEscapeString(personID) + `</td><td class="candidate">`)
+		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT COALESCE(p.name, rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? ORDER BY rc.created_at DESC, rc.rank LIMIT 5`, faceID)
+		if candidateErr == nil {
+			for candidateRows.Next() {
+				var name string
+				var similarity, margin float64
+				var support int
+				if candidateRows.Scan(&name, &similarity, &margin, &support) == nil {
+					body.WriteString(template.HTMLEscapeString(name) + template.HTMLEscapeString(fmt.Sprintf(" %.3f (margin %.3f, support %d)", similarity, margin, support)) + `<br>`)
+				}
+			}
+			candidateRows.Close()
+		}
+		body.WriteString(`</td></tr>`)
 	}
-	body.WriteString(`</table><p>Review decisions can be submitted through the authenticated cluster review API.</p>`)
+	body.WriteString(`</table><p>Use the authenticated cluster review API to submit assignments, unknown/ambiguous states, false-detection or don't-track dispositions. Saving must include the displayed review version.</p></form>`)
 	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func faceStateColor(state string) string {
+	switch state {
+	case string(review.AssignedUser):
+		return "#2a9d50"
+	case string(review.AssignedSystem), string(review.Provisional):
+		return "#d6a800"
+	default:
+		return "#c62828"
+	}
+}
+
+func percent(value float64, denominator int) string {
+	if denominator <= 0 {
+		return "0"
+	}
+	return fmt.Sprintf("%.3f", value/float64(denominator)*100)
+}
+
+func csrfCookie(r *http.Request) string {
+	if cookie, err := r.Cookie("csrf"); err == nil {
+		return cookie.Value
+	}
+	return ""
 }
 
 func (s *Server) reviewClusterAPI(w http.ResponseWriter, r *http.Request) {
@@ -264,12 +347,13 @@ func (s *Server) reviewClusterAPI(w http.ResponseWriter, r *http.Request) {
 		Status          string                       `json:"status"`
 		Note            string                       `json:"note"`
 		Decisions       []review.ClusterFaceDecision `json:"decisions"`
+		ExpectedVersion int                          `json:"expected_version"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, "invalid review", http.StatusBadRequest)
 		return
 	}
-	if err := review.NewStore(s.db).ReviewCluster(r.Context(), clusterID, input.DefaultPersonID, input.Status, input.Decisions, review.Actor{Type: "user", AccountID: account.ID}, input.Note); err != nil {
+	if err := review.NewStore(s.db).ReviewCluster(r.Context(), clusterID, input.DefaultPersonID, input.Status, input.ExpectedVersion, input.Decisions, review.Actor{Type: "user", AccountID: account.ID}, input.Note); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
