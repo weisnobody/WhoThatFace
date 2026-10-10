@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 
 	"github.com/pjg/face_me_bro/internal/auth"
+	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
 )
 
@@ -39,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("GET /api/photos", s.photos)
 	mux.HandleFunc("GET /api/photos/{pathID}", s.photo)
+	mux.HandleFunc("POST /api/faces/{faceID}/assignment", s.assignFace)
+	mux.HandleFunc("POST /api/faces/{faceID}/reference", s.referenceFace)
 	mux.HandleFunc("GET /", s.dashboard)
 	return securityHeaders(mux)
 }
@@ -195,6 +198,105 @@ func (s *Server) photo(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, target)
 }
 
+func (s *Server) assignFace(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if !validCSRFApi(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	faceID := r.PathValue("faceID")
+	allowed, err := s.facePermission(r, account, faceID, true)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var input struct {
+		PersonID string                 `json:"person_id"`
+		State    review.AssignmentState `json:"state"`
+		Reject   bool                   `json:"reject"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "invalid assignment", http.StatusBadRequest)
+		return
+	}
+	store := review.NewStore(s.db)
+	var assignment review.Assignment
+	if input.Reject {
+		assignment, err = store.Reject(r.Context(), faceID, review.Actor{Type: "user", AccountID: account.ID}, "web-review")
+	} else {
+		assignment, err = store.Assign(r.Context(), faceID, input.PersonID, input.State, review.Actor{Type: "user", AccountID: account.ID}, review.Evidence{}, "web-review")
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, assignment)
+}
+
+func (s *Server) referenceFace(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if !validCSRFApi(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	faceID := r.PathValue("faceID")
+	allowed, err := s.facePermission(r, account, faceID, true)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var input struct {
+		PersonID  string `json:"person_id"`
+		Reference bool   `json:"reference"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "invalid reference selection", http.StatusBadRequest)
+		return
+	}
+	if input.PersonID == "" {
+		http.Error(w, "person_id is required", http.StatusBadRequest)
+		return
+	}
+	if err := review.NewStore(s.db).SetReference(r.Context(), faceID, input.PersonID, input.Reference, review.Actor{Type: "user", AccountID: account.ID}, "web-review"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"face_id": faceID, "person_id": input.PersonID, "reference": input.Reference})
+}
+
+func (s *Server) facePermission(r *http.Request, account auth.Account, faceID string, modify bool) (bool, error) {
+	rows, err := s.db.QueryContext(r.Context(), `SELECT DISTINCT pp.collection_id FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE f.id = ?`, faceID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var collectionID string
+		if err := rows.Scan(&collectionID); err != nil {
+			return false, err
+		}
+		found = true
+		allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, modify, false)
+		if err != nil {
+			return false, err
+		}
+		if allowed {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, fmt.Errorf("face %q is not in an accessible collection (found=%t)", faceID, found)
+}
+
 func (s *Server) requireAccount(w http.ResponseWriter, r *http.Request) (auth.Account, bool) {
 	cookie, err := r.Cookie("session")
 	if err != nil {
@@ -231,6 +333,14 @@ func csrfToken() (string, error) {
 func validCSRF(r *http.Request) bool {
 	cookie, err := r.Cookie("csrf")
 	return err == nil && cookie.Value != "" && cookie.Value == r.FormValue("csrf")
+}
+
+func validCSRFApi(r *http.Request) bool {
+	if token := r.Header.Get("X-CSRF-Token"); token != "" {
+		cookie, err := r.Cookie("csrf")
+		return err == nil && cookie.Value == token
+	}
+	return validCSRF(r)
 }
 
 func securityHeaders(next http.Handler) http.Handler {
