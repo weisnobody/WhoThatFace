@@ -27,7 +27,7 @@ func Open(ctx context.Context, configPath string, noMigrate bool) (*App, error) 
 	if err := ensureRuntimeDirectories(settings); err != nil {
 		return nil, err
 	}
-	database, err := db.OpenWithOptions(ctx, settings.DatabasePath, db.OpenOptions{NoMigrate: noMigrate})
+	database, err := db.OpenWithOptions(ctx, settings.DatabasePath, db.OpenOptions{NoMigrate: noMigrate, BackupDir: settings.BackupRoot})
 	if err != nil {
 		return nil, err
 	}

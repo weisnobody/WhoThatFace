@@ -51,6 +51,9 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	if err := validateSchemaVersions(ctx, database, migrations); err != nil {
+		return err
+	}
 
 	for _, migration := range migrations {
 		applied, err := migrationApplied(ctx, database, migration.version)
@@ -78,6 +81,54 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 		}
 		if err := transaction.Commit(); err != nil {
 			return fmt.Errorf("commit migration %q: %w", migration.name, err)
+		}
+	}
+	return nil
+}
+
+func validateSchemaVersions(ctx context.Context, database *sql.DB, migrations []migration) error {
+	var table string
+	if err := database.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&table); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	known := make(map[string]struct{}, len(migrations))
+	for _, migration := range migrations {
+		known[migration.version] = struct{}{}
+	}
+	rows, err := database.QueryContext(ctx, "SELECT version FROM schema_migrations")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return err
+		}
+		if _, ok := known[version]; !ok {
+			return fmt.Errorf("database schema migration %q is newer or unsupported", version)
+		}
+	}
+	return rows.Err()
+}
+
+// ValidateInvariants checks invariants that must hold before services use the
+// database. It intentionally avoids SQLite-specific application behavior.
+func ValidateInvariants(ctx context.Context, database *sql.DB) error {
+	var foreignKeys int
+	if err := database.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys); err != nil {
+		return fmt.Errorf("read foreign-key setting: %w", err)
+	}
+	if foreignKeys != 1 {
+		return fmt.Errorf("foreign-key enforcement is disabled")
+	}
+	for _, table := range []string{"schema_migrations", "photo_assets", "photo_paths", "faces", "people", "jobs"} {
+		var name string
+		if err := database.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&name); err != nil {
+			return fmt.Errorf("required table %q is missing: %w", table, err)
 		}
 	}
 	return nil
