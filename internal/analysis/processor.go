@@ -30,6 +30,17 @@ func NewProcessor(database *sql.DB, analyzer Analyzer, pipelineID string, maxPix
 // ProcessCollection analyzes each distinct asset in a collection once, even
 // when multiple paths point to the same content hash.
 func (p Processor) ProcessCollection(ctx context.Context, collectionID string) error {
+	return p.processCollection(ctx, collectionID, nil)
+}
+
+// ProcessCollectionWithProgress preserves successful asset work in job-item
+// storage so a later retry can skip it. The callback is called once after an
+// asset has been persisted successfully.
+func (p Processor) ProcessCollectionWithProgress(ctx context.Context, collectionID string, progress func(string) error) error {
+	return p.processCollection(ctx, collectionID, progress)
+}
+
+func (p Processor) processCollection(ctx context.Context, collectionID string, progress func(string) error) error {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT c.root_path, pp.relative_path, pa.id
 		FROM photo_paths pp JOIN collections c ON c.id = pp.collection_id
@@ -64,6 +75,11 @@ func (p Processor) ProcessCollection(ctx context.Context, collectionID string) e
 		var analysisExists int
 		err := p.db.QueryRowContext(ctx, `SELECT 1 FROM analyses WHERE asset_id = ? AND pipeline_id = ? LIMIT 1`, asset.assetID, p.pipelineID).Scan(&analysisExists)
 		if err == nil {
+			if progress != nil {
+				if progressErr := progress(asset.assetID); progressErr != nil {
+					return progressErr
+				}
+			}
 			continue
 		}
 		if err != sql.ErrNoRows {
@@ -95,6 +111,11 @@ func (p Processor) ProcessCollection(ctx context.Context, collectionID string) e
 		}
 		for _, faceID := range faceIDs {
 			if err := p.review.InitializeFace(ctx, faceID, review.Actor{Type: "system"}); err != nil {
+				return err
+			}
+		}
+		if progress != nil {
+			if err := progress(asset.assetID); err != nil {
 				return err
 			}
 		}

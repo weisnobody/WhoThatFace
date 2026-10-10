@@ -485,6 +485,18 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		return fmt.Errorf("job requires list, get, pause, resume, cancel, or retry")
 	}
 	store := jobs.NewStore(application.DB)
+	if args[0] == "throttle" {
+		flags := flag.NewFlagSet("job throttle", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		mode := flags.String("mode", string(jobs.ThrottleAutomatic), "automatic, full-speed, reduced, or paused")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := store.SetThrottleMode(ctx, jobs.ThrottleMode(*mode)); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "job throttle", map[string]string{"mode": *mode})
+	}
 	if args[0] == "get" {
 		if len(args) != 2 {
 			return fmt.Errorf("job get requires an ID")
@@ -1098,10 +1110,38 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if payload.CollectionID == "" {
 				return fmt.Errorf("analysis job has no collection_id")
 			}
-			if err := processor.ProcessCollection(jobContext, payload.CollectionID); err != nil {
+			rows, err := application.DB.QueryContext(jobContext, `SELECT DISTINCT asset_id FROM photo_paths WHERE collection_id = ? AND missing_at IS NULL`, payload.CollectionID)
+			if err != nil {
 				return err
 			}
-			_, err := jobStore.Enqueue(jobContext, "recognition", 1, map[string]string{"pipeline_id": *pipelineID})
+			var assetIDs []string
+			for rows.Next() {
+				var assetID string
+				if err := rows.Scan(&assetID); err != nil {
+					rows.Close()
+					return err
+				}
+				assetIDs = append(assetIDs, assetID)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			if err := jobStore.EnsureItems(jobContext, job.ID, assetIDs); err != nil {
+				return err
+			}
+			if err := processor.ProcessCollectionWithProgress(jobContext, payload.CollectionID, func(assetID string) error {
+				claimed, claimErr := jobStore.ClaimItem(jobContext, job.ID, assetID)
+				if claimErr != nil {
+					return claimErr
+				}
+				if !claimed {
+					return jobStore.CompleteItem(jobContext, job.ID, assetID)
+				}
+				return jobStore.CompleteItem(jobContext, job.ID, assetID)
+			}); err != nil {
+				return err
+			}
+			_, err = jobStore.Enqueue(jobContext, "recognition", 1, map[string]string{"pipeline_id": *pipelineID})
 			return err
 		},
 		"recognition": func(jobContext context.Context, _ jobs.Job) error {

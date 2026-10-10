@@ -40,6 +40,17 @@ type Job struct {
 	MaxAttempts int             `json:"max_attempts"`
 }
 
+type Item struct {
+	ID        string    `json:"id"`
+	JobID     string    `json:"job_id"`
+	Key       string    `json:"item_key"`
+	Status    string    `json:"status"`
+	Attempts  int       `json:"attempts"`
+	ErrorCode string    `json:"error_code,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type Store struct{ db *sql.DB }
 
 func NewStore(database *sql.DB) Store { return Store{db: database} }
@@ -186,8 +197,73 @@ func (s Store) Resume(ctx context.Context, jobID string) error {
 // Retry returns a failed, cancelled, or completed-with-errors job to the
 // pending queue while retaining its original payload and history timestamps.
 func (s Store) Retry(ctx context.Context, jobID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, error_code = NULL, error_message = NULL, started_at = NULL, completed_at = NULL WHERE id = ? AND status IN (?, ?, ?)`, Pending, jobID, Failed, Cancelled, CompletedWithError)
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, attempts = 0, error_code = NULL, error_message = NULL, started_at = NULL, completed_at = NULL WHERE id = ? AND status IN (?, ?, ?)`, Pending, jobID, Failed, Cancelled, CompletedWithError)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE job_items SET status = 'pending', attempts = 0, error_code = NULL, error_message = NULL, updated_at = ? WHERE job_id = ? AND status IN ('failed', 'running')`, time.Now().UTC().Format(time.RFC3339Nano), jobID)
 	return err
+}
+
+// EnsureItems creates resumable item records without disturbing completed
+// work. Item keys are caller-defined stable identifiers such as asset IDs.
+func (s Store) EnsureItems(ctx context.Context, jobID string, keys []string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, key := range keys {
+		itemID, err := id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO job_items (id, job_id, item_key, status, updated_at) VALUES (?, ?, ?, 'pending', ?) ON CONFLICT(job_id, item_key) DO NOTHING`, itemID, jobID, key, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s Store) ClaimItem(ctx context.Context, jobID, key string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE job_items SET status = 'running', attempts = attempts + 1, updated_at = ? WHERE job_id = ? AND item_key = ? AND status = 'pending'`, time.Now().UTC().Format(time.RFC3339Nano), jobID, key)
+	if err != nil {
+		return false, err
+	}
+	count, _ := result.RowsAffected()
+	return count == 1, nil
+}
+
+func (s Store) CompleteItem(ctx context.Context, jobID, key string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE job_items SET status = 'completed', error_code = NULL, error_message = NULL, updated_at = ? WHERE job_id = ? AND item_key = ?`, time.Now().UTC().Format(time.RFC3339Nano), jobID, key)
+	return err
+}
+
+func (s Store) FailItem(ctx context.Context, jobID, key, code, message string, permanent bool) error {
+	status := "pending"
+	if permanent {
+		status = "failed"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE job_items SET status = ?, error_code = ?, error_message = ?, updated_at = ? WHERE job_id = ? AND item_key = ?`, status, code, message, time.Now().UTC().Format(time.RFC3339Nano), jobID, key)
+	return err
+}
+
+func (s Store) Items(ctx context.Context, jobID string) ([]Item, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, item_key, status, attempts, COALESCE(error_code, ''), COALESCE(error_message, ''), updated_at FROM job_items WHERE job_id = ? ORDER BY item_key`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []Item
+	for rows.Next() {
+		var item Item
+		var updated string
+		if err := rows.Scan(&item.ID, &item.JobID, &item.Key, &item.Status, &item.Attempts, &item.ErrorCode, &item.Error, &updated); err != nil {
+			return nil, err
+		}
+		item.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func parseNullableTime(value sql.NullString) (*time.Time, error) {

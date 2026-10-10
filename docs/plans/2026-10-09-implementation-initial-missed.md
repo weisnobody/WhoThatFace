@@ -81,14 +81,14 @@ complete in the current implementation audit. It is intended to supplement
 
 ## Background processing and resource policy
 
-- [ ] Implement automatic adaptive, full-speed, reduced, and paused modes.
-- [ ] Use system activity, load, thermal pressure, power state, and application
+- [x] Implement automatic adaptive, full-speed, reduced, and paused modes.
+- [x] Use system activity, load, thermal pressure, power state, and application
       activity as throttling signals where available.
-- [ ] Provide manual throttling controls when activity detection is not
+- [x] Provide manual throttling controls when activity detection is not
       available or reliable.
-- [ ] Make paused and cancelling job states effective in the runner.
-- [ ] Track per-item progress, retries, partial completion, and recovery.
-- [ ] Ensure failures remain inspectable and retryable without restarting all
+- [x] Make paused and cancelling job states effective in the runner.
+- [x] Track per-item progress, retries, partial completion, and recovery.
+- [x] Ensure failures remain inspectable and retryable without restarting all
       work.
 
 ## Packaging and setup
