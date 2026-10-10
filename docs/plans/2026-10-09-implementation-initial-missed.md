@@ -19,7 +19,7 @@ complete in the current implementation audit. It is intended to supplement
 
 - [ ] Validate worker capabilities, model checksums, preprocessing settings,
       and pipeline compatibility at startup.
-- [ ] Implement explicit protocol minor-version negotiation.
+- [x] Implement explicit protocol minor-version negotiation.
 - [x] Validate expected file identity before accepting analysis results.
 - [x] Restart workers after timeout, malformed output, or process failure.
 - [ ] Persist bounded retry attempts and permanent failures.

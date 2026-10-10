@@ -67,11 +67,12 @@ def handle(message):
         if requested_major != PROTOCOL_MAJOR:
             error(message_id, "protocol_mismatch", "unsupported protocol major", False)
             return False
+        requested_minor = int(message.get("protocol_minor", PROTOCOL_MINOR) or 0)
         send({
             "type": "hello_ack",
             "id": message_id,
             "protocol_major": PROTOCOL_MAJOR,
-            "protocol_minor": PROTOCOL_MINOR,
+            "protocol_minor": min(PROTOCOL_MINOR, requested_minor),
             "capabilities": capabilities(),
         })
         return True

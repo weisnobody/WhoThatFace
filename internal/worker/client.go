@@ -25,6 +25,7 @@ type Client struct {
 	input   io.WriteCloser
 	output  *json.Decoder
 	ack     Message
+	minor   int
 }
 
 // NewClient creates a client; it does not start the process until Start.
@@ -78,11 +79,16 @@ func (c *Client) startLocked(ctx context.Context) error {
 		c.stopLocked()
 		return workerError(response.Error)
 	}
-	if response.Type != "hello_ack" || response.ProtocolMajor != ProtocolMajor {
+	if response.Type != "hello_ack" || response.ProtocolMajor != ProtocolMajor || response.ProtocolMinor < 0 {
 		c.stopLocked()
 		return fmt.Errorf("invalid worker handshake response")
 	}
 	c.ack = response
+	if response.ProtocolMinor < ProtocolMinor {
+		c.minor = response.ProtocolMinor
+	} else {
+		c.minor = ProtocolMinor
+	}
 	return nil
 }
 
@@ -111,7 +117,7 @@ func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxP
 	if err != nil {
 		return Message{}, err
 	}
-	if err := c.sendLocked(Message{Type: "analyze", ID: requestID, ImagePath: imagePath, ExpectedSHA256: identity.sha256, ExpectedSize: identity.size, PipelineID: pipelineID, MaxPixels: maxPixels}); err != nil {
+	if err := c.sendLocked(Message{Type: "analyze", ID: requestID, ProtocolMajor: ProtocolMajor, ProtocolMinor: c.minor, ImagePath: imagePath, ExpectedSHA256: identity.sha256, ExpectedSize: identity.size, PipelineID: pipelineID, MaxPixels: maxPixels}); err != nil {
 		_ = c.restartLocked()
 		return Message{}, err
 	}
