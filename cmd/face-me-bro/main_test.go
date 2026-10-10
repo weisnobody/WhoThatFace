@@ -88,3 +88,38 @@ func TestReadOnlyCLIListsJobsDuringWorkerWrite(t *testing.T) {
 		t.Fatalf("read-only job list failed during worker write: %v", runErr)
 	}
 }
+
+func TestReadOnlyListCommands(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	databasePath := filepath.Join(dir, "catalog.sqlite3")
+	database, err := db.Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.Close()
+	configPath := filepath.Join(dir, "config.json")
+	configData, err := json.Marshal(map[string]string{"runtime_data_root": dir, "database_path": databasePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commands := [][]string{
+		{"collection", "list"},
+		{"pipeline", "list"},
+		{"account", "list"},
+		{"people", "list"},
+		{"face", "list"},
+		{"cluster", "list"},
+		{"audit", "list"},
+	}
+	for _, command := range commands {
+		var output bytes.Buffer
+		args := append([]string{"--config", configPath, "--json"}, command...)
+		if err := run(ctx, args, &output, &output); err != nil {
+			t.Fatalf("%v failed: %v", command, err)
+		}
+	}
+}

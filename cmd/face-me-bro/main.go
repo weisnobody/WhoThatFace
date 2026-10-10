@@ -105,25 +105,27 @@ func commandIsReadOnly(command string, args []string) bool {
 	}
 	switch command {
 	case "collection":
-		return subcommand == "list"
+		return subcommand == "list" || subcommand == "get"
 	case "scan":
 		return subcommand == "status"
 	case "job":
 		return subcommand == "list" || subcommand == "get"
 	case "account":
-		return subcommand == "list"
+		return subcommand == "list" || subcommand == "get"
 	case "setup":
 		return subcommand == "check"
 	case "pipeline":
-		return subcommand == "list"
+		return subcommand == "list" || subcommand == "get"
 	case "config":
 		return subcommand == "show"
 	case "people":
-		return subcommand == "list"
+		return subcommand == "list" || subcommand == "get"
 	case "face":
-		return subcommand == "get"
+		return subcommand == "get" || subcommand == "list"
 	case "cluster":
-		return subcommand == "get"
+		return subcommand == "get" || subcommand == "list"
+	case "audit":
+		return subcommand == "list"
 	case "search":
 		return true
 	case "backup", "export":
@@ -198,20 +200,20 @@ type helpTopic struct {
 
 var commandHelp = map[string]helpTopic{
 	"status":     {Usage: "face-me-bro [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
-	"collection": {Usage: "face-me-bro collection <add|list|remove|set-search> [options]", Description: "Create, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
+	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get/list: --collection-id ID; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
 	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; status: --scan-run-id ID; pause/resume/cancel/retry: SCAN_RUN_ID"},
 	"job":        {Usage: "face-me-bro job <list|status|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "status and controls use --job-id ID; list accepts --status STATUS"},
-	"account":    {Usage: "face-me-bro account <list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
+	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get/list: --account-id ID; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
 	"setup":      {Usage: "face-me-bro setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
 	"serve":      {Usage: "face-me-bro serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
-	"pipeline":   {Usage: "face-me-bro pipeline <register|list> [options]", Description: "Register or inspect model and preprocessing pipeline identities.", Options: "register: --model-family --model-version --provider --model-checksums-json --detector-config-json --preprocessing-config-json"},
+	"pipeline":   {Usage: "face-me-bro pipeline <get|register|list> [options]", Description: "Register or inspect model and preprocessing pipeline identities.", Options: "get: --pipeline-id; register: --model-family --model-version --provider --model-checksums-json --detector-config-json --preprocessing-config-json"},
 	"config":     {Usage: "face-me-bro config <show|set-search> [options]", Description: "Show or change global application configuration.", Options: "set-search: --method exact|ann"},
 	"worker":     {Usage: "face-me-bro worker", Description: "Run the background worker loop for queued analysis and recognition jobs."},
-	"people":     {Usage: "face-me-bro people <list|create> [options]", Description: "List or create people records.", Options: "create: --name NAME [--provisional]"},
-	"face":       {Usage: "face-me-bro face <get|assign|disposition|reference> [options]", Description: "Inspect or change a face assignment, disposition, or reference status.", Options: "common: --face-id ID; assign: --person-id ID --state STATE; disposition: --disposition VALUE; reference: --person-id ID --reference; changes require --yes"},
-	"cluster":    {Usage: "face-me-bro cluster <run|get|review> [options]", Description: "Run grouping or inspect and review clusters.", Options: "run: [--collection-id ID] [--scope all|unresolved-only|subset]; get/review: --cluster-id ID; review changes require --yes"},
+	"people":     {Usage: "face-me-bro people <get|list|create> [options]", Description: "Inspect, list, or create people records.", Options: "get: --person-id; create: --name NAME [--provisional]"},
+	"face":       {Usage: "face-me-bro face <get|list|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, dispositions, and reference status; list faces with their current state.", Options: "get: --face-id; list: [--limit N]; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
+	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID] [--scope all|unresolved-only|subset]; get/review: --cluster-id ID; list: [--run-id ID]; review changes require --yes"},
 	"search":     {Usage: "face-me-bro search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
-	"audit":      {Usage: "face-me-bro audit purge [--age-days N]", Description: "Review or purge retained audit events."},
+	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID]; purge: --age-days N"},
 	"backup":     {Usage: "face-me-bro backup create", Description: "Create a database backup in the configured backup directory."},
 	"restore":    {Usage: "face-me-bro restore --input FILE --yes", Description: "Replace the configured database from a backup after explicit confirmation."},
 	"export":     {Usage: "face-me-bro export metadata [--output FILE]", Description: "Export application metadata as versioned JSON."},
@@ -392,9 +394,25 @@ func backupCommand(application *app.App, args []string, jsonOutput bool, stdout 
 
 func collectionCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("collection requires add or list")
+		return fmt.Errorf("collection requires add, get, list, remove, or set-search")
 	}
 	switch args[0] {
+	case "get":
+		flags := flag.NewFlagSet("collection get", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *collectionID == "" {
+			return fmt.Errorf("collection get requires --collection-id")
+		}
+		var id, name, root, created, updated, method string
+		var enabled int
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, name, root_path, enabled, created_at, updated_at, neighbor_search_method FROM collections WHERE id = ?`, *collectionID).Scan(&id, &name, &root, &enabled, &created, &updated, &method); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "collection get", map[string]any{"id": id, "name": name, "root": root, "enabled": enabled == 1, "created_at": created, "updated_at": updated, "neighbor_search_method": method})
 	case "set-search":
 		flags := flag.NewFlagSet("collection set-search", flag.ContinueOnError)
 		flags.SetOutput(stderr)
@@ -708,9 +726,26 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 
 func accountCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("account requires create, list, disable, enable, or reset-password")
+		return fmt.Errorf("account requires get, create, list, disable, enable, or reset-password")
 	}
 	store := auth.NewStore(application.DB)
+	if args[0] == "get" {
+		flags := flag.NewFlagSet("account get", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		accountID := flags.String("account-id", "", "account ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *accountID == "" {
+			return fmt.Errorf("account get requires --account-id")
+		}
+		var id, username, role, created, updated string
+		var disabled, mustChange int
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, username, role, disabled_at IS NOT NULL, must_change_password, created_at, updated_at FROM accounts WHERE id = ?`, *accountID).Scan(&id, &username, &role, &disabled, &mustChange, &created, &updated); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "account get", map[string]any{"id": id, "username": username, "role": role, "disabled": disabled == 1, "must_change_password": mustChange == 1, "created_at": created, "updated_at": updated})
+	}
 	if args[0] == "list" {
 		rows, err := application.DB.QueryContext(ctx, "SELECT id, username, role, disabled_at IS NOT NULL FROM accounts ORDER BY username")
 		if err != nil {
@@ -827,7 +862,24 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 
 func peopleCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("people requires create or list")
+		return fmt.Errorf("people requires get, create, or list")
+	}
+	if args[0] == "get" {
+		flags := flag.NewFlagSet("people get", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "person ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *personID == "" {
+			return fmt.Errorf("people get requires --person-id")
+		}
+		var id, name, created, updated string
+		var provisional, dontTrack int
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, COALESCE(name, ''), is_provisional, dont_track, created_at, updated_at FROM people WHERE id = ?`, *personID).Scan(&id, &name, &provisional, &dontTrack, &created, &updated); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "people get", map[string]any{"id": id, "name": name, "provisional": provisional == 1, "dont_track": dontTrack == 1, "created_at": created, "updated_at": updated})
 	}
 	if args[0] == "create" {
 		flags := flag.NewFlagSet("people create", flag.ContinueOnError)
@@ -951,8 +1003,61 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 	disposition := flags.String("disposition", "", "face disposition")
 	reference := flags.Bool("reference", false, "set as reference")
 	yes := flags.Bool("yes", false, "confirm identity-changing operation")
+	limit := flags.Int("limit", 0, "maximum number of faces to return; zero means unlimited")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
+	}
+	if args[0] == "list" {
+		if *limit < 0 {
+			return fmt.Errorf("face list requires a non-negative --limit")
+		}
+		query := `SELECT f.id, f.analysis_id, f.face_index, f.detection_confidence, f.quality, COALESCE(a.state, 'unassigned'), COALESCE(a.person_id, ''), COALESCE(p.name, '')
+			FROM faces f LEFT JOIN current_face_assignments a ON a.face_id = f.id LEFT JOIN people p ON p.id = a.person_id ORDER BY f.created_at, f.id`
+		var queryArgs []any
+		if *limit > 0 {
+			query += " LIMIT ?"
+			queryArgs = append(queryArgs, *limit)
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type face struct {
+			ID                  string  `json:"id"`
+			AnalysisID          string  `json:"analysis_id"`
+			Index               int     `json:"face_index"`
+			DetectionConfidence float64 `json:"detection_confidence"`
+			Quality             float64 `json:"quality"`
+			State               string  `json:"state"`
+			PersonID            string  `json:"person_id"`
+			PersonName          string  `json:"person_name"`
+		}
+		var result []face
+		for rows.Next() {
+			var item face
+			var detection, quality sql.NullFloat64
+			if err := rows.Scan(&item.ID, &item.AnalysisID, &item.Index, &detection, &quality, &item.State, &item.PersonID, &item.PersonName); err != nil {
+				return err
+			}
+			if detection.Valid {
+				item.DetectionConfidence = detection.Float64
+			}
+			if quality.Valid {
+				item.Quality = quality.Float64
+			}
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("face list", result))
+		}
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%g\t%g\n", item.ID, item.State, item.PersonName, item.Quality, item.DetectionConfidence)
+		}
+		return nil
 	}
 	if *faceID == "" {
 		return fmt.Errorf("face %s requires --face-id", args[0])
@@ -1012,7 +1117,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 
 func clusterCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("cluster requires get or review")
+		return fmt.Errorf("cluster requires run, get, list, or review")
 	}
 	if args[0] == "run" {
 		flags := flag.NewFlagSet("cluster run", flag.ContinueOnError)
@@ -1034,6 +1139,66 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "cluster run", map[string]string{"run_id": runID, "neighbor_search_method": settings.NeighborSearchMethod})
+	}
+	if args[0] == "list" {
+		flags := flag.NewFlagSet("cluster list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		runID := flags.String("run-id", "", "clustering run ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query := `SELECT c.id, c.clustering_run_id, c.cluster_key, COALESCE(c.proposed_person_id, ''), COALESCE(p.name, ''), c.review_status, c.is_mixed, c.purity, c.connectivity, COUNT(cm.face_id)
+			FROM clusters c LEFT JOIN people p ON p.id = c.proposed_person_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id`
+		var queryArgs []any
+		if *runID != "" {
+			query += " WHERE c.clustering_run_id = ?"
+			queryArgs = append(queryArgs, *runID)
+		}
+		query += " GROUP BY c.id ORDER BY c.created_at, c.id"
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type cluster struct {
+			ID                 string  `json:"id"`
+			RunID              string  `json:"clustering_run_id"`
+			Key                string  `json:"cluster_key"`
+			ProposedPersonID   string  `json:"proposed_person_id"`
+			ProposedPersonName string  `json:"proposed_person_name"`
+			ReviewStatus       string  `json:"review_status"`
+			Mixed              bool    `json:"mixed"`
+			Purity             float64 `json:"purity"`
+			Connectivity       float64 `json:"connectivity"`
+			Faces              int     `json:"faces"`
+		}
+		var result []cluster
+		for rows.Next() {
+			var item cluster
+			var mixed int
+			var purity, connectivity sql.NullFloat64
+			if err := rows.Scan(&item.ID, &item.RunID, &item.Key, &item.ProposedPersonID, &item.ProposedPersonName, &item.ReviewStatus, &mixed, &purity, &connectivity, &item.Faces); err != nil {
+				return err
+			}
+			item.Mixed = mixed == 1
+			if purity.Valid {
+				item.Purity = purity.Float64
+			}
+			if connectivity.Valid {
+				item.Connectivity = connectivity.Float64
+			}
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("cluster list", result))
+		}
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%d\t%s\t%s\n", item.ID, item.ReviewStatus, item.Faces, item.ProposedPersonName, item.RunID)
+		}
+		return nil
 	}
 	flags := flag.NewFlagSet("cluster "+args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -1117,8 +1282,76 @@ func searchCommand(ctx context.Context, application *app.App, args []string, jso
 }
 
 func auditCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "purge" {
-		return fmt.Errorf("audit requires purge")
+	if len(args) == 0 {
+		return fmt.Errorf("audit requires list or purge")
+	}
+	if args[0] == "list" {
+		flags := flag.NewFlagSet("audit list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		entityType := flags.String("entity-type", "", "filter by entity type")
+		entityID := flags.String("entity-id", "", "filter by entity ID")
+		limit := flags.Int("limit", 100, "maximum number of events to return")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *limit < 1 {
+			return fmt.Errorf("audit list requires a positive --limit")
+		}
+		query := `SELECT id, COALESCE(account_id, ''), action, entity_type, entity_id, COALESCE(target_event_id, ''), COALESCE(previous_json, ''), COALESCE(new_json, ''), conflict, created_at FROM audit_events WHERE 1 = 1`
+		var queryArgs []any
+		if *entityType != "" {
+			query += " AND entity_type = ?"
+			queryArgs = append(queryArgs, *entityType)
+		}
+		if *entityID != "" {
+			query += " AND entity_id = ?"
+			queryArgs = append(queryArgs, *entityID)
+		}
+		query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+		queryArgs = append(queryArgs, *limit)
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type event struct {
+			ID            string          `json:"id"`
+			AccountID     string          `json:"account_id"`
+			Action        string          `json:"action"`
+			EntityType    string          `json:"entity_type"`
+			EntityID      string          `json:"entity_id"`
+			TargetEventID string          `json:"target_event_id"`
+			Previous      json.RawMessage `json:"previous"`
+			New           json.RawMessage `json:"new"`
+			Conflict      bool            `json:"conflict"`
+			CreatedAt     string          `json:"created_at"`
+		}
+		var result []event
+		for rows.Next() {
+			var item event
+			var previous, current string
+			var conflict int
+			if err := rows.Scan(&item.ID, &item.AccountID, &item.Action, &item.EntityType, &item.EntityID, &item.TargetEventID, &previous, &current, &conflict, &item.CreatedAt); err != nil {
+				return err
+			}
+			item.Previous = json.RawMessage(previous)
+			item.New = json.RawMessage(current)
+			item.Conflict = conflict == 1
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("audit list", result))
+		}
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", item.CreatedAt, item.Action, item.EntityType, item.EntityID, item.ID)
+		}
+		return nil
+	}
+	if args[0] != "purge" {
+		return fmt.Errorf("audit requires list or purge")
 	}
 	flags := flag.NewFlagSet("audit purge", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -1187,7 +1420,25 @@ func serveCommand(ctx context.Context, application *app.App, args []string, stdo
 
 func pipelineCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("pipeline requires register or list")
+		return fmt.Errorf("pipeline requires get, register, or list")
+	}
+	if args[0] == "get" {
+		flags := flag.NewFlagSet("pipeline get", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		pipelineID := flags.String("pipeline-id", "", "pipeline ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *pipelineID == "" {
+			return fmt.Errorf("pipeline get requires --pipeline-id")
+		}
+		var id, family, version, checksums, detector, preprocessing, dtype, normalization, provider, dependencies, created string
+		var dimension int
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, model_family, model_version, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension, embedding_dtype, normalization, execution_provider, dependency_versions_json, created_at FROM pipelines WHERE id = ?`, *pipelineID).Scan(&id, &family, &version, &checksums, &detector, &preprocessing, &dimension, &dtype, &normalization, &provider, &dependencies, &created); err != nil {
+			return err
+		}
+		result := map[string]any{"id": id, "model_family": family, "model_version": version, "model_checksums": json.RawMessage(checksums), "detector_config": json.RawMessage(detector), "preprocessing_config": json.RawMessage(preprocessing), "embedding_dimension": dimension, "embedding_dtype": dtype, "normalization": normalization, "execution_provider": provider, "dependency_versions": json.RawMessage(dependencies), "created_at": created}
+		return writeCommandResult(stdout, jsonOutput, "pipeline get", result)
 	}
 	if args[0] == "list" {
 		rows, err := application.DB.QueryContext(ctx, `SELECT id, model_family, model_version, embedding_dimension, embedding_dtype, normalization, execution_provider, model_checksums_json, detector_config_json, preprocessing_config_json FROM pipelines ORDER BY created_at DESC`)
@@ -1216,7 +1467,7 @@ func pipelineCommand(ctx context.Context, application *app.App, args []string, j
 		return nil
 	}
 	if args[0] != "register" {
-		return fmt.Errorf("pipeline requires register or list")
+		return fmt.Errorf("pipeline requires get, register, or list")
 	}
 	flags := flag.NewFlagSet("pipeline register", flag.ContinueOnError)
 	flags.SetOutput(stderr)
