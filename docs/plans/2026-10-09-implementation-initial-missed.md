@@ -9,11 +9,11 @@ complete in the current implementation audit. It is intended to supplement
 - [x] Extract EXIF capture dates and persist the selected date source.
 - [ ] Detect and process iOS Live Photos and Android-style motion photos using
       their reference still component.
-- [ ] Persist scan runs and per-path scan items.
+- [x] Persist scan runs and per-path scan items.
 - [ ] Implement resumable scan progress.
 - [ ] Add scan pause, resume, cancel, and retry operations.
 - [ ] Handle symlinks and junctions explicitly and safely.
-- [ ] Persist categorized unsupported, corrupt, and unstable path outcomes.
+- [x] Persist categorized unsupported, corrupt, and unstable path outcomes.
 
 ## Worker contract and reliability
 

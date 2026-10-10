@@ -33,6 +33,16 @@ func TestPersistScanDeduplicatesAssetsAndRetainsPaths(t *testing.T) {
 	if err := store.PersistScan(context.Background(), collectionID, records); err != nil {
 		t.Fatal(err)
 	}
+	var scanRuns, scanItems int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM scan_runs WHERE collection_id = ? AND status = 'completed'`, collectionID).Scan(&scanRuns); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM scan_items`).Scan(&scanItems); err != nil {
+		t.Fatal(err)
+	}
+	if scanRuns != 1 || scanItems != 2 {
+		t.Fatalf("scan runs/items=%d/%d, want 1/2", scanRuns, scanItems)
+	}
 	var assets, paths int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM photo_assets`).Scan(&assets); err != nil {
 		t.Fatal(err)

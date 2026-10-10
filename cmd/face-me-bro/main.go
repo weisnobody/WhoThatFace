@@ -185,14 +185,23 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 	if err != nil {
 		return err
 	}
-	if err := media.NewStore(application.DB).PersistScan(ctx, *collectionID, records); err != nil {
+	mediaStore := media.NewStore(application.DB)
+	scanRunID, err := mediaStore.StartScan(ctx, *collectionID)
+	if err != nil {
+		return err
+	}
+	if err := mediaStore.PersistScanRun(ctx, *collectionID, scanRunID, records); err != nil {
+		_ = mediaStore.FinishScan(ctx, scanRunID, "failed", err.Error())
+		return err
+	}
+	if err := mediaStore.FinishScan(ctx, scanRunID, "completed", ""); err != nil {
 		return err
 	}
 	job, err := jobs.NewStore(application.DB).Enqueue(ctx, "analysis", 5, map[string]any{"collection_id": *collectionID})
 	if err != nil {
 		return err
 	}
-	result := map[string]any{"collection_id": *collectionID, "files": len(records), "supported": countSupported(records), "analysis_job_id": job.ID}
+	result := map[string]any{"collection_id": *collectionID, "scan_run_id": scanRunID, "files": len(records), "supported": countSupported(records), "analysis_job_id": job.ID}
 	if jsonOutput {
 		return writeJSON(stdout, envelope("scan", result))
 	}

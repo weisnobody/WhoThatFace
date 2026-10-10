@@ -29,9 +29,39 @@ func (s Store) CreateCollection(ctx context.Context, name, root string) (string,
 	return collectionID, nil
 }
 
+func (s Store) StartScan(ctx context.Context, collectionID string) (string, error) {
+	runID, err := id.NewUUIDv7()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO scan_runs (id, collection_id, status, started_at, created_at) VALUES (?, ?, 'running', ?, ?)`, runID, collectionID, now, now)
+	return runID, err
+}
+
+func (s Store) FinishScan(ctx context.Context, runID, status, message string) error {
+	if status != "completed" && status != "completed-with-errors" && status != "failed" && status != "cancelled" {
+		return fmt.Errorf("invalid scan status %q", status)
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE scan_runs SET status = ?, completed_at = ?, error_message = NULLIF(?, '') WHERE id = ?`, status, time.Now().UTC().Format(time.RFC3339Nano), message, runID)
+	return err
+}
+
 // PersistScan updates assets and paths in one transaction. The input may
 // contain duplicate content hashes; they become one asset with many paths.
 func (s Store) PersistScan(ctx context.Context, collectionID string, records []FileRecord) error {
+	runID, err := s.StartScan(ctx, collectionID)
+	if err != nil {
+		return err
+	}
+	if err := s.PersistScanRun(ctx, collectionID, runID, records); err != nil {
+		_ = s.FinishScan(ctx, runID, "failed", err.Error())
+		return err
+	}
+	return s.FinishScan(ctx, runID, "completed", "")
+}
+
+func (s Store) PersistScanRun(ctx context.Context, collectionID, runID string, records []FileRecord) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -40,6 +70,13 @@ func (s Store) PersistScan(ctx context.Context, collectionID string, records []F
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	seen := make(map[string]struct{})
 	for _, record := range records {
+		itemID, err := id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_items (id, scan_run_id, relative_path, status, content_sha256, error_message, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`, itemID, runID, record.RelativePath, record.Status, record.ContentSHA256, record.Error, now); err != nil {
+			return err
+		}
 		if record.Status != StatusSupported || record.ContentSHA256 == "" {
 			continue
 		}
