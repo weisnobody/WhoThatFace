@@ -507,6 +507,7 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		if jsonOutput {
 			return writeJSON(stdout, envelope("collection list", result))
 		}
+		fmt.Fprintln(stdout, "id\tname\troot\tneighbor_search_method")
 		for _, item := range result {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.ID, item.Name, item.Root, item.SearchMethod)
 		}
@@ -582,6 +583,7 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if jsonOutput {
 			return writeJSON(stdout, envelope("scan status", scans))
 		}
+		fmt.Fprintln(stdout, "id\tcollection_id\tstatus")
 		for _, value := range scans {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\n", value.ID, value.CollectionID, value.Status)
 		}
@@ -718,6 +720,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 	if jsonOutput {
 		return writeJSON(stdout, envelope("job list", result))
 	}
+	fmt.Fprintln(stdout, "id\tkind\tstatus\tpriority\tattempts")
 	for _, value := range result {
 		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\tattempts=%d/%d\n", value.ID, value.Kind, value.Status, value.Priority, value.Attempts, value.MaxAttempts)
 	}
@@ -771,6 +774,7 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		if jsonOutput {
 			return writeJSON(stdout, envelope("account list", result))
 		}
+		fmt.Fprintln(stdout, "id\tusername\trole\tdisabled")
 		for _, value := range result {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%t\n", value.ID, value.Username, value.Role, value.Disabled)
 		}
@@ -935,6 +939,7 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 	if jsonOutput {
 		return writeJSON(stdout, envelope("people list", result))
 	}
+	fmt.Fprintln(stdout, "id\tname")
 	for _, value := range result {
 		fmt.Fprintf(stdout, "%s\t%s\n", value.ID, value.Name)
 	}
@@ -1054,6 +1059,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if jsonOutput {
 			return writeJSON(stdout, envelope("face list", result))
 		}
+		fmt.Fprintln(stdout, "id\tstate\tperson_name\tquality\tdetection_confidence")
 		for _, item := range result {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%g\t%g\n", item.ID, item.State, item.PersonName, item.Quality, item.DetectionConfidence)
 		}
@@ -1195,6 +1201,7 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 		if jsonOutput {
 			return writeJSON(stdout, envelope("cluster list", result))
 		}
+		fmt.Fprintln(stdout, "id\treview_status\tfaces\tproposed_person_name\tclustering_run_id")
 		for _, item := range result {
 			fmt.Fprintf(stdout, "%s\t%s\t%d\t%s\t%s\n", item.ID, item.ReviewStatus, item.Faces, item.ProposedPersonName, item.RunID)
 		}
@@ -1345,6 +1352,7 @@ func auditCommand(ctx context.Context, application *app.App, args []string, json
 		if jsonOutput {
 			return writeJSON(stdout, envelope("audit list", result))
 		}
+		fmt.Fprintln(stdout, "created_at\taction\tentity_type\tentity_id\tid")
 		for _, item := range result {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", item.CreatedAt, item.Action, item.EntityType, item.EntityID, item.ID)
 		}
@@ -1461,6 +1469,7 @@ func pipelineCommand(ctx context.Context, application *app.App, args []string, j
 		if jsonOutput {
 			return writeJSON(stdout, envelope("pipeline list", result))
 		}
+		fmt.Fprintln(stdout, "id\tmodel_family\tmodel_version\texecution_provider")
 		for _, item := range result {
 			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item["id"], item["model_family"], item["model_version"], item["execution_provider"])
 		}
