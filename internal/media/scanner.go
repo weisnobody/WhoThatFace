@@ -2,7 +2,9 @@
 package media
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"image"
@@ -54,6 +56,7 @@ type FileRecord struct {
 	FilesystemCreatedAt  time.Time
 	FilesystemModifiedAt time.Time
 	CaptureDate          CaptureDate
+	EXIFCaptureDate      time.Time
 	Width                int
 	Height               int
 	Error                string
@@ -140,6 +143,9 @@ func (s Scanner) inspect(root, path string, entry fs.DirEntry) (FileRecord, erro
 		return FileRecord{}, err
 	}
 	record.ContentSHA256 = hash
+	if exifDate, exifErr := extractEXIFCaptureDate(path); exifErr == nil {
+		record.EXIFCaptureDate = exifDate
+	}
 	if dimensions, decodeErr := decodeDimensions(path); decodeErr == nil {
 		record.Width = dimensions.width
 		record.Height = dimensions.height
@@ -178,8 +184,9 @@ func decodeDimensions(path string) (dimensions struct{ width, height int }, err 
 }
 
 func selectCaptureDate(record FileRecord) CaptureDate {
-	// EXIF parsing is delegated to the metadata extractor; the scanner's
-	// filesystem fallback is deterministic and available on every platform.
+	if !record.EXIFCaptureDate.IsZero() {
+		return CaptureDate{Value: record.EXIFCaptureDate, Source: "exif"}
+	}
 	if !record.FilesystemCreatedAt.IsZero() {
 		return CaptureDate{Value: record.FilesystemCreatedAt, Source: "filesystem-created"}
 	}
@@ -187,6 +194,95 @@ func selectCaptureDate(record FileRecord) CaptureDate {
 		return CaptureDate{Value: record.FilesystemModifiedAt, Source: "filesystem-modified"}
 	}
 	return CaptureDate{Source: "none"}
+}
+
+// extractEXIFCaptureDate reads the common JPEG EXIF DateTimeOriginal tag.
+// The scanner intentionally treats unsupported EXIF layouts as absent and
+// falls back to filesystem timestamps. Full metadata retention belongs to the
+// asset metadata extractor, while this value is needed for date search.
+func extractEXIFCaptureDate(path string) (time.Time, error) {
+	if strings.ToLower(filepath.Ext(path)) != ".jpg" && strings.ToLower(filepath.Ext(path)) != ".jpeg" {
+		return time.Time{}, fmt.Errorf("not a JPEG")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
+		return time.Time{}, fmt.Errorf("not a JPEG stream")
+	}
+	for offset := 2; offset+4 <= len(data); {
+		if data[offset] != 0xff {
+			return time.Time{}, fmt.Errorf("invalid JPEG marker")
+		}
+		marker := data[offset+1]
+		offset += 2
+		if marker == 0xda || marker == 0xd9 {
+			break
+		}
+		if marker == 0xd8 || marker == 0x01 || marker >= 0xd0 && marker <= 0xd7 {
+			continue
+		}
+		if offset+2 > len(data) {
+			break
+		}
+		segmentLength := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		if segmentLength < 2 || offset+segmentLength > len(data) {
+			break
+		}
+		segment := data[offset+2 : offset+segmentLength]
+		if marker == 0xe1 && bytes.HasPrefix(segment, []byte("Exif\x00\x00")) {
+			return parseEXIFDate(segment[6:])
+		}
+		offset += segmentLength
+	}
+	return time.Time{}, fmt.Errorf("EXIF DateTimeOriginal not found")
+}
+
+func parseEXIFDate(data []byte) (time.Time, error) {
+	if len(data) < 8 {
+		return time.Time{}, fmt.Errorf("short TIFF header")
+	}
+	var order binary.ByteOrder = binary.BigEndian
+	if bytes.Equal(data[:2], []byte("II")) {
+		order = binary.LittleEndian
+	} else if !bytes.Equal(data[:2], []byte("MM")) {
+		return time.Time{}, fmt.Errorf("invalid TIFF byte order")
+	}
+	if order.Uint16(data[2:4]) != 42 {
+		return time.Time{}, fmt.Errorf("invalid TIFF marker")
+	}
+	ifdOffset := int(order.Uint32(data[4:8]))
+	if ifdOffset < 0 || ifdOffset+2 > len(data) {
+		return time.Time{}, fmt.Errorf("invalid EXIF IFD offset")
+	}
+	count := int(order.Uint16(data[ifdOffset : ifdOffset+2]))
+	for index := 0; index < count; index++ {
+		entry := ifdOffset + 2 + index*12
+		if entry+12 > len(data) {
+			break
+		}
+		tag := order.Uint16(data[entry : entry+2])
+		typ := order.Uint16(data[entry+2 : entry+4])
+		units := order.Uint32(data[entry+4 : entry+8])
+		if tag != 0x9003 || typ != 2 || units == 0 {
+			continue
+		}
+		length := int(units)
+		valueOffset := entry + 8
+		if length > 4 {
+			valueOffset = int(order.Uint32(data[entry+8 : entry+12]))
+		}
+		if valueOffset < 0 || valueOffset+length > len(data) {
+			return time.Time{}, fmt.Errorf("invalid EXIF date value")
+		}
+		value := strings.TrimSpace(strings.TrimRight(string(data[valueOffset:valueOffset+length]), "\x00"))
+		if len(value) < 19 {
+			return time.Time{}, fmt.Errorf("invalid EXIF date %q", value)
+		}
+		return time.ParseInLocation("2006:01:02 15:04:05", value[:19], time.Local)
+	}
+	return time.Time{}, fmt.Errorf("DateTimeOriginal not found")
 }
 
 func isSupported(path string) bool {

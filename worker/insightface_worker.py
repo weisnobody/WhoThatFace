@@ -7,6 +7,7 @@ the model environment is incomplete.
 """
 
 import base64
+import hashlib
 import json
 import os
 import platform
@@ -83,6 +84,20 @@ def handle(message):
             error(message_id, "model_unavailable", str(MODEL_ERROR or "InsightFace is not configured"), True)
             return True
         try:
+            expected_size = int(message.get("expected_size", 0) or 0)
+            expected_sha256 = message.get("expected_sha256", "")
+            actual_size = os.path.getsize(path)
+            if expected_size and actual_size != expected_size:
+                error(message_id, "file_changed", "image size changed before analysis", True)
+                return True
+            if expected_sha256:
+                digest = hashlib.sha256()
+                with open(path, "rb") as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected_sha256:
+                    error(message_id, "file_changed", "image content changed before analysis", True)
+                    return True
             import cv2  # type: ignore
 
             image = cv2.imread(path, cv2.IMREAD_COLOR)

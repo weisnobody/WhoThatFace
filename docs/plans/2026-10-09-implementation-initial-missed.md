@@ -6,7 +6,7 @@ complete in the current implementation audit. It is intended to supplement
 
 ## Scanning and metadata
 
-- [ ] Extract EXIF capture dates and persist the selected date source.
+- [x] Extract EXIF capture dates and persist the selected date source.
 - [ ] Detect and process iOS Live Photos and Android-style motion photos using
       their reference still component.
 - [ ] Persist scan runs and per-path scan items.
@@ -20,7 +20,7 @@ complete in the current implementation audit. It is intended to supplement
 - [ ] Validate worker capabilities, model checksums, preprocessing settings,
       and pipeline compatibility at startup.
 - [ ] Implement explicit protocol minor-version negotiation.
-- [ ] Validate expected file identity before accepting analysis results.
+- [x] Validate expected file identity before accepting analysis results.
 - [ ] Restart workers after timeout, malformed output, or process failure.
 - [ ] Persist bounded retry attempts and permanent failures.
 - [ ] Implement cancellation through worker termination and restart.

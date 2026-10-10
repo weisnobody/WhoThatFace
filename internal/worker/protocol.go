@@ -21,6 +21,8 @@ type Message struct {
 	Capabilities    *Capabilities `json:"capabilities,omitempty"`
 	PipelineID      string        `json:"pipeline_id,omitempty"`
 	ImagePath       string        `json:"image_path,omitempty"`
+	ExpectedSHA256  string        `json:"expected_sha256,omitempty"`
+	ExpectedSize    int64         `json:"expected_size,omitempty"`
 	MaxPixels       int64         `json:"max_pixels,omitempty"`
 	Faces           []FaceResult  `json:"faces,omitempty"`
 	Error           *WorkerError  `json:"error,omitempty"`

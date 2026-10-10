@@ -3,9 +3,12 @@ package worker
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 
@@ -100,7 +103,11 @@ func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxP
 	if err != nil {
 		return Message{}, err
 	}
-	if err := c.sendLocked(Message{Type: "analyze", ID: requestID, ImagePath: imagePath, PipelineID: pipelineID, MaxPixels: maxPixels}); err != nil {
+	identity, err := inspectFileIdentity(imagePath)
+	if err != nil {
+		return Message{}, err
+	}
+	if err := c.sendLocked(Message{Type: "analyze", ID: requestID, ImagePath: imagePath, ExpectedSHA256: identity.sha256, ExpectedSize: identity.size, PipelineID: pipelineID, MaxPixels: maxPixels}); err != nil {
 		return Message{}, err
 	}
 	responseChannel := make(chan struct {
@@ -130,6 +137,28 @@ func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxP
 	case <-ctx.Done():
 		return Message{}, ctx.Err()
 	}
+}
+
+type fileIdentity struct {
+	sha256 string
+	size   int64
+}
+
+func inspectFileIdentity(path string) (fileIdentity, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return fileIdentity{}, fmt.Errorf("open image for identity: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fileIdentity{}, fmt.Errorf("stat image for identity: %w", err)
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return fileIdentity{}, fmt.Errorf("hash image for identity: %w", err)
+	}
+	return fileIdentity{sha256: hex.EncodeToString(hasher.Sum(nil)), size: info.Size()}, nil
 }
 
 // Close stops the worker process.
