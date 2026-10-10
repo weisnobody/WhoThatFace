@@ -13,6 +13,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
+	"github.com/pjg/face_me_bro/internal/setup"
 )
 
 const outputSchemaVersion = "1"
@@ -71,8 +72,10 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return jobCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "account":
 		return accountCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "setup":
+		return setupCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account)", command)
+		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup)", command)
 	}
 }
 
@@ -229,6 +232,27 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		return writeJSON(stdout, envelope("account reset-password", map[string]bool{"reset": true}))
 	}
 	fmt.Fprintln(stdout, "Password reset; user must change it at next login.")
+	return nil
+}
+
+func setupCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) != 1 || args[0] != "check" {
+		return fmt.Errorf("setup requires check")
+	}
+	report := setup.Validate(ctx, "python3.11", filepath.Join(application.Config.RuntimeDataRoot, "venv"), application.Config.ModelRoot)
+	if jsonOutput {
+		return writeJSON(stdout, envelope("setup check", report))
+	}
+	for _, check := range report.Checks {
+		state := "FAIL"
+		if check.Passed {
+			state = "OK"
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%s\n", state, check.Name, check.Details)
+	}
+	if !report.Valid {
+		return fmt.Errorf("setup validation failed")
+	}
 	return nil
 }
 
