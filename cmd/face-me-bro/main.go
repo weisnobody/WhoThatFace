@@ -107,6 +107,25 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		return fmt.Errorf("collection requires add or list")
 	}
 	switch args[0] {
+	case "remove":
+		flags := flag.NewFlagSet("collection remove", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID")
+		confirmed := flags.Bool("yes", false, "confirm removal")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *collectionID == "" || !*confirmed {
+			return fmt.Errorf("collection remove requires --collection-id and --yes")
+		}
+		if err := media.NewStore(application.DB).DeleteCollection(ctx, *collectionID); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("collection remove", map[string]string{"id": *collectionID}))
+		}
+		fmt.Fprintln(stdout, "ok")
+		return nil
 	case "add":
 		flags := flag.NewFlagSet("collection add", flag.ContinueOnError)
 		flags.SetOutput(stderr)

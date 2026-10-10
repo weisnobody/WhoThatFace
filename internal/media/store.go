@@ -29,6 +29,34 @@ func (s Store) CreateCollection(ctx context.Context, name, root string) (string,
 	return collectionID, nil
 }
 
+func (s Store) DeleteCollection(ctx context.Context, collectionID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM collection_permissions WHERE collection_id = ?`, collectionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scan_items WHERE scan_run_id IN (SELECT id FROM scan_runs WHERE collection_id = ?)`, collectionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scan_runs WHERE collection_id = ?`, collectionID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM photo_paths WHERE collection_id = ?`, collectionID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM collections WHERE id = ?`, collectionID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return fmt.Errorf("collection %q does not exist", collectionID)
+	}
+	return tx.Commit()
+}
+
 func (s Store) StartScan(ctx context.Context, collectionID string) (string, error) {
 	runID, err := id.NewUUIDv7()
 	if err != nil {

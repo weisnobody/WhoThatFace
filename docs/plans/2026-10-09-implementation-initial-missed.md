@@ -69,7 +69,7 @@ complete in the current implementation audit. It is intended to supplement
 
 ## CLI and operational controls
 
-- [ ] Add collection remove and lifecycle commands.
+- [x] Add collection remove and lifecycle commands.
 - [ ] Add scan status, pause, resume, cancel, and retry commands.
 - [ ] Add job pause, resume, cancel, retry, and detailed-status commands.
 - [ ] Add face and cluster inspection/review commands.
