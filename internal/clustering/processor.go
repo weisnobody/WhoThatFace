@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/pjg/face_me_bro/internal/recognition"
 	"github.com/pjg/face_me_bro/internal/review"
 )
 
@@ -102,14 +103,27 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 			}
 			purity, connectivity := cluster.Purity, cluster.Connectivity
 			var candidatePerson string
+			var candidate recognition.Candidate
 			agreementValue := false
-			candidateErr := p.db.QueryRowContext(ctx, `SELECT person_id FROM recognition_candidates WHERE face_id = ? ORDER BY created_at DESC, rank LIMIT 1`, faceID).Scan(&candidatePerson)
+			candidateErr := p.db.QueryRowContext(ctx, `SELECT person_id, similarity, margin, support_count, quality, detection_confidence FROM recognition_candidates WHERE face_id = ? ORDER BY created_at DESC, rank LIMIT 1`, faceID).Scan(&candidatePerson, &candidate.Similarity, &candidate.Margin, &candidate.Support, &candidate.Quality, &candidate.Detection)
 			var agreement *bool
+			state := review.Provisional
 			if candidateErr == nil {
 				agreementValue = candidatePerson == cluster.ProposedPersonID
 				agreement = &agreementValue
+				candidate.PersonID, candidate.Purity, candidate.Connectivity, candidate.References, candidate.Agreement = candidatePerson, cluster.Purity, cluster.Connectivity, true, agreementValue
+				level := recognition.Classify(candidate, recognition.DefaultThresholds())
+				if level == recognition.EvidenceHigh {
+					state = review.AssignedSystem
+				}
+				if level == recognition.EvidenceManual {
+					state = review.Unknown
+				}
 			}
-			if _, err := review.NewStore(p.db).Assign(ctx, faceID, cluster.ProposedPersonID, review.Provisional, review.Actor{Type: "system"}, review.Evidence{ClusteringRunID: runID, Similarity: nil, Purity: &purity, Connectivity: &connectivity, Agreement: agreement}, "cluster-provisional"); err != nil {
+			if state == review.Unknown {
+				candidatePerson = ""
+			}
+			if _, err := review.NewStore(p.db).Assign(ctx, faceID, candidatePersonOr(cluster.ProposedPersonID, state), state, review.Actor{Type: "system"}, review.Evidence{ClusteringRunID: runID, Similarity: &candidate.Similarity, Margin: &candidate.Margin, Support: &candidate.Support, Quality: &candidate.Quality, Detection: &candidate.Detection, Purity: &purity, Connectivity: &connectivity, Agreement: agreement}, "cluster-provisional"); err != nil {
 				return "", err
 			}
 		}
@@ -118,6 +132,13 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 		return "", err
 	}
 	return runID, nil
+}
+
+func candidatePersonOr(personID string, state review.AssignmentState) string {
+	if state == review.Unknown {
+		return ""
+	}
+	return personID
 }
 
 func createProvisionalPerson(ctx context.Context, database *sql.DB) (string, error) {

@@ -32,7 +32,7 @@ complete in the current implementation audit. It is intended to supplement
 - [x] Create and maintain provisional person records for discovery-first
       clusters where appropriate.
 - [x] Calculate recognition/grouping agreement for candidate people.
-- [ ] Use combined evidence to derive assignment states.
+- [x] Use combined evidence to derive assignment states.
 - [x] Persist candidate lists and complete evidence snapshots.
 - [ ] Wire reference changes to recognition, affected clustering, and
       recommendation reprocessing.
