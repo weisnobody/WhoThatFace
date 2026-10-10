@@ -117,9 +117,10 @@ complete in the current implementation audit. It is intended to supplement
 
 ## Documentation consistency
 
-- [ ] Update `docs/SPEC.md` to reflect that implementation is authorized and
+- [x] Update `docs/SPEC.md` to reflect that implementation is authorized and
       underway rather than saying `DESIGN ONLY`.
-- [ ] Remove or revise the obsolete implementation-gate language.
-- [ ] Correct the duplicated `image` object in the worker response example.
+- [x] Remove or revise the obsolete implementation-gate language.
+- [x] Verify the worker response example does not contain the previously
+      reported duplicated `image` object.
 - [ ] Mark completed, partial, and deferred requirements explicitly as the
       implementation progresses.

@@ -1477,9 +1477,11 @@ and may be recalibrated through the documented evaluation workflows:
 
 ## 23. Implementation gates
 
-Implementation must not begin until this specification is explicitly approved.
+These gates defined the pre-implementation approval criteria. Implementation
+has now begun; remaining unchecked gates are tracked as implementation or
+validation work rather than blockers to starting the project.
 
-Before implementation approval, the project should have:
+The project should have:
 
 1. A confirmed scope and data model.
 2. A worker protocol definition.
@@ -1491,8 +1493,8 @@ Before implementation approval, the project should have:
 
 ## Current phase
 
-DESIGN ONLY.
+IMPLEMENTATION IN PROGRESS.
 
-No implementation has been authorized by this document. The next design
-activities are to finalize the prototype plans, confirm remaining open
-operational details, and obtain explicit approval of this specification.
+The specification remains the source of requirements and acceptance criteria.
+Incomplete implementation items and validation work are tracked in the
+implementation plans under `docs/plans/`.

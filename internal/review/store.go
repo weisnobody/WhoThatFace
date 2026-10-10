@@ -184,6 +184,12 @@ func (s Store) SetDisposition(ctx context.Context, faceID, disposition string, a
 	if err != nil {
 		return err
 	}
+	if !active {
+		_, err = s.db.ExecContext(ctx, `DELETE FROM current_face_dispositions WHERE face_id = ?`, faceID)
+		if err != nil {
+			return err
+		}
+	}
 	return audit.NewStore(s.db).Record(ctx, audit.Event{
 		AccountID: actor.AccountID, Action: "face-disposition", EntityType: "face", EntityID: faceID,
 		New: map[string]any{"disposition": disposition, "active": active},
