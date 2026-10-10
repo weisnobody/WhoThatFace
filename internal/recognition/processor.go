@@ -6,7 +6,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"time"
 
+	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/review"
 )
 
@@ -52,6 +54,9 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if err := p.persistCandidates(ctx, faceID, candidates); err != nil {
+			return err
+		}
 		if len(candidates) == 0 {
 			if _, err := p.review.Assign(ctx, faceID, "", review.Unknown, review.Actor{Type: "system"}, review.Evidence{}, "no-reference-candidate"); err != nil {
 				return err
@@ -76,6 +81,21 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 		}
 	}
 	return rows.Err()
+}
+
+func (p Processor) persistCandidates(ctx context.Context, faceID string, candidates []Candidate) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for index, candidate := range candidates {
+		candidateID, err := id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+		evidence := string(ClassifyStandalone(candidate, p.thresholds))
+		if _, err := p.db.ExecContext(ctx, `INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, candidateID, faceID, candidate.PersonID, index+1, candidate.Similarity, candidate.Margin, candidate.Support, candidate.Quality, candidate.Detection, evidence, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p Processor) loadReferences(ctx context.Context) (map[string][][]float32, error) {

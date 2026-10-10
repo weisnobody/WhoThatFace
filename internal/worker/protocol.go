@@ -33,14 +33,17 @@ type Message struct {
 }
 
 type Capabilities struct {
-	WorkerVersion      string   `json:"worker_version"`
-	PythonVersion      string   `json:"python_version"`
-	InsightFaceVersion string   `json:"insightface_version"`
-	Providers          []string `json:"providers"`
-	Models             []string `json:"models"`
-	EmbeddingDimension int      `json:"embedding_dimension"`
-	EmbeddingDType     string   `json:"embedding_dtype"`
-	EmbeddingMetric    string   `json:"embedding_metric"`
+	WorkerVersion      string            `json:"worker_version"`
+	PythonVersion      string            `json:"python_version"`
+	InsightFaceVersion string            `json:"insightface_version"`
+	Providers          []string          `json:"providers"`
+	Models             []string          `json:"models"`
+	EmbeddingDimension int               `json:"embedding_dimension"`
+	EmbeddingDType     string            `json:"embedding_dtype"`
+	EmbeddingMetric    string            `json:"embedding_metric"`
+	ModelChecksums     map[string]string `json:"model_checksums,omitempty"`
+	Modules            []string          `json:"modules,omitempty"`
+	Preprocessing      string            `json:"preprocessing,omitempty"`
 }
 
 type WorkerError struct {

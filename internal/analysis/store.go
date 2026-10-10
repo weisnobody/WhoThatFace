@@ -70,6 +70,9 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 	if response.Type != "analysis_result" {
 		return "", fmt.Errorf("worker response type %q is not analysis_result", response.Type)
 	}
+	if response.PipelineID != "" && response.PipelineID != pipelineID {
+		return "", fmt.Errorf("worker pipeline %q does not match requested pipeline %q", response.PipelineID, pipelineID)
+	}
 	analysisID, err := id.NewUUIDv7()
 	if err != nil {
 		return "", err

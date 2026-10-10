@@ -38,6 +38,9 @@ def capabilities():
         "embedding_dimension": 512,
         "embedding_dtype": "float32",
         "embedding_metric": "cosine",
+        "model_checksums": {},
+        "modules": ["detection", "recognition"],
+        "preprocessing": "opencv-bgr-exif-oriented-v1",
     }
 
 
@@ -133,6 +136,7 @@ def handle(message):
             send({
                 "type": "analysis_result",
                 "id": message_id,
+                "pipeline_id": message.get("pipeline_id", ""),
                 "faces": faces,
                 "source_width": source_width,
                 "source_height": source_height,

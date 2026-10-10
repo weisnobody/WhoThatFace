@@ -101,7 +101,15 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 				continue
 			}
 			purity, connectivity := cluster.Purity, cluster.Connectivity
-			if _, err := review.NewStore(p.db).Assign(ctx, faceID, cluster.ProposedPersonID, review.Provisional, review.Actor{Type: "system"}, review.Evidence{ClusteringRunID: runID, Similarity: nil, Purity: &purity, Connectivity: &connectivity, Agreement: nil}, "cluster-provisional"); err != nil {
+			var candidatePerson string
+			agreementValue := false
+			candidateErr := p.db.QueryRowContext(ctx, `SELECT person_id FROM recognition_candidates WHERE face_id = ? ORDER BY created_at DESC, rank LIMIT 1`, faceID).Scan(&candidatePerson)
+			var agreement *bool
+			if candidateErr == nil {
+				agreementValue = candidatePerson == cluster.ProposedPersonID
+				agreement = &agreementValue
+			}
+			if _, err := review.NewStore(p.db).Assign(ctx, faceID, cluster.ProposedPersonID, review.Provisional, review.Actor{Type: "system"}, review.Evidence{ClusteringRunID: runID, Similarity: nil, Purity: &purity, Connectivity: &connectivity, Agreement: agreement}, "cluster-provisional"); err != nil {
 				return "", err
 			}
 		}

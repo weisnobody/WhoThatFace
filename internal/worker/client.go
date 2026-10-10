@@ -89,6 +89,26 @@ func (c *Client) startLocked(ctx context.Context) error {
 	} else {
 		c.minor = ProtocolMinor
 	}
+	if err := validateCapabilities(response.Capabilities); err != nil {
+		c.stopLocked()
+		return err
+	}
+	return nil
+}
+
+func validateCapabilities(capabilities *Capabilities) error {
+	if capabilities == nil {
+		return fmt.Errorf("worker handshake omitted capabilities")
+	}
+	if capabilities.InsightFaceVersion == "" || capabilities.InsightFaceVersion == "unavailable" {
+		return fmt.Errorf("worker InsightFace is unavailable")
+	}
+	if capabilities.EmbeddingDimension <= 0 || capabilities.EmbeddingDType != "float32" || capabilities.EmbeddingMetric != "cosine" {
+		return fmt.Errorf("worker embedding capabilities are incompatible")
+	}
+	if len(capabilities.Providers) == 0 || len(capabilities.Models) == 0 {
+		return fmt.Errorf("worker did not report execution provider and model")
+	}
 	return nil
 }
 
