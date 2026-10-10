@@ -581,6 +581,9 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		if err := store.SetDisabled(ctx, *accountID, args[0] == "disable"); err != nil {
 			return err
 		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("account "+args[0], map[string]any{"account_id": *accountID, "disabled": args[0] == "disable"}))
+		}
 		fmt.Fprintln(stdout, "ok")
 		return nil
 	}
@@ -600,6 +603,9 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		}
 		if err := store.SetCollectionPermission(ctx, *accountID, *collectionID, *view, *modify, *undo); err != nil {
 			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("account grant", map[string]any{"account_id": *accountID, "collection_id": *collectionID, "view": *view, "modify": *modify, "undo": *undo}))
 		}
 		fmt.Fprintln(stdout, "ok")
 		return nil
