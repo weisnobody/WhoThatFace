@@ -65,6 +65,15 @@ func OpenWithOptions(ctx context.Context, filename string, options OpenOptions) 
 			database.Close()
 			return nil, fmt.Errorf("database schema is unavailable with migrations disabled: %w", err)
 		}
+		migrations, err := loadMigrations()
+		if err != nil {
+			database.Close()
+			return nil, err
+		}
+		if err := validateSchemaVersions(ctx, database, migrations); err != nil {
+			database.Close()
+			return nil, err
+		}
 	} else if err := applyMigrations(ctx, database); err != nil {
 		database.Close()
 		return nil, err
