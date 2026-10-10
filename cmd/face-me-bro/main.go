@@ -14,8 +14,10 @@ import (
 	"github.com/pjg/face_me_bro/internal/analysis"
 	"github.com/pjg/face_me_bro/internal/app"
 	"github.com/pjg/face_me_bro/internal/auth"
+	"github.com/pjg/face_me_bro/internal/clustering"
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
+	"github.com/pjg/face_me_bro/internal/recognition"
 	"github.com/pjg/face_me_bro/internal/setup"
 	"github.com/pjg/face_me_bro/internal/web"
 	"github.com/pjg/face_me_bro/internal/worker"
@@ -337,7 +339,8 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 	}
 	defer client.Close()
 	processor := analysis.NewProcessor(application.DB, client, *pipelineID, *maxPixels)
-	runner := jobs.Runner{Store: jobs.NewStore(application.DB), Handlers: map[string]jobs.Handler{
+	jobStore := jobs.NewStore(application.DB)
+	runner := jobs.Runner{Store: jobStore, Handlers: map[string]jobs.Handler{
 		"analysis": func(jobContext context.Context, job jobs.Job) error {
 			var payload struct {
 				CollectionID string `json:"collection_id"`
@@ -348,7 +351,31 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if payload.CollectionID == "" {
 				return fmt.Errorf("analysis job has no collection_id")
 			}
-			return processor.ProcessCollection(jobContext, payload.CollectionID)
+			if err := processor.ProcessCollection(jobContext, payload.CollectionID); err != nil {
+				return err
+			}
+			_, err := jobStore.Enqueue(jobContext, "recognition", 1, map[string]string{"pipeline_id": *pipelineID})
+			return err
+		},
+		"recognition": func(jobContext context.Context, _ jobs.Job) error {
+			if err := recognition.NewProcessor(application.DB, recognition.DefaultThresholds()).ProcessAll(jobContext); err != nil {
+				return err
+			}
+			_, err := jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"})
+			return err
+		},
+		"clustering": func(jobContext context.Context, job jobs.Job) error {
+			var payload struct {
+				Scope string `json:"scope"`
+			}
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.Scope == "" {
+				payload.Scope = "all"
+			}
+			_, err := clustering.NewProcessor(application.DB, clustering.DefaultConfig()).Run(jobContext, payload.Scope)
+			return err
 		},
 	}, IdleWait: time.Second}
 	fmt.Fprintln(stdout, "Worker running")
