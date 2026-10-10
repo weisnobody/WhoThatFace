@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/pjg/face_me_bro/internal/jobs"
 )
 
 type AssignmentState string
@@ -147,7 +148,11 @@ func (s Store) SetReference(ctx context.Context, faceID, personID string, refere
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_, err = jobs.NewStore(s.db).Enqueue(ctx, "reference-reprocess", 1, map[string]string{"person_id": personID, "face_id": faceID})
+	return err
 }
 
 func (s Store) SetDisposition(ctx context.Context, faceID, disposition string, active bool, actor Actor, reason string) error {

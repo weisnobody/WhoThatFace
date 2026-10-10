@@ -528,6 +528,19 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			_, err := jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"})
 			return err
 		},
+		"reference-reprocess": func(jobContext context.Context, job jobs.Job) error {
+			if err := recognition.NewProcessor(application.DB, recognition.DefaultThresholds()).ProcessAll(jobContext); err != nil {
+				return err
+			}
+			var payload struct {
+				PersonID string `json:"person_id"`
+			}
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			_, err := clustering.NewProcessor(application.DB, clustering.DefaultConfig()).Run(jobContext, "all")
+			return err
+		},
 		"clustering": func(jobContext context.Context, job jobs.Job) error {
 			var payload struct {
 				Scope string `json:"scope"`
