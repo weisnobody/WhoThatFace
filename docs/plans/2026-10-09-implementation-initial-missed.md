@@ -34,11 +34,11 @@ complete in the current implementation audit. It is intended to supplement
 - [x] Calculate recognition/grouping agreement for candidate people.
 - [x] Use combined evidence to derive assignment states.
 - [x] Persist candidate lists and complete evidence snapshots.
-- [ ] Wire reference changes to recognition, affected clustering, and
+- [x] Wire reference changes to recognition, affected clustering, and
       recommendation reprocessing.
-- [ ] Preserve and recompute system/provisional assignments without changing
+- [x] Preserve and recompute system/provisional assignments without changing
       user-confirmed assignments.
-- [ ] Validate purity and connectivity against the grouping benchmark
+- [x] Validate purity and connectivity against the grouping benchmark
       definitions.
 
 ## Cluster review workflow

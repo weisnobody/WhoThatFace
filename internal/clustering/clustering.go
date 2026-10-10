@@ -49,6 +49,48 @@ type Result struct {
 	Edges    []Edge
 }
 
+// CalculatePurity implements the grouping benchmark definition: the largest
+// manually identified person count divided by all manually identified faces.
+// Unidentified faces do not contribute to either side of the ratio.
+func CalculatePurity(personIDs []string) float32 {
+	counts := make(map[string]int)
+	known := 0
+	for _, personID := range personIDs {
+		if personID == "" {
+			continue
+		}
+		counts[personID]++
+		known++
+	}
+	if known == 0 {
+		return 0
+	}
+	best := 0
+	for _, count := range counts {
+		if count > best {
+			best = count
+		}
+	}
+	return float32(best) / float32(known)
+}
+
+// CalculateConnectivity is the normalized spanning-edge measure used by the
+// grouping benchmark. A connected n-face cluster needs n-1 internal edges;
+// singleton clusters are therefore fully connected.
+func CalculateConnectivity(faceCount, internalEdges int) float32 {
+	if faceCount <= 1 {
+		return 1
+	}
+	value := float32(internalEdges) / float32(faceCount-1)
+	if value > 1 {
+		return 1
+	}
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
 // Group constructs mutual-kNN edges above the configured threshold and
 // returns connected components. Every input face appears in exactly one
 // cluster, including isolated singleton faces.
@@ -115,34 +157,21 @@ func Group(faces []Face, config Config) (Result, error) {
 	for _, members := range groups {
 		sort.Slice(members, func(left, right int) bool { return faces[members[left]].ID < faces[members[right]].ID })
 		cluster := Cluster{Key: faces[members[0]].ID, FaceIDs: make([]string, 0, len(members))}
-		people := make(map[string]int)
-		knownFaces := 0
+		people := make([]string, 0, len(members))
 		for _, member := range members {
 			cluster.FaceIDs = append(cluster.FaceIDs, faces[member].ID)
-			if faces[member].PersonID != "" {
-				people[faces[member].PersonID]++
-				knownFaces++
+			people = append(people, faces[member].PersonID)
+		}
+		cluster.Purity = CalculatePurity(people)
+		knownPeople := make(map[string]struct{})
+		for _, personID := range people {
+			if personID != "" {
+				knownPeople[personID] = struct{}{}
 			}
 		}
-		if len(people) > 0 {
-			maxCount := 0
-			for _, count := range people {
-				if count > maxCount {
-					maxCount = count
-				}
-			}
-			cluster.Purity = float32(maxCount) / float32(knownFaces)
-			cluster.Mixed = len(people) > 1
-		}
+		cluster.Mixed = len(knownPeople) > 1
 		internalEdges := countInternalEdges(edges, cluster.FaceIDs)
-		if len(cluster.FaceIDs) > 1 {
-			cluster.Connectivity = float32(internalEdges) / float32(len(cluster.FaceIDs)-1)
-			if cluster.Connectivity > 1 {
-				cluster.Connectivity = 1
-			}
-		} else {
-			cluster.Connectivity = 1
-		}
+		cluster.Connectivity = CalculateConnectivity(len(cluster.FaceIDs), internalEdges)
 		clusters = append(clusters, cluster)
 	}
 	sort.Slice(clusters, func(left, right int) bool { return clusters[left].Key < clusters[right].Key })

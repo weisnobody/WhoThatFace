@@ -36,3 +36,18 @@ func TestGroupReportsMixedCluster(t *testing.T) {
 		t.Errorf("cluster = %+v", result.Clusters[0])
 	}
 }
+
+func TestBenchmarkMetricsIgnoreUnknownPurityAndNormalizeConnectivity(t *testing.T) {
+	if got := CalculatePurity([]string{"alice", "alice", "bob", ""}); got != float32(2)/3 {
+		t.Fatalf("purity = %v, want %v", got, float32(2)/3)
+	}
+	if got := CalculatePurity([]string{"", ""}); got != 0 {
+		t.Fatalf("unknown-only purity = %v, want 0", got)
+	}
+	if got := CalculateConnectivity(3, 2); got != 1 {
+		t.Fatalf("connectivity = %v, want 1", got)
+	}
+	if got := CalculateConnectivity(3, 1); got != .5 {
+		t.Fatalf("partial connectivity = %v, want .5", got)
+	}
+}

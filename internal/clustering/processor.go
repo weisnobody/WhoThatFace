@@ -29,7 +29,7 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 	if scope == "" {
 		scope = "all"
 	}
-	query := `SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(ca.person_id, '') FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.embedding IS NOT NULL`
+	query := `SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(ca.person_id, '') FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.embedding IS NOT NULL AND COALESCE(ca.state, 'unassigned') <> 'assigned-user'`
 	if scope == "unresolved-only" {
 		query += ` AND COALESCE(ca.state, 'unassigned') NOT IN ('assigned-system', 'assigned-user')`
 	}
@@ -82,7 +82,7 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 				cluster.ProposedPersonID = personID
 			}
 		} else if len(personIDs) == 0 && !cluster.Mixed {
-			personID, createErr := createProvisionalPerson(ctx, p.db)
+			personID, createErr := findOrCreateProvisionalPerson(ctx, p.db, cluster.FaceIDs)
 			if createErr != nil {
 				return "", createErr
 			}
@@ -98,7 +98,13 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 		}
 		for _, faceID := range cluster.FaceIDs {
 			current, currentErr := review.NewStore(p.db).Current(ctx, faceID)
-			if currentErr != nil || current.State != review.Unassigned {
+			if currentErr == sql.ErrNoRows {
+				if err := review.NewStore(p.db).InitializeFace(ctx, faceID, review.Actor{Type: "system"}); err != nil {
+					return "", err
+				}
+				current, currentErr = review.NewStore(p.db).Current(ctx, faceID)
+			}
+			if currentErr != nil || current.State == review.AssignedUser {
 				continue
 			}
 			purity, connectivity := cluster.Purity, cluster.Connectivity
@@ -113,7 +119,9 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 				agreement = &agreementValue
 				candidate.PersonID, candidate.Purity, candidate.Connectivity, candidate.References, candidate.Agreement = candidatePerson, cluster.Purity, cluster.Connectivity, true, agreementValue
 				level := recognition.Classify(candidate, recognition.DefaultThresholds())
-				if level == recognition.EvidenceHigh {
+				if !agreementValue {
+					state = review.Unknown
+				} else if level == recognition.EvidenceHigh {
 					state = review.AssignedSystem
 				}
 				if level == recognition.EvidenceManual {
@@ -141,7 +149,23 @@ func candidatePersonOr(personID string, state review.AssignmentState) string {
 	return personID
 }
 
-func createProvisionalPerson(ctx context.Context, database *sql.DB) (string, error) {
+func findOrCreateProvisionalPerson(ctx context.Context, database *sql.DB, faceIDs []string) (string, error) {
+	for _, faceID := range faceIDs {
+		var personID string
+		err := database.QueryRowContext(ctx, `
+			SELECT c.proposed_person_id
+			FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id
+			JOIN clustering_runs r ON r.id = c.clustering_run_id
+			JOIN people p ON p.id = c.proposed_person_id
+			WHERE cm.face_id = ? AND r.status = 'active' AND p.is_provisional = 1
+			ORDER BY r.accepted_at DESC LIMIT 1`, faceID).Scan(&personID)
+		if err == nil && personID != "" {
+			return personID, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", err
+		}
+	}
 	personID, err := id.NewUUIDv7()
 	if err != nil {
 		return "", err

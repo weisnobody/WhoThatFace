@@ -910,17 +910,23 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			return err
 		},
 		"reference-reprocess": func(jobContext context.Context, job jobs.Job) error {
-			if err := recognition.NewProcessor(application.DB, recognition.DefaultThresholds()).ProcessAll(jobContext); err != nil {
-				return err
-			}
 			var payload struct {
 				PersonID string `json:"person_id"`
 			}
 			if err := json.Unmarshal(job.Payload, &payload); err != nil {
 				return err
 			}
-			_, err := clustering.NewProcessor(application.DB, clustering.DefaultConfig()).Run(jobContext, "all")
-			return err
+			if payload.PersonID == "" {
+				return fmt.Errorf("reference reprocess job has no person_id")
+			}
+			recognitionProcessor := recognition.NewProcessor(application.DB, recognition.DefaultThresholds())
+			if err := recognitionProcessor.ProcessAll(jobContext); err != nil {
+				return err
+			}
+			if _, err := clustering.NewProcessor(application.DB, clustering.DefaultConfig()).Run(jobContext, "all"); err != nil {
+				return err
+			}
+			return recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID)
 		},
 		"clustering": func(jobContext context.Context, job jobs.Job) error {
 			var payload struct {
