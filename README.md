@@ -85,6 +85,7 @@ configuration file or directory and runtime data root.
 
 - [`docs/SPEC.md`](docs/SPEC.md) — requirements and acceptance criteria.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — architecture and boundaries.
+- [`docs/usage.md`](docs/usage.md) — end-to-end collection and review workflow.
 - [`docs/plans/`](docs/plans/) — implementation and feature plans.
 - [`docs/protocols/performance_evaluation.md`](docs/protocols/performance_evaluation.md)
   — benchmark procedure.
