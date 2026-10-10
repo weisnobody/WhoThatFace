@@ -56,7 +56,7 @@ complete in the current implementation audit. It is intended to supplement
 
 ## Web service, authorization, and audit
 
-- [ ] Integrate audit recording into every mutating review and account action.
+- [x] Integrate audit recording into every mutating review and account action.
 - [ ] Implement targeted undo with conflict detection and compensating events.
 - [ ] Enforce system-admin, collection-manager, reviewer, and viewer roles.
 - [ ] Scope every people, cluster, photo, metadata, and image query to

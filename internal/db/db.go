@@ -17,6 +17,38 @@ func Open(ctx context.Context, filename string) (*sql.DB, error) {
 	return OpenWithOptions(ctx, filename, OpenOptions{})
 }
 
+// Backup copies a database file to a new, exclusive backup file.
+func Backup(filename, backupDir string) (string, error) {
+	info, err := os.Stat(filename)
+	if err != nil {
+		return "", fmt.Errorf("stat database for backup: %w", err)
+	}
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return "", fmt.Errorf("create backup directory: %w", err)
+	}
+	name := filepath.Join(backupDir, filepath.Base(filename)+"."+time.Now().UTC().Format("20060102T150405.000000000Z")+".bak")
+	input, err := os.Open(filename)
+	if err != nil {
+		return "", err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		output.Close()
+		return "", err
+	}
+	if err := output.Close(); err != nil {
+		return "", err
+	}
+	if info.Size() == 0 {
+		return "", fmt.Errorf("database is empty")
+	}
+	return name, nil
+}
+
 // OpenOptions controls database startup behavior.
 type OpenOptions struct {
 	// NoMigrate refuses to create or upgrade the schema.

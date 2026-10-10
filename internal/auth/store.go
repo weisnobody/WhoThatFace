@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/id"
 )
 
@@ -50,7 +51,14 @@ func (s Store) CreateAccount(ctx context.Context, username, password string, rol
 	if err != nil {
 		return Account{}, fmt.Errorf("create account: %w", err)
 	}
-	return s.account(ctx, accountID)
+	account, err := s.account(ctx, accountID)
+	if err != nil {
+		return Account{}, err
+	}
+	if err := audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: accountID, Action: "account-create", EntityType: "account", EntityID: accountID, New: map[string]any{"username": username, "role": role}}); err != nil {
+		return Account{}, err
+	}
+	return account, nil
 }
 
 func (s Store) EnsureBootstrapAdmin(ctx context.Context) (Account, error) {
@@ -74,7 +82,14 @@ func (s Store) EnsureBootstrapAdmin(ctx context.Context) (Account, error) {
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO accounts (id, username, password_hash, role, must_change_password, created_at, updated_at) VALUES (?, 'admin', ?, ?, 1, ?, ?)`, adminID, hash, SystemAdmin, now, now); err != nil {
 		return Account{}, err
 	}
-	return s.account(ctx, adminID)
+	account, err := s.account(ctx, adminID)
+	if err != nil {
+		return Account{}, err
+	}
+	if err := audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: adminID, Action: "account-bootstrap", EntityType: "account", EntityID: adminID}); err != nil {
+		return Account{}, err
+	}
+	return account, nil
 }
 
 func (s Store) ResetPassword(ctx context.Context, accountID, password string, mustChange bool) error {
@@ -83,7 +98,10 @@ func (s Store) ResetPassword(ctx context.Context, accountID, password string, mu
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `UPDATE accounts SET password_hash = ?, must_change_password = ?, failed_login_count = 0, failed_login_window_started_at = NULL, updated_at = ? WHERE id = ?`, hash, boolInt(mustChange), time.Now().UTC().Format(time.RFC3339Nano), accountID)
-	return err
+	if err != nil {
+		return err
+	}
+	return audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: accountID, Action: "password-reset", EntityType: "account", EntityID: accountID})
 }
 
 func (s Store) SetDisabled(ctx context.Context, accountID string, disabled bool) error {
@@ -92,7 +110,10 @@ func (s Store) SetDisabled(ctx context.Context, accountID string, disabled bool)
 		value = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET disabled_at = ?, updated_at = ? WHERE id = ?`, value, time.Now().UTC().Format(time.RFC3339Nano), accountID)
-	return err
+	if err != nil {
+		return err
+	}
+	return audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: accountID, Action: "account-state", EntityType: "account", EntityID: accountID, New: map[string]any{"disabled": disabled}})
 }
 
 func (s Store) SetCollectionPermission(ctx context.Context, accountID, collectionID string, view, modify, undo bool) error {
@@ -101,7 +122,10 @@ func (s Store) SetCollectionPermission(ctx context.Context, accountID, collectio
 		INSERT INTO collection_permissions (account_id, collection_id, can_view, can_modify, can_undo, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(account_id, collection_id) DO UPDATE SET can_view = excluded.can_view, can_modify = excluded.can_modify, can_undo = excluded.can_undo, updated_at = excluded.updated_at`, accountID, collectionID, boolInt(view), boolInt(modify), boolInt(undo), now, now)
-	return err
+	if err != nil {
+		return err
+	}
+	return audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: accountID, Action: "collection-permission", EntityType: "collection-permission", EntityID: collectionID, New: map[string]any{"account_id": accountID, "view": view, "modify": modify, "undo": undo}})
 }
 
 // Authenticate updates lockout state transactionally. Ten failures inside a

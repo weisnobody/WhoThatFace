@@ -17,6 +17,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/clustering"
+	"github.com/pjg/face_me_bro/internal/db"
 	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
@@ -97,9 +98,26 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return searchCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "audit":
 		return auditCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "backup":
+		return backupCommand(application, args, jsonOutput, stdout)
 	default:
 		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve, pipeline, worker, people, search)", command)
 	}
+}
+
+func backupCommand(application *app.App, args []string, jsonOutput bool, stdout io.Writer) error {
+	if len(args) != 1 || args[0] != "create" {
+		return fmt.Errorf("backup requires create")
+	}
+	path, err := db.Backup(application.Config.DatabasePath, application.Config.BackupRoot)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("backup create", map[string]string{"path": path}))
+	}
+	fmt.Fprintln(stdout, path)
+	return nil
 }
 
 func collectionCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
