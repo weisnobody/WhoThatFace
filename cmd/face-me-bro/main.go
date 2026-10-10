@@ -87,12 +87,50 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, settings.DatabasePath)
 		return nil
 	}
-	application, err := app.Open(ctx, *configPath, *noMigrate)
+	application, err := app.OpenWithOptions(ctx, *configPath, *noMigrate, db.OpenOptions{
+		SkipMigrations: command != "status" && command != "serve",
+		ReadOnly:       commandIsReadOnly(command, flags.Args()[1:]),
+	})
 	if err != nil {
 		return err
 	}
 	defer application.Close()
 	return dispatch(ctx, application, command, flags.Args()[1:], *jsonOutput, stdout, stderr)
+}
+
+func commandIsReadOnly(command string, args []string) bool {
+	subcommand := ""
+	if len(args) > 0 {
+		subcommand = args[0]
+	}
+	switch command {
+	case "collection":
+		return subcommand == "list"
+	case "scan":
+		return subcommand == "status"
+	case "job":
+		return subcommand == "list" || subcommand == "get"
+	case "account":
+		return subcommand == "list"
+	case "setup":
+		return subcommand == "check"
+	case "pipeline":
+		return subcommand == "list"
+	case "config":
+		return subcommand == "show"
+	case "people":
+		return subcommand == "list"
+	case "face":
+		return subcommand == "get"
+	case "cluster":
+		return subcommand == "get"
+	case "search":
+		return true
+	case "backup", "export":
+		return true
+	default:
+		return false
+	}
 }
 
 func dispatch(ctx context.Context, application *app.App, command string, args []string, jsonOutput bool, stdout, stderr io.Writer) error {

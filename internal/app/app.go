@@ -20,6 +20,13 @@ type App struct {
 
 // Open loads configuration and opens the configured database.
 func Open(ctx context.Context, configPath string, noMigrate bool) (*App, error) {
+	return OpenWithOptions(ctx, configPath, noMigrate, db.OpenOptions{})
+}
+
+// OpenWithOptions opens the application with database access appropriate for
+// the command being run. Read-only commands use SQLite read-only connections;
+// only status and serve should pass migration checks.
+func OpenWithOptions(ctx context.Context, configPath string, noMigrate bool, options db.OpenOptions) (*App, error) {
 	settings, err := config.Load(configPath)
 	if err != nil {
 		return nil, err
@@ -27,7 +34,9 @@ func Open(ctx context.Context, configPath string, noMigrate bool) (*App, error) 
 	if err := ensureRuntimeDirectories(settings); err != nil {
 		return nil, err
 	}
-	database, err := db.OpenWithOptions(ctx, settings.DatabasePath, db.OpenOptions{NoMigrate: noMigrate, BackupDir: settings.BackupRoot})
+	options.NoMigrate = noMigrate
+	options.BackupDir = settings.BackupRoot
+	database, err := db.OpenWithOptions(ctx, settings.DatabasePath, options)
 	if err != nil {
 		return nil, err
 	}

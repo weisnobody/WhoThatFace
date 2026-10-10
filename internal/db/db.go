@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -91,6 +93,11 @@ type OpenOptions struct {
 	NoMigrate bool
 	// BackupDir receives a copy before pending migrations are applied.
 	BackupDir string
+	// SkipMigrations avoids migration checks for commands that do not own
+	// schema upgrades. The schema is still required by ValidateInvariants.
+	SkipMigrations bool
+	// ReadOnly opens an existing database without permitting writes.
+	ReadOnly bool
 }
 
 // OpenWithOptions opens a SQLite database and applies migrations unless
@@ -101,20 +108,18 @@ func OpenWithOptions(ctx context.Context, filename string, options OpenOptions) 
 			return nil, fmt.Errorf("open database without migrations: %w", err)
 		}
 	}
-	database, err := sql.Open("sqlite", filename)
+	dsn, err := sqliteDSN(filename, options.ReadOnly)
+	if err != nil {
+		return nil, fmt.Errorf("build sqlite DSN: %w", err)
+	}
+	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
+	database.SetMaxOpenConns(4)
+	database.SetMaxIdleConns(4)
 
-	if _, err := database.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
-		database.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
-	}
-	if _, err := database.ExecContext(ctx, "PRAGMA busy_timeout = 5000"); err != nil {
-		database.Close()
-		return nil, fmt.Errorf("set busy timeout: %w", err)
-	}
-	if options.BackupDir != "" && !options.NoMigrate {
+	if options.BackupDir != "" && !options.NoMigrate && !options.SkipMigrations {
 		pending, err := hasPendingMigrations(ctx, database)
 		if err != nil {
 			database.Close()
@@ -142,9 +147,11 @@ func OpenWithOptions(ctx context.Context, filename string, options OpenOptions) 
 			database.Close()
 			return nil, err
 		}
-	} else if err := applyMigrations(ctx, database); err != nil {
-		database.Close()
-		return nil, err
+	} else if !options.SkipMigrations {
+		if err := applyMigrations(ctx, database); err != nil {
+			database.Close()
+			return nil, err
+		}
 	}
 	if err := ValidateInvariants(ctx, database); err != nil {
 		database.Close()
@@ -153,20 +160,90 @@ func OpenWithOptions(ctx context.Context, filename string, options OpenOptions) 
 	return database, nil
 }
 
+func sqliteDSN(filename string, readOnly bool) (string, error) {
+	absolute, err := filepath.Abs(filename)
+	if err != nil {
+		return "", err
+	}
+	values := url.Values{}
+	if readOnly {
+		values.Set("mode", "ro")
+	}
+	values.Add("_pragma", "busy_timeout=10000")
+	values.Add("_pragma", "foreign_keys=1")
+	if !readOnly {
+		values.Add("_pragma", "journal_mode=WAL")
+		values.Add("_pragma", "synchronous=NORMAL")
+	}
+	return (&url.URL{Scheme: "file", Path: absolute, RawQuery: values.Encode()}).String(), nil
+}
+
+// WithBusyRetry retries an operation when SQLite reports a transient lock.
+// The connection-level busy timeout handles ordinary contention; this helper
+// covers lock transitions such as WAL setup and cross-process migrations.
+func WithBusyRetry(ctx context.Context, attempts int, operation func() error) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		err = operation()
+		if !IsBusy(err) || attempt == attempts-1 {
+			return err
+		}
+		delay := time.Duration(25*(1<<min(attempt, 6))) * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return err
+}
+
+func IsBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	value := strings.ToLower(err.Error())
+	return strings.Contains(value, "sqlite_busy") || strings.Contains(value, "database is locked")
+}
+
+func min(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
 func hasPendingMigrations(ctx context.Context, database *sql.DB) (bool, error) {
 	migrations, err := loadMigrations()
 	if err != nil {
 		return false, err
 	}
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer connection.Close()
+	if err := WithBusyRetry(ctx, 8, func() error {
+		_, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE")
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer connection.ExecContext(context.Background(), "ROLLBACK")
 	var table string
-	if err := database.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&table); err != nil {
+	if err := connection.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&table); err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
 		}
 		return false, err
 	}
 	for _, migration := range migrations {
-		applied, err := migrationApplied(ctx, database, migration.version)
+		applied, err := migrationApplied(ctx, connection, migration.version)
 		if err != nil {
 			return false, err
 		}

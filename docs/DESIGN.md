@@ -151,6 +151,15 @@ The database contains logical collections rather than one database per photo
 collection. This enables shared people, cross-collection search, and
 cross-collection content deduplication.
 
+SQLite connections use WAL mode, foreign-key enforcement, and a busy timeout
+configured in the connection string so the settings apply to every pooled
+connection. The application limits the pool to four open and four idle
+connections. Read-only CLI operations open SQLite in read-only mode. Schema
+migration checks and execution are owned by `status` and `serve`; other CLI
+commands skip migration checks and can safely read while a worker writes.
+Migration acquisition uses an immediate transaction with bounded exponential
+retry for transient `SQLITE_BUSY` errors.
+
 ## Core data flow
 
 ### Ingestion and analysis

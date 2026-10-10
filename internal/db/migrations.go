@@ -51,42 +51,58 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	if err := validateSchemaVersions(ctx, database, migrations); err != nil {
+	connection, err := database.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	if err := WithBusyRetry(ctx, 8, func() error {
+		_, err := connection.ExecContext(ctx, "BEGIN IMMEDIATE")
+		return err
+	}); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = connection.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+	if err := validateSchemaVersions(ctx, connection, migrations); err != nil {
 		return err
 	}
 
 	for _, migration := range migrations {
-		applied, err := migrationApplied(ctx, database, migration.version)
+		applied, err := migrationApplied(ctx, connection, migration.version)
 		if err != nil {
 			return fmt.Errorf("check migration %q: %w", migration.name, err)
 		}
 		if applied {
 			continue
 		}
-
-		transaction, err := database.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("begin migration %q: %w", migration.name, err)
-		}
-		if _, err := transaction.ExecContext(ctx, migration.sql); err != nil {
-			_ = transaction.Rollback()
+		if _, err := connection.ExecContext(ctx, migration.sql); err != nil {
 			return fmt.Errorf("apply migration %q: %w", migration.name, err)
 		}
-		if _, err := transaction.ExecContext(ctx,
+		if _, err := connection.ExecContext(ctx,
 			"INSERT INTO schema_migrations(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)",
 			migration.version,
 		); err != nil {
-			_ = transaction.Rollback()
 			return fmt.Errorf("record migration %q: %w", migration.name, err)
 		}
-		if err := transaction.Commit(); err != nil {
-			return fmt.Errorf("commit migration %q: %w", migration.name, err)
-		}
 	}
+	if _, err := connection.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit migrations: %w", err)
+	}
+	committed = true
 	return nil
 }
 
-func validateSchemaVersions(ctx context.Context, database *sql.DB, migrations []migration) error {
+type queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func validateSchemaVersions(ctx context.Context, database queryer, migrations []migration) error {
 	var table string
 	if err := database.QueryRowContext(ctx, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&table); err != nil {
 		if err == sql.ErrNoRows {
@@ -134,7 +150,7 @@ func ValidateInvariants(ctx context.Context, database *sql.DB) error {
 	return nil
 }
 
-func migrationApplied(ctx context.Context, database *sql.DB, version string) (bool, error) {
+func migrationApplied(ctx context.Context, database queryer, version string) (bool, error) {
 	var exists int
 	err := database.QueryRowContext(ctx,
 		"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations' LIMIT 1",

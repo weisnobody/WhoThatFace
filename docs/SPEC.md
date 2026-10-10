@@ -973,12 +973,19 @@ database and data locations are unambiguous.
 - Migrations are sequential and immutable after application.
 - Apply schema migrations transactionally.
 - Automatically create a backup before migrations.
-- Run migrations automatically at startup.
+- `status` and `serve` own migration checks and execution. Other commands do
+  not check or apply migrations during startup.
 - Provide a `--no-migrate` safety option.
 - Validate post-migration invariants.
 - Refuse to run when the database is newer than the application supports.
 - Support the latest schema after successful upgrade rather than indefinite
   compatibility with all historical schemas.
+
+SQLite must use WAL mode, foreign-key enforcement, and a connection-string
+busy timeout on every connection. The default pool is limited to four open
+and four idle connections. Read-only commands use SQLite read-only connections.
+Migration checks and execution acquire a cross-process immediate transaction
+and retry transient `SQLITE_BUSY` errors with bounded exponential backoff.
 
 Large index rebuilds and derived-data changes should be resumable maintenance
 jobs rather than long, unobservable startup migrations.
