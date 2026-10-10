@@ -100,9 +100,129 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return auditCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "backup":
 		return backupCommand(application, args, jsonOutput, stdout)
+	case "export":
+		return exportCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "purge":
+		return purgeCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	default:
 		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve, pipeline, worker, people, search)", command)
 	}
+}
+
+func purgeCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 || args[0] != "derived" {
+		return fmt.Errorf("purge requires derived")
+	}
+	flags := flag.NewFlagSet("purge derived", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	confirmed := flags.Bool("yes", false, "confirm deletion of derived face and analysis data")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if !*confirmed {
+		return fmt.Errorf("purge derived requires --yes")
+	}
+	tx, err := application.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`DELETE FROM current_face_references`, `DELETE FROM reference_selection_events`,
+		`DELETE FROM reference_recommendations`, `DELETE FROM current_face_dispositions`, `DELETE FROM face_disposition_events`,
+		`DELETE FROM current_face_assignments`, `DELETE FROM assignment_events`, `DELETE FROM cluster_memberships`,
+		`DELETE FROM cluster_review_events`, `DELETE FROM clusters`, `DELETE FROM clustering_runs`,
+		`DELETE FROM face_correspondences`, `DELETE FROM faces`, `DELETE FROM analyses`, `DELETE FROM job_items`, `DELETE FROM jobs`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("purge derived", map[string]bool{"purged": true}))
+	}
+	fmt.Fprintln(stdout, "ok")
+	return nil
+}
+
+func exportCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 || args[0] != "metadata" {
+		return fmt.Errorf("export requires metadata")
+	}
+	flags := flag.NewFlagSet("export metadata", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	output := flags.String("output", "", "output JSON file")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	path := *output
+	if path == "" {
+		path = filepath.Join(application.Config.ExportRoot, "metadata-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".json")
+	}
+	type record struct {
+		Table string           `json:"table"`
+		Rows  []map[string]any `json:"rows"`
+	}
+	result := struct {
+		FormatVersion string   `json:"format_version"`
+		ExportedAt    string   `json:"exported_at"`
+		Application   string   `json:"application"`
+		Records       []record `json:"records"`
+	}{FormatVersion: "1", ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Application: "face-me-bro"}
+	for _, table := range []string{"collections", "photo_assets", "photo_paths", "people", "current_face_assignments", "current_face_dispositions", "current_face_references", "clustering_runs", "clusters"} {
+		rows, err := application.DB.QueryContext(ctx, "SELECT * FROM "+table)
+		if err != nil {
+			return err
+		}
+		columns, err := rows.Columns()
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		var values []map[string]any
+		for rows.Next() {
+			cells := make([]any, len(columns))
+			pointers := make([]any, len(columns))
+			for i := range cells {
+				pointers[i] = &cells[i]
+			}
+			if err := rows.Scan(pointers...); err != nil {
+				rows.Close()
+				return err
+			}
+			item := map[string]any{}
+			for i, column := range columns {
+				value := cells[i]
+				if bytes, ok := value.([]byte); ok {
+					value = fmt.Sprintf("%x", bytes)
+				}
+				item[column] = value
+			}
+			values = append(values, item)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		result.Records = append(result.Records, record{Table: table, Rows: values})
+	}
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("export metadata", map[string]string{"path": path, "format_version": "1"}))
+	}
+	fmt.Fprintln(stdout, path)
+	return nil
 }
 
 func backupCommand(application *app.App, args []string, jsonOutput bool, stdout io.Writer) error {
