@@ -93,14 +93,14 @@ complete in the current implementation audit. It is intended to supplement
 
 ## Packaging and setup
 
-- [ ] Add setup automation for the Python virtual environment.
-- [ ] Generate and maintain a complete pinned dependency lock file with
+- [x] Add setup automation for the Python virtual environment.
+- [x] Generate and maintain a complete pinned dependency lock file with
       supported platform/provider metadata.
-- [ ] Download and checksum-verify model files during setup.
-- [ ] Add interrupted-setup recovery and clean-install validation.
-- [ ] Validate offline runtime after setup.
-- [ ] Provide the optional Docker configuration.
-- [ ] Document installation, model setup, configuration, and worker startup.
+- [x] Download and checksum-verify model files during setup.
+- [x] Add interrupted-setup recovery and clean-install validation.
+- [x] Validate offline runtime after setup.
+- [x] Provide the optional Docker configuration.
+- [x] Document installation, model setup, configuration, and worker startup.
 
 ## Performance and evaluation
 

@@ -12,6 +12,7 @@ import json
 import os
 import platform
 import sys
+from pathlib import Path
 
 PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 0
@@ -56,8 +57,19 @@ def model_checksums():
     configured = os.environ.get("FACE_ME_BRO_MODEL_CHECKSUMS_JSON", "{}")
     try:
         value = json.loads(configured)
-        return value if isinstance(value, dict) else {}
+        if isinstance(value, dict) and value:
+            return value
     except json.JSONDecodeError:
+        pass
+    model_root = os.environ.get("FACE_ME_BRO_MODEL_ROOT", "")
+    model_name = os.environ.get("FACE_ME_BRO_MODEL", "buffalo_l")
+    if not model_root:
+        return {}
+    manifest = Path(model_root) / "models" / model_name / "checksums.json"
+    try:
+        value = json.loads(manifest.read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
         return {}
 
 
@@ -208,7 +220,11 @@ def load_model():
     try:
         from insightface.app import FaceAnalysis  # type: ignore
 
-        MODEL = FaceAnalysis(name=os.environ.get("FACE_ME_BRO_MODEL", "buffalo_l"), providers=providers())
+        model_kwargs = {"name": os.environ.get("FACE_ME_BRO_MODEL", "buffalo_l"), "providers": providers()}
+        model_root = os.environ.get("FACE_ME_BRO_MODEL_ROOT", "")
+        if model_root:
+            model_kwargs["root"] = model_root
+        MODEL = FaceAnalysis(**model_kwargs)
         MODEL.prepare(ctx_id=0, det_size=detector_size())
     except Exception as exc:  # startup reports structured error on first request
         MODEL_ERROR = exc

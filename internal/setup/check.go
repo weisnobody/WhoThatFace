@@ -3,6 +3,9 @@ package setup
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -53,6 +56,28 @@ func Validate(ctx context.Context, pythonPath, virtualEnv, modelRoot string) Rep
 	} else {
 		info, statErr := os.Stat(modelRoot)
 		add("model-root", statErr == nil && info.IsDir(), modelRoot)
+		modelName := os.Getenv("FACE_ME_BRO_MODEL")
+		if modelName == "" {
+			modelName = "buffalo_l"
+		}
+		modelDir := filepath.Join(modelRoot, "models", modelName)
+		manifestPath := filepath.Join(modelDir, "checksums.json")
+		manifest, manifestErr := os.ReadFile(manifestPath)
+		var expected map[string]string
+		if manifestErr == nil {
+			manifestErr = json.Unmarshal(manifest, &expected)
+		}
+		actual, checksumErr := modelChecksums(modelDir)
+		valid := manifestErr == nil && checksumErr == nil && len(expected) > 0 && len(expected) == len(actual)
+		if valid {
+			for name, checksum := range expected {
+				if actual[name] != checksum {
+					valid = false
+					break
+				}
+			}
+		}
+		add("model-checksums", valid, manifestPath)
 	}
 	for _, check := range report.Checks {
 		if !check.Passed {
@@ -61,6 +86,33 @@ func Validate(ctx context.Context, pythonPath, virtualEnv, modelRoot string) Rep
 	}
 	report.Valid = true
 	return report
+}
+
+func modelChecksums(root string) (map[string]string, error) {
+	result := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || entry.Name() == "checksums.json" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(data)
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		result[filepath.ToSlash(relative)] = hex.EncodeToString(digest[:])
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 var pythonVersionPattern = regexp.MustCompile(`Python\s+(\d+)\.(\d+)`)
