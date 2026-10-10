@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/jobs"
 )
@@ -151,6 +152,12 @@ func (s Store) SetReference(ctx context.Context, faceID, personID string, refere
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	if err := audit.NewStore(s.db).Record(ctx, audit.Event{
+		AccountID: actor.AccountID, Action: "reference-selection", EntityType: "face", EntityID: faceID,
+		New: map[string]any{"person_id": personID, "reference": reference},
+	}); err != nil {
+		return fmt.Errorf("record reference audit event: %w", err)
+	}
 	_, err = jobs.NewStore(s.db).Enqueue(ctx, "reference-reprocess", 1, map[string]string{"person_id": personID, "face_id": faceID})
 	return err
 }
@@ -174,7 +181,13 @@ func (s Store) SetDisposition(ctx context.Context, faceID, disposition string, a
 		INSERT INTO current_face_dispositions (face_id, disposition, event_id, updated_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(face_id) DO UPDATE SET disposition = excluded.disposition, event_id = excluded.event_id, updated_at = excluded.updated_at`, faceID, disposition, eventID, now)
-	return err
+	if err != nil {
+		return err
+	}
+	return audit.NewStore(s.db).Record(ctx, audit.Event{
+		AccountID: actor.AccountID, Action: "face-disposition", EntityType: "face", EntityID: faceID,
+		New: map[string]any{"disposition": disposition, "active": active},
+	})
 }
 
 func (s Store) setAssignment(ctx context.Context, faceID, personID string, state AssignmentState, actor Actor, evidence Evidence, action, reason string) (Assignment, error) {
@@ -215,6 +228,13 @@ func (s Store) setAssignment(ctx context.Context, faceID, personID string, state
 	}
 	if err := tx.Commit(); err != nil {
 		return Assignment{}, err
+	}
+	if err := audit.NewStore(s.db).Record(ctx, audit.Event{
+		AccountID: actor.AccountID, Action: action, EntityType: "face", EntityID: faceID,
+		Previous: map[string]any{"state": previousState(current, currentErr), "person_id": previousPerson(current, currentErr)},
+		New:      map[string]any{"state": state, "person_id": personID},
+	}); err != nil {
+		return Assignment{}, fmt.Errorf("record assignment audit event: %w", err)
 	}
 	parsed, _ := time.Parse(time.RFC3339Nano, now)
 	return Assignment{FaceID: faceID, PersonID: personID, State: state, EventID: eventID, UpdatedAt: parsed}, nil
