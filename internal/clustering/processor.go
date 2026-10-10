@@ -6,6 +6,10 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"time"
+
+	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/pjg/face_me_bro/internal/review"
 )
 
 type Processor struct {
@@ -62,13 +66,60 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	for index := range result.Clusters {
+		cluster := &result.Clusters[index]
+		personIDs := map[string]struct{}{}
+		for _, faceID := range cluster.FaceIDs {
+			for _, face := range faces {
+				if face.ID == faceID && face.PersonID != "" {
+					personIDs[face.PersonID] = struct{}{}
+				}
+			}
+		}
+		if len(personIDs) == 1 {
+			for personID := range personIDs {
+				cluster.ProposedPersonID = personID
+			}
+		} else if len(personIDs) == 0 && !cluster.Mixed {
+			personID, createErr := createProvisionalPerson(ctx, p.db)
+			if createErr != nil {
+				return "", createErr
+			}
+			cluster.ProposedPersonID = personID
+		}
+	}
 	if err := p.store.PersistResult(ctx, runID, result); err != nil {
 		return "", err
+	}
+	for _, cluster := range result.Clusters {
+		if cluster.ProposedPersonID == "" || cluster.Mixed {
+			continue
+		}
+		for _, faceID := range cluster.FaceIDs {
+			current, currentErr := review.NewStore(p.db).Current(ctx, faceID)
+			if currentErr != nil || current.State != review.Unassigned {
+				continue
+			}
+			purity, connectivity := cluster.Purity, cluster.Connectivity
+			if _, err := review.NewStore(p.db).Assign(ctx, faceID, cluster.ProposedPersonID, review.Provisional, review.Actor{Type: "system"}, review.Evidence{ClusteringRunID: runID, Similarity: nil, Purity: &purity, Connectivity: &connectivity, Agreement: nil}, "cluster-provisional"); err != nil {
+				return "", err
+			}
+		}
 	}
 	if err := p.store.Activate(ctx, runID); err != nil {
 		return "", err
 	}
 	return runID, nil
+}
+
+func createProvisionalPerson(ctx context.Context, database *sql.DB) (string, error) {
+	personID, err := id.NewUUIDv7()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = database.ExecContext(ctx, `INSERT INTO people (id, name, is_provisional, dont_track, created_at, updated_at) VALUES (?, NULL, 1, 0, ?, ?)`, personID, now, now)
+	return personID, err
 }
 
 func decode(blob []byte, dimension int) ([]float32, error) {

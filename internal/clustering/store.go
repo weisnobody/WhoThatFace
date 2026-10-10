@@ -57,8 +57,8 @@ func (s RunStore) PersistResult(ctx context.Context, runID string, result Result
 			status = "needs-review"
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO clusters (id, clustering_run_id, cluster_key, purity, connectivity, is_mixed, review_status, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, clusterID, runID, cluster.Key, nullableFloat(cluster.Purity), nullableFloat(cluster.Connectivity), boolInt(cluster.Mixed), status, now); err != nil {
+			INSERT INTO clusters (id, clustering_run_id, cluster_key, proposed_person_id, purity, connectivity, is_mixed, review_status, created_at)
+			VALUES (?, ?, ?, NULLIF(?, ''), ?, ?, ?, ?, ?)`, clusterID, runID, cluster.Key, cluster.ProposedPersonID, nullableFloat(cluster.Purity), nullableFloat(cluster.Connectivity), boolInt(cluster.Mixed), status, now); err != nil {
 			return fmt.Errorf("persist cluster %q: %w", cluster.Key, err)
 		}
 		for _, faceID := range cluster.FaceIDs {

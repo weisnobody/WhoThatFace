@@ -29,7 +29,7 @@ complete in the current implementation audit. It is intended to supplement
 
 ## Recognition and clustering integration
 
-- [ ] Create and maintain provisional person records for discovery-first
+- [x] Create and maintain provisional person records for discovery-first
       clusters where appropriate.
 - [ ] Calculate recognition/grouping agreement for candidate people.
 - [ ] Use combined evidence to derive assignment states.

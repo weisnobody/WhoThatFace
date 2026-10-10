@@ -36,11 +36,12 @@ type Edge struct {
 }
 
 type Cluster struct {
-	Key          string
-	FaceIDs      []string
-	Purity       float32
-	Connectivity float32
-	Mixed        bool
+	Key              string
+	FaceIDs          []string
+	ProposedPersonID string
+	Purity           float32
+	Connectivity     float32
+	Mixed            bool
 }
 
 type Result struct {
