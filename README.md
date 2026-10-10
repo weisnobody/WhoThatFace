@@ -27,6 +27,12 @@ This installs the pinned worker dependencies, downloads and verifies the
 [`docs/installation.md`](docs/installation.md) for configuration overrides,
 offline validation, and the optional Docker worker.
 
+[`config.example.jsonc`](config.example.jsonc) lists every configuration
+parameter, its purpose, and its default value. It uses JSONC comments for
+documentation; the application configuration file itself must be strict JSON.
+Copy the uncommented settings you need into `config.json`, or use the
+`--config PATH` option with an alternate file or directory.
+
 ### Go Application
 
 The Go toolchain version must satisfy the `go` version in `go.mod`. From the
