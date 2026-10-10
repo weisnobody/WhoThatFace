@@ -23,6 +23,9 @@ func TestLoadUsesDefaultsWhenConfigurationDoesNotExist(t *testing.T) {
 	if got.RuntimeDataRoot == "" || got.ModelRoot == "" {
 		t.Fatal("expected default runtime and model paths")
 	}
+	if got.NeighborSearchMethod != "exact" {
+		t.Fatalf("NeighborSearchMethod = %q, want exact", got.NeighborSearchMethod)
+	}
 }
 
 func TestLoadResolvesConfiguredRootAndRelativePaths(t *testing.T) {

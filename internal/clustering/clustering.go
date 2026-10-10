@@ -15,13 +15,14 @@ type Face struct {
 }
 
 type Config struct {
-	K                   int
-	SimilarityThreshold float32
-	AlgorithmVersion    string
+	K                    int
+	SimilarityThreshold  float32
+	AlgorithmVersion     string
+	NeighborSearchMethod string
 }
 
 func DefaultConfig() Config {
-	return Config{K: 40, SimilarityThreshold: 0.45, AlgorithmVersion: "mutual-knn-v1"}
+	return Config{K: 40, SimilarityThreshold: 0.45, AlgorithmVersion: "mutual-knn-v1", NeighborSearchMethod: "exact"}
 }
 
 type Neighbor struct {
@@ -101,6 +102,12 @@ func Group(faces []Face, config Config) (Result, error) {
 	if config.SimilarityThreshold < 0 || config.SimilarityThreshold > 1 {
 		return Result{}, fmt.Errorf("similarity threshold must be between 0 and 1")
 	}
+	if config.NeighborSearchMethod == "" {
+		config.NeighborSearchMethod = "exact"
+	}
+	if config.NeighborSearchMethod != "exact" && config.NeighborSearchMethod != "ann" {
+		return Result{}, fmt.Errorf("neighbor search method must be exact or ann")
+	}
 	for index := range faces {
 		if faces[index].ID == "" || len(faces[index].Embedding) == 0 {
 			return Result{}, fmt.Errorf("face %d has an empty ID or embedding", index)
@@ -111,7 +118,15 @@ func Group(faces []Face, config Config) (Result, error) {
 	}
 	neighbors := make([][]Neighbor, len(faces))
 	for index, face := range faces {
-		for otherIndex, other := range faces {
+		candidates := make([]int, len(faces))
+		for candidateIndex := range candidates {
+			candidates[candidateIndex] = candidateIndex
+		}
+		if config.NeighborSearchMethod == "ann" {
+			candidates = approximateCandidates(faces, index)
+		}
+		for _, otherIndex := range candidates {
+			other := faces[otherIndex]
 			if index == otherIndex {
 				continue
 			}
@@ -176,6 +191,55 @@ func Group(faces []Face, config Config) (Result, error) {
 	}
 	sort.Slice(clusters, func(left, right int) bool { return clusters[left].Key < clusters[right].Key })
 	return Result{Clusters: clusters, Edges: edges}, nil
+}
+
+// approximateCandidates is a deterministic, dependency-free ANN prototype.
+// It uses a small sign-projection index and neighboring buckets. The benchmark
+// tool compares its recall with exact search before it is used for production
+// defaults.
+func approximateCandidates(faces []Face, query int) []int {
+	const bits = 4
+	querySignature := signature(faces[query].Embedding)
+	buckets := make(map[uint8][]int)
+	for index, face := range faces {
+		value := signature(face.Embedding)
+		buckets[value] = append(buckets[value], index)
+	}
+	result := make([]int, 0)
+	seen := make(map[int]struct{})
+	for distance := 0; distance <= 2; distance++ {
+		for mask := 0; mask < 1<<bits; mask++ {
+			if bitsSet(uint8(mask)) != distance {
+				continue
+			}
+			for _, index := range buckets[querySignature^uint8(mask)] {
+				if _, exists := seen[index]; !exists {
+					seen[index] = struct{}{}
+					result = append(result, index)
+				}
+			}
+		}
+	}
+	return result
+}
+
+func signature(values []float32) uint8 {
+	var result uint8
+	for index := 0; index < 8; index++ {
+		if index < len(values) && values[index] >= 0 {
+			result |= 1 << index
+		}
+	}
+	return result
+}
+
+func bitsSet(value uint8) int {
+	count := 0
+	for value != 0 {
+		count += int(value & 1)
+		value >>= 1
+	}
+	return count
 }
 
 func containsNeighbor(neighbors []Neighbor, id string) bool {

@@ -95,7 +95,7 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		if jsonOutput {
 			return writeJSON(stdout, envelope(command, status))
 		}
-		fmt.Fprintf(stdout, "Config file:      %s\nRuntime root:     %s\nDatabase:         %s\nModel root:       %s\nLog root:         %s\nTemp root:        %s\nExport root:      %s\nBackup root:      %s\n", status.ConfigFile, status.RuntimeDataRoot, status.DatabasePath, status.ModelRoot, status.LogRoot, status.TempRoot, status.ExportRoot, status.BackupRoot)
+		fmt.Fprintf(stdout, "Config file:      %s\nRuntime root:     %s\nDatabase:         %s\nModel root:       %s\nLog root:         %s\nTemp root:        %s\nExport root:      %s\nBackup root:      %s\nSearch method:    %s\n", status.ConfigFile, status.RuntimeDataRoot, status.DatabasePath, status.ModelRoot, status.LogRoot, status.TempRoot, status.ExportRoot, status.BackupRoot, status.NeighborSearchMethod)
 		if status.PipelineID == nil {
 			fmt.Fprintln(stdout, "Pipeline:         not configured")
 		} else {
@@ -118,7 +118,7 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 	case "pipeline":
 		return pipelineCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "config":
-		return configCommand(application, args, jsonOutput, stdout)
+		return configCommand(application, args, jsonOutput, stdout, stderr)
 	case "worker":
 		return workerCommand(ctx, application, args, stdout, stderr)
 	case "people":
@@ -278,6 +278,28 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		return fmt.Errorf("collection requires add or list")
 	}
 	switch args[0] {
+	case "set-search":
+		flags := flag.NewFlagSet("collection set-search", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID")
+		method := flags.String("method", "exact", "neighbor search method: exact or ann")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *collectionID == "" {
+			return fmt.Errorf("collection set-search requires --collection-id")
+		}
+		if *method != "exact" && *method != "ann" {
+			return fmt.Errorf("search method must be exact or ann")
+		}
+		result, err := application.DB.ExecContext(ctx, "UPDATE collections SET neighbor_search_method = ?, updated_at = ? WHERE id = ?", *method, time.Now().UTC().Format(time.RFC3339Nano), *collectionID)
+		if err != nil {
+			return err
+		}
+		if count, _ := result.RowsAffected(); count != 1 {
+			return fmt.Errorf("collection %q does not exist", *collectionID)
+		}
+		return writeCommandResult(stdout, jsonOutput, "collection set-search", map[string]any{"collection_id": *collectionID, "method": *method})
 	case "remove":
 		flags := flag.NewFlagSet("collection remove", flag.ContinueOnError)
 		flags.SetOutput(stderr)
@@ -322,22 +344,23 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		fmt.Fprintln(stdout, id)
 		return nil
 	case "list":
-		rows, err := application.DB.QueryContext(ctx, "SELECT id, name, root_path, enabled FROM collections ORDER BY name")
+		rows, err := application.DB.QueryContext(ctx, "SELECT id, name, root_path, enabled, neighbor_search_method FROM collections ORDER BY name")
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		type collection struct {
-			ID      string `json:"id"`
-			Name    string `json:"name"`
-			Root    string `json:"root"`
-			Enabled bool   `json:"enabled"`
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Root         string `json:"root"`
+			Enabled      bool   `json:"enabled"`
+			SearchMethod string `json:"neighbor_search_method"`
 		}
 		var result []collection
 		for rows.Next() {
 			var item collection
 			var enabled int
-			if err := rows.Scan(&item.ID, &item.Name, &item.Root, &enabled); err != nil {
+			if err := rows.Scan(&item.ID, &item.Name, &item.Root, &enabled, &item.SearchMethod); err != nil {
 				return err
 			}
 			item.Enabled = enabled == 1
@@ -350,7 +373,7 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 			return writeJSON(stdout, envelope("collection list", result))
 		}
 		for _, item := range result {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", item.ID, item.Name, item.Root)
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.ID, item.Name, item.Root, item.SearchMethod)
 		}
 		return nil
 	default:
@@ -749,9 +772,40 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 	return rows.Err()
 }
 
-func configCommand(application *app.App, args []string, jsonOutput bool, stdout io.Writer) error {
-	if len(args) != 1 || args[0] != "show" {
-		return fmt.Errorf("config requires show")
+func configCommand(application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("config requires show or set-search")
+	}
+	if args[0] == "set-search" {
+		flags := flag.NewFlagSet("config set-search", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		method := flags.String("method", application.Config.NeighborSearchMethod, "neighbor search method: exact or ann")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *method != "exact" && *method != "ann" {
+			return fmt.Errorf("search method must be exact or ann")
+		}
+		settings := map[string]any{}
+		if data, err := os.ReadFile(application.Config.ConfigFile); err == nil {
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		settings["neighbor_search_method"] = *method
+		data, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(application.Config.ConfigFile, append(data, '\n'), 0o600); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "config set-search", map[string]string{"method": *method, "config_file": application.Config.ConfigFile})
+	}
+	if args[0] != "show" || len(args) != 1 {
+		return fmt.Errorf("config requires show or set-search")
 	}
 	status, err := application.Status(context.Background())
 	if err != nil {
@@ -842,6 +896,27 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 func clusterCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("cluster requires get or review")
+	}
+	if args[0] == "run" {
+		flags := flag.NewFlagSet("cluster run", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID used for the per-collection search method")
+		scope := flags.String("scope", "all", "all, unresolved-only, or subset")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		settings := clustering.DefaultConfig()
+		settings.NeighborSearchMethod = application.Config.NeighborSearchMethod
+		if *collectionID != "" {
+			if err := application.DB.QueryRowContext(ctx, "SELECT neighbor_search_method FROM collections WHERE id = ?", *collectionID).Scan(&settings.NeighborSearchMethod); err != nil {
+				return err
+			}
+		}
+		runID, err := clustering.NewProcessor(application.DB, settings).Run(ctx, *scope)
+		if err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "cluster run", map[string]string{"run_id": runID, "neighbor_search_method": settings.NeighborSearchMethod})
 	}
 	flags := flag.NewFlagSet("cluster "+args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -1165,7 +1240,9 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if err := recognitionProcessor.ProcessAll(jobContext); err != nil {
 				return err
 			}
-			if _, err := clustering.NewProcessor(application.DB, clustering.DefaultConfig()).Run(jobContext, "all"); err != nil {
+			clusteringConfig := clustering.DefaultConfig()
+			clusteringConfig.NeighborSearchMethod = application.Config.NeighborSearchMethod
+			if _, err := clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, "all"); err != nil {
 				return err
 			}
 			return recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID)
@@ -1180,7 +1257,9 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if payload.Scope == "" {
 				payload.Scope = "all"
 			}
-			_, err := clustering.NewProcessor(application.DB, clustering.DefaultConfig()).Run(jobContext, payload.Scope)
+			clusteringConfig := clustering.DefaultConfig()
+			clusteringConfig.NeighborSearchMethod = application.Config.NeighborSearchMethod
+			_, err := clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, payload.Scope)
 			return err
 		},
 	}, IdleWait: time.Second}

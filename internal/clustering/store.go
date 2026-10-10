@@ -27,13 +27,17 @@ func (s RunStore) CreateRun(ctx context.Context, config Config, scope string, fa
 	if algorithmVersion == "" {
 		algorithmVersion = "mutual-knn-v1"
 	}
+	method := config.NeighborSearchMethod
+	if method == "" {
+		method = "exact"
+	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO clustering_runs (
 			id, algorithm, algorithm_version, k, similarity_threshold,
 			neighbor_search_method, mutual_edge_policy, candidate_scope,
 			input_face_set_json, status, created_at
-		) VALUES (?, 'mutual-knn', ?, ?, ?, 'exact', 'mutual-top-k', ?, ?, 'queued', ?)`,
-		runID, algorithmVersion, config.K, config.SimilarityThreshold, scope, input, time.Now().UTC().Format(time.RFC3339Nano))
+		) VALUES (?, 'mutual-knn', ?, ?, ?, ?, 'mutual-top-k', ?, ?, 'queued', ?)`,
+		runID, algorithmVersion, config.K, config.SimilarityThreshold, method, scope, input, time.Now().UTC().Format(time.RFC3339Nano))
 	return runID, err
 }
 

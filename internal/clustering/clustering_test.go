@@ -37,6 +37,19 @@ func TestGroupReportsMixedCluster(t *testing.T) {
 	}
 }
 
+func TestGroupAcceptsANNSearchMethod(t *testing.T) {
+	result, err := Group([]Face{
+		{ID: "a", Embedding: []float32{1, 0}},
+		{ID: "b", Embedding: []float32{.99, .1}},
+	}, Config{K: 1, SimilarityThreshold: .9, NeighborSearchMethod: "ann"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Edges) != 1 {
+		t.Fatalf("ANN edges = %d, want 1", len(result.Edges))
+	}
+}
+
 func TestBenchmarkMetricsIgnoreUnknownPurityAndNormalizeConnectivity(t *testing.T) {
 	if got := CalculatePurity([]string{"alice", "alice", "bob", ""}); got != float32(2)/3 {
 		t.Fatalf("purity = %v, want %v", got, float32(2)/3)

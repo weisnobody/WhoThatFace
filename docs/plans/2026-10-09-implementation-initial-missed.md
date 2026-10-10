@@ -104,16 +104,16 @@ complete in the current implementation audit. It is intended to supplement
 
 ## Performance and evaluation
 
-- [ ] Add benchmarks for first scan and unchanged rescan.
-- [ ] Add duplicate-heavy collection benchmarks.
-- [ ] Measure analysis, recognition, grouping, database-size, and memory
+- [x] Add benchmarks for first scan and unchanged rescan.
+- [x] Add duplicate-heavy collection benchmarks.
+- [x] Measure analysis, recognition, grouping, database-size, and memory
       performance.
-- [ ] Measure review-page query latency and incremental-update time.
-- [ ] Measure worker startup, timeout, restart, and recovery behavior.
-- [ ] Benchmark adaptive throttling.
-- [ ] Implement exact-versus-ANN comparison tooling.
-- [ ] Add configurable exact/ANN selection globally and per collection.
-- [ ] Run the specified 10,000-, 50,000-, 100,000-, and 250,000-face tests.
+- [x] Measure review-page query latency and incremental-update time.
+- [x] Measure worker startup, timeout, restart, and recovery behavior.
+- [x] Benchmark adaptive throttling.
+- [x] Implement exact-versus-ANN comparison tooling.
+- [x] Add configurable exact/ANN selection globally and per collection.
+- [x] Run the specified 10,000-, 50,000-, 100,000-, and 250,000-face tests.
 
 ## Documentation consistency
 

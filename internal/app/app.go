@@ -44,30 +44,32 @@ func (a *App) Close() error {
 
 // Status is the stable data returned by the status command.
 type Status struct {
-	ConfigFile      string  `json:"config_file"`
-	RuntimeDataRoot string  `json:"runtime_data_root"`
-	DatabasePath    string  `json:"database_path"`
-	ModelRoot       string  `json:"model_root"`
-	LogRoot         string  `json:"log_root"`
-	TempRoot        string  `json:"temp_root"`
-	ExportRoot      string  `json:"export_root"`
-	BackupRoot      string  `json:"backup_root"`
-	PipelineID      *string `json:"pipeline_id"`
-	Provider        string  `json:"provider"`
+	ConfigFile           string  `json:"config_file"`
+	RuntimeDataRoot      string  `json:"runtime_data_root"`
+	DatabasePath         string  `json:"database_path"`
+	ModelRoot            string  `json:"model_root"`
+	LogRoot              string  `json:"log_root"`
+	TempRoot             string  `json:"temp_root"`
+	ExportRoot           string  `json:"export_root"`
+	BackupRoot           string  `json:"backup_root"`
+	NeighborSearchMethod string  `json:"neighbor_search_method"`
+	PipelineID           *string `json:"pipeline_id"`
+	Provider             string  `json:"provider"`
 }
 
 // Status returns resolved paths and the latest registered pipeline, if any.
 func (a *App) Status(ctx context.Context) (Status, error) {
 	status := Status{
-		ConfigFile:      a.Config.ConfigFile,
-		RuntimeDataRoot: a.Config.RuntimeDataRoot,
-		DatabasePath:    a.Config.DatabasePath,
-		ModelRoot:       a.Config.ModelRoot,
-		LogRoot:         a.Config.LogRoot,
-		TempRoot:        a.Config.TempRoot,
-		ExportRoot:      a.Config.ExportRoot,
-		BackupRoot:      a.Config.BackupRoot,
-		Provider:        "not configured",
+		ConfigFile:           a.Config.ConfigFile,
+		RuntimeDataRoot:      a.Config.RuntimeDataRoot,
+		DatabasePath:         a.Config.DatabasePath,
+		ModelRoot:            a.Config.ModelRoot,
+		LogRoot:              a.Config.LogRoot,
+		TempRoot:             a.Config.TempRoot,
+		ExportRoot:           a.Config.ExportRoot,
+		BackupRoot:           a.Config.BackupRoot,
+		NeighborSearchMethod: a.Config.NeighborSearchMethod,
+		Provider:             "not configured",
 	}
 	var id, provider string
 	err := a.DB.QueryRowContext(ctx, `

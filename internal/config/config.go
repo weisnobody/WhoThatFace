@@ -11,32 +11,35 @@ import (
 )
 
 const (
-	defaultConfigFile = "config.json"
-	defaultDatabase   = "face_me_bro.sqlite3"
+	defaultConfigFile   = "config.json"
+	defaultDatabase     = "face_me_bro.sqlite3"
+	defaultSearchMethod = "exact"
 )
 
 // File contains settings that may be supplied by a JSON configuration file.
 // Empty paths use the runtime data root and its standard subdirectories.
 type File struct {
-	RuntimeDataRoot string `json:"runtime_data_root,omitempty"`
-	DatabasePath    string `json:"database_path,omitempty"`
-	ModelRoot       string `json:"model_root,omitempty"`
-	LogRoot         string `json:"log_root,omitempty"`
-	TempRoot        string `json:"temp_root,omitempty"`
-	ExportRoot      string `json:"export_root,omitempty"`
-	BackupRoot      string `json:"backup_root,omitempty"`
+	RuntimeDataRoot      string `json:"runtime_data_root,omitempty"`
+	DatabasePath         string `json:"database_path,omitempty"`
+	ModelRoot            string `json:"model_root,omitempty"`
+	LogRoot              string `json:"log_root,omitempty"`
+	TempRoot             string `json:"temp_root,omitempty"`
+	ExportRoot           string `json:"export_root,omitempty"`
+	BackupRoot           string `json:"backup_root,omitempty"`
+	NeighborSearchMethod string `json:"neighbor_search_method,omitempty"`
 }
 
 // Resolved is the complete configuration used by application services.
 type Resolved struct {
-	ConfigFile      string
-	RuntimeDataRoot string
-	DatabasePath    string
-	ModelRoot       string
-	LogRoot         string
-	TempRoot        string
-	ExportRoot      string
-	BackupRoot      string
+	ConfigFile           string
+	RuntimeDataRoot      string
+	DatabasePath         string
+	ModelRoot            string
+	LogRoot              string
+	TempRoot             string
+	ExportRoot           string
+	BackupRoot           string
+	NeighborSearchMethod string
 }
 
 // DefaultConfigFile returns the default configuration file for the current
@@ -92,15 +95,23 @@ func Load(configPath string) (Resolved, error) {
 	}
 
 	return Resolved{
-		ConfigFile:      configPath,
-		RuntimeDataRoot: root,
-		DatabasePath:    resolvePath(settings.DatabasePath, root, defaultDatabase),
-		ModelRoot:       resolvePath(settings.ModelRoot, root, "models"),
-		LogRoot:         resolvePath(settings.LogRoot, root, "logs"),
-		TempRoot:        resolvePath(settings.TempRoot, root, "tmp"),
-		ExportRoot:      resolvePath(settings.ExportRoot, root, "exports"),
-		BackupRoot:      resolvePath(settings.BackupRoot, root, "backups"),
+		ConfigFile:           configPath,
+		RuntimeDataRoot:      root,
+		DatabasePath:         resolvePath(settings.DatabasePath, root, defaultDatabase),
+		ModelRoot:            resolvePath(settings.ModelRoot, root, "models"),
+		LogRoot:              resolvePath(settings.LogRoot, root, "logs"),
+		TempRoot:             resolvePath(settings.TempRoot, root, "tmp"),
+		ExportRoot:           resolvePath(settings.ExportRoot, root, "exports"),
+		BackupRoot:           resolvePath(settings.BackupRoot, root, "backups"),
+		NeighborSearchMethod: searchMethod(settings.NeighborSearchMethod),
 	}, nil
+}
+
+func searchMethod(value string) string {
+	if value == "ann" {
+		return value
+	}
+	return defaultSearchMethod
 }
 
 func defaultRuntimeDataRoot() (string, error) {
