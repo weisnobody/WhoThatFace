@@ -47,6 +47,28 @@ func (s Store) FinishScan(ctx context.Context, runID, status, message string) er
 	return err
 }
 
+func (s Store) SetScanControl(ctx context.Context, runID, action string) error {
+	var status string
+	switch action {
+	case "pause":
+		status = "paused"
+	case "resume":
+		status = "running"
+	case "cancel":
+		status = "cancelled"
+	case "retry":
+		status = "running"
+	default:
+		return fmt.Errorf("invalid scan control action %q", action)
+	}
+	allowed := "('queued', 'running', 'paused')"
+	if action == "retry" {
+		allowed = "('failed', 'cancelled', 'completed-with-errors')"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE scan_runs SET status = ?, started_at = COALESCE(started_at, ?), completed_at = NULL, error_message = NULL WHERE id = ? AND status IN `+allowed, status, time.Now().UTC().Format(time.RFC3339Nano), runID)
+	return err
+}
+
 // PersistScan updates assets and paths in one transaction. The input may
 // contain duplicate content hashes; they become one asset with many paths.
 func (s Store) PersistScan(ctx context.Context, collectionID string, records []FileRecord) error {

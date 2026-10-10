@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -168,6 +169,56 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 }
 
 func scanCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) > 0 && (args[0] == "status" || args[0] == "pause" || args[0] == "resume" || args[0] == "cancel" || args[0] == "retry") {
+		store := media.NewStore(application.DB)
+		if args[0] != "status" {
+			if len(args) != 2 {
+				return fmt.Errorf("scan %s requires a scan run ID", args[0])
+			}
+			if err := store.SetScanControl(ctx, args[1], args[0]); err != nil {
+				return err
+			}
+			if jsonOutput {
+				return writeJSON(stdout, envelope("scan "+args[0], map[string]string{"scan_run_id": args[1], "action": args[0]}))
+			}
+			fmt.Fprintln(stdout, "ok")
+			return nil
+		}
+		rows, err := application.DB.QueryContext(ctx, `SELECT id, collection_id, status, created_at, completed_at FROM scan_runs ORDER BY created_at DESC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type scan struct {
+			ID           string  `json:"id"`
+			CollectionID string  `json:"collection_id"`
+			Status       string  `json:"status"`
+			CreatedAt    string  `json:"created_at"`
+			CompletedAt  *string `json:"completed_at,omitempty"`
+		}
+		var scans []scan
+		for rows.Next() {
+			var value scan
+			var completed sql.NullString
+			if err := rows.Scan(&value.ID, &value.CollectionID, &value.Status, &value.CreatedAt, &completed); err != nil {
+				return err
+			}
+			if completed.Valid {
+				value.CompletedAt = &completed.String
+			}
+			scans = append(scans, value)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("scan status", scans))
+		}
+		for _, value := range scans {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\n", value.ID, value.CollectionID, value.Status)
+		}
+		return nil
+	}
 	flags := flag.NewFlagSet("scan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	collectionID := flags.String("collection-id", "", "collection ID")
