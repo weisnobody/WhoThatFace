@@ -18,19 +18,26 @@ import (
 // Client manages one persistent worker process. Calls are serialized because
 // the MVP worker owns one loaded model and processes one image at a time.
 type Client struct {
-	command string
-	args    []string
-	mu      sync.Mutex
-	process *exec.Cmd
-	input   io.WriteCloser
-	output  *json.Decoder
-	ack     Message
-	minor   int
+	command     string
+	args        []string
+	mu          sync.Mutex
+	process     *exec.Cmd
+	input       io.WriteCloser
+	output      *json.Decoder
+	ack         Message
+	minor       int
+	expectation *Expectation
 }
 
 // NewClient creates a client; it does not start the process until Start.
 func NewClient(command string, args ...string) *Client {
 	return &Client{command: command, args: args}
+}
+
+// NewClientForPipeline creates a client that rejects workers which do not
+// advertise the requested model and preprocessing contract.
+func NewClientForPipeline(command string, expectation Expectation, args ...string) *Client {
+	return &Client{command: command, args: args, expectation: &expectation}
 }
 
 // Start launches the process and negotiates the worker protocol.
@@ -89,14 +96,14 @@ func (c *Client) startLocked(ctx context.Context) error {
 	} else {
 		c.minor = ProtocolMinor
 	}
-	if err := validateCapabilities(response.Capabilities); err != nil {
+	if err := validateCapabilities(response.Capabilities, c.expectation); err != nil {
 		c.stopLocked()
 		return err
 	}
 	return nil
 }
 
-func validateCapabilities(capabilities *Capabilities) error {
+func validateCapabilities(capabilities *Capabilities, expected *Expectation) error {
 	if capabilities == nil {
 		return fmt.Errorf("worker handshake omitted capabilities")
 	}
@@ -109,7 +116,53 @@ func validateCapabilities(capabilities *Capabilities) error {
 	if len(capabilities.Providers) == 0 || len(capabilities.Models) == 0 {
 		return fmt.Errorf("worker did not report execution provider and model")
 	}
+	if capabilities.Preprocessing == "" || len(capabilities.Modules) == 0 {
+		return fmt.Errorf("worker did not report preprocessing and module capabilities")
+	}
+	if expected == nil {
+		return nil
+	}
+	if expected.Model != "" && !contains(capabilities.Models, expected.Model) {
+		return fmt.Errorf("worker does not provide required model %q", expected.Model)
+	}
+	if expected.Provider != "" && !contains(capabilities.Providers, expected.Provider) {
+		return fmt.Errorf("worker does not provide required execution provider %q", expected.Provider)
+	}
+	if expected.EmbeddingDimension > 0 && capabilities.EmbeddingDimension != expected.EmbeddingDimension {
+		return fmt.Errorf("worker embedding dimension %d does not match required %d", capabilities.EmbeddingDimension, expected.EmbeddingDimension)
+	}
+	if expected.EmbeddingDType != "" && capabilities.EmbeddingDType != expected.EmbeddingDType {
+		return fmt.Errorf("worker embedding dtype %q does not match required %q", capabilities.EmbeddingDType, expected.EmbeddingDType)
+	}
+	if expected.EmbeddingMetric != "" && capabilities.EmbeddingMetric != expected.EmbeddingMetric {
+		return fmt.Errorf("worker embedding metric %q does not match required %q", capabilities.EmbeddingMetric, expected.EmbeddingMetric)
+	}
+	if expected.Preprocessing != "" && capabilities.Preprocessing != expected.Preprocessing {
+		return fmt.Errorf("worker preprocessing %q does not match required %q", capabilities.Preprocessing, expected.Preprocessing)
+	}
+	if expected.DetectorSize != "" && capabilities.DetectorSize != expected.DetectorSize {
+		return fmt.Errorf("worker detector size %q does not match required %q", capabilities.DetectorSize, expected.DetectorSize)
+	}
+	for _, module := range expected.Modules {
+		if !contains(capabilities.Modules, module) {
+			return fmt.Errorf("worker does not provide required module %q", module)
+		}
+	}
+	for name, checksum := range expected.ModelChecksums {
+		if checksum == "" || capabilities.ModelChecksums[name] != checksum {
+			return fmt.Errorf("worker model checksum for %q does not match the pipeline", name)
+		}
+	}
 	return nil
+}
+
+func contains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // Capabilities returns the negotiated worker capabilities.

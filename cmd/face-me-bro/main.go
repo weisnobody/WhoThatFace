@@ -859,7 +859,26 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 	if *pipelineID == "" {
 		return fmt.Errorf("worker requires --pipeline-id")
 	}
-	client := worker.NewClient(*pythonPath, *workerScript)
+	var modelFamily, provider, checksumsJSON string
+	var dimension int
+	if err := application.DB.QueryRowContext(ctx, `
+		SELECT model_family, execution_provider, model_checksums_json, embedding_dimension
+		FROM pipelines WHERE id = ?`, *pipelineID).Scan(&modelFamily, &provider, &checksumsJSON, &dimension); err != nil {
+		return fmt.Errorf("load pipeline contract: %w", err)
+	}
+	var checksums map[string]string
+	if err := json.Unmarshal([]byte(checksumsJSON), &checksums); err != nil {
+		return fmt.Errorf("decode pipeline model checksums: %w", err)
+	}
+	client := worker.NewClientForPipeline(*pythonPath, worker.Expectation{
+		Model:              modelFamily,
+		Provider:           provider,
+		ModelChecksums:     checksums,
+		EmbeddingDimension: dimension,
+		EmbeddingDType:     "float32",
+		EmbeddingMetric:    "cosine",
+		Modules:            []string{"detection", "recognition"},
+	}, *workerScript)
 	if err := client.Start(ctx); err != nil {
 		return err
 	}

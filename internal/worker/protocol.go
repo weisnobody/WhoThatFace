@@ -44,6 +44,21 @@ type Capabilities struct {
 	ModelChecksums     map[string]string `json:"model_checksums,omitempty"`
 	Modules            []string          `json:"modules,omitempty"`
 	Preprocessing      string            `json:"preprocessing,omitempty"`
+	DetectorSize       string            `json:"detector_size,omitempty"`
+}
+
+// Expectation describes the pipeline contract that a worker must satisfy.
+// Empty optional fields mean that the caller does not constrain that value.
+type Expectation struct {
+	Model              string
+	Provider           string
+	ModelChecksums     map[string]string
+	EmbeddingDimension int
+	EmbeddingDType     string
+	EmbeddingMetric    string
+	Modules            []string
+	Preprocessing      string
+	DetectorSize       string
 }
 
 type WorkerError struct {

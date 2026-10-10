@@ -36,6 +36,8 @@ type Job struct {
 	CreatedAt   time.Time       `json:"created_at"`
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
+	Attempts    int             `json:"attempts"`
+	MaxAttempts int             `json:"max_attempts"`
 }
 
 type Store struct{ db *sql.DB }
@@ -53,8 +55,8 @@ func (s Store) Enqueue(ctx context.Context, kind string, priority int, payload a
 	}
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, kind, priority, status, payload_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, jobID, kind, priority, Pending, payloadJSON, now.Format(time.RFC3339Nano))
+		INSERT INTO jobs (id, kind, priority, status, payload_json, attempts, max_attempts, created_at)
+		VALUES (?, ?, ?, ?, ?, 0, 3, ?)`, jobID, kind, priority, Pending, payloadJSON, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return Job{}, fmt.Errorf("enqueue job: %w", err)
 	}
@@ -67,10 +69,10 @@ func (s Store) Get(ctx context.Context, jobID string) (Job, error) {
 	var created string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, kind, priority, status, payload_json, progress_json,
-		       error_code, error_message, created_at, started_at, completed_at
+		       error_code, error_message, attempts, max_attempts, created_at, started_at, completed_at
 		FROM jobs WHERE id = ?`, jobID).Scan(
 		&job.ID, &job.Kind, &job.Priority, &job.Status, &payload, &progress,
-		&errorCode, &errorMessage, &created, &started, &completed)
+		&errorCode, &errorMessage, &job.Attempts, &job.MaxAttempts, &created, &started, &completed)
 	if err != nil {
 		return Job{}, err
 	}
@@ -89,6 +91,29 @@ func (s Store) Get(ctx context.Context, jobID string) (Job, error) {
 	}
 	job.CompletedAt, err = parseNullableTime(completed)
 	return job, err
+}
+
+// RecordFailure persists one handler failure and either requeues the job or
+// marks it permanently failed once its bounded retry budget is exhausted.
+func (s Store) RecordFailure(ctx context.Context, jobID, code, message string, retryable bool) (Status, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET attempts = attempts + 1,
+		 status = CASE WHEN ? AND attempts + 1 < max_attempts THEN ? ELSE ? END,
+		 error_code = ?, error_message = ?,
+		 started_at = CASE WHEN ? AND attempts + 1 < max_attempts THEN NULL ELSE started_at END,
+		 completed_at = CASE WHEN ? AND attempts + 1 < max_attempts THEN NULL ELSE ? END
+		WHERE id = ?`, retryable, Pending, Failed, code, message, retryable, retryable, time.Now().UTC().Format(time.RFC3339Nano), jobID)
+	if err != nil {
+		return "", err
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		return "", sql.ErrNoRows
+	}
+	job, err := s.Get(ctx, jobID)
+	if err != nil {
+		return "", err
+	}
+	return job.Status, nil
 }
 
 // Claim atomically claims the highest-priority pending job. A nil result means

@@ -38,9 +38,10 @@ def capabilities():
         "embedding_dimension": 512,
         "embedding_dtype": "float32",
         "embedding_metric": "cosine",
-        "model_checksums": {},
+        "model_checksums": model_checksums(),
         "modules": ["detection", "recognition"],
-        "preprocessing": "opencv-bgr-exif-oriented-v1",
+        "preprocessing": "pillow-exif-transpose-opencv-bgr-v1",
+        "detector_size": detector_size_text(),
     }
 
 
@@ -49,6 +50,29 @@ def providers():
     if configured:
         return [value for value in configured.split(",") if value]
     return ["CPUExecutionProvider"]
+
+
+def model_checksums():
+    configured = os.environ.get("FACE_ME_BRO_MODEL_CHECKSUMS_JSON", "{}")
+    try:
+        value = json.loads(configured)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def detector_size():
+    configured = os.environ.get("FACE_ME_BRO_DET_SIZE", "640,640")
+    try:
+        width, height = (int(value.strip()) for value in configured.split(",", 1))
+        return width, height
+    except (ValueError, TypeError):
+        return 640, 640
+
+
+def detector_size_text():
+    width, height = detector_size()
+    return f"{width}x{height}"
 
 
 def error(message_id, code, message, retryable=False, detail=""):
@@ -104,9 +128,9 @@ def handle(message):
                     return True
             import cv2  # type: ignore
 
-            image = cv2.imread(path, cv2.IMREAD_COLOR)
+            image = load_oriented_image(path, cv2)
             if image is None:
-                error(message_id, "decode_failed", "OpenCV could not decode the image", False)
+                error(message_id, "decode_failed", "Pillow could not decode the image", False)
                 return True
             source_height, source_width = image.shape[:2]
             max_pixels = int(message.get("max_pixels", 0) or 0)
@@ -160,6 +184,21 @@ def quality_score(crop, cv2):
     return max(0.0, min(1.0, variance / 500.0))
 
 
+def load_oriented_image(path, cv2):
+    """Decode and apply EXIF orientation before inference.
+
+    InsightFace receives the oriented pixel matrix, so returned boxes are in
+    the same coordinate system as the stored source dimensions.
+    """
+    from PIL import Image, ImageOps  # type: ignore
+    import numpy as np  # type: ignore
+
+    with Image.open(path) as source:
+        oriented = ImageOps.exif_transpose(source).convert("RGB")
+        pixels = np.asarray(oriented)
+    return cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
+
+
 MODEL = None
 MODEL_ERROR = None
 
@@ -170,7 +209,7 @@ def load_model():
         from insightface.app import FaceAnalysis  # type: ignore
 
         MODEL = FaceAnalysis(name=os.environ.get("FACE_ME_BRO_MODEL", "buffalo_l"), providers=providers())
-        MODEL.prepare(ctx_id=0, det_size=(640, 640))
+        MODEL.prepare(ctx_id=0, det_size=detector_size())
     except Exception as exc:  # startup reports structured error on first request
         MODEL_ERROR = exc
 

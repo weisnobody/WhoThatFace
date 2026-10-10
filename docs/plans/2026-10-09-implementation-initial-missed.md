@@ -17,15 +17,15 @@ complete in the current implementation audit. It is intended to supplement
 
 ## Worker contract and reliability
 
-- [ ] Validate worker capabilities, model checksums, preprocessing settings,
+- [x] Validate worker capabilities, model checksums, preprocessing settings,
       and pipeline compatibility at startup.
 - [x] Implement explicit protocol minor-version negotiation.
 - [x] Validate expected file identity before accepting analysis results.
 - [x] Restart workers after timeout, malformed output, or process failure.
-- [ ] Persist bounded retry attempts and permanent failures.
+- [x] Persist bounded retry attempts and permanent failures.
 - [x] Implement cancellation through worker termination and restart.
-- [ ] Implement EXIF orientation and coordinate mapping in the inference path.
-- [ ] Support pipeline-specific model configuration and checksum validation.
+- [x] Implement EXIF orientation and coordinate mapping in the inference path.
+- [x] Support pipeline-specific model configuration and checksum validation.
 
 ## Recognition and clustering integration
 

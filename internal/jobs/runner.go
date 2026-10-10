@@ -32,7 +32,11 @@ func (r Runner) RunOnce(ctx context.Context) (bool, error) {
 		if ctx.Err() != nil {
 			status = Cancelled
 		}
-		_ = r.Store.SetStatus(context.Background(), job.ID, status, "handler_error", err.Error())
+		if status == Cancelled {
+			_ = r.Store.SetStatus(context.Background(), job.ID, status, "handler_error", err.Error())
+		} else {
+			_, _ = r.Store.RecordFailure(context.Background(), job.ID, "handler_error", err.Error(), true)
+		}
 		return true, err
 	}
 	if err := r.Store.SetStatus(ctx, job.ID, Completed, "", ""); err != nil {
