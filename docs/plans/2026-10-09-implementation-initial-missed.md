@@ -124,3 +124,4 @@ complete in the current implementation audit. It is intended to supplement
       reported duplicated `image` object.
 - [ ] Mark completed, partial, and deferred requirements explicitly as the
       implementation progresses.
+- [ ] Update README.md with informaiton on requirements, setup, and running things.
