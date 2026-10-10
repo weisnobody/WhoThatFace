@@ -27,7 +27,7 @@ This installs the pinned worker dependencies, downloads and verifies the
 [`docs/installation.md`](docs/installation.md) for configuration overrides,
 offline validation, and the optional Docker worker.
 
-### Set up Go and build the application
+### Go Application
 
 The Go toolchain version must satisfy the `go` version in `go.mod`. From the
 repository root:
