@@ -15,9 +15,11 @@ import (
 	"github.com/pjg/face_me_bro/internal/app"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/clustering"
+	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
 	"github.com/pjg/face_me_bro/internal/recognition"
+	"github.com/pjg/face_me_bro/internal/search"
 	"github.com/pjg/face_me_bro/internal/setup"
 	"github.com/pjg/face_me_bro/internal/web"
 	"github.com/pjg/face_me_bro/internal/worker"
@@ -87,8 +89,12 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return pipelineCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "worker":
 		return workerCommand(ctx, application, args, stdout, stderr)
+	case "people":
+		return peopleCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "search":
+		return searchCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve, pipeline, worker)", command)
+		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve, pipeline, worker, people, search)", command)
 	}
 }
 
@@ -225,8 +231,77 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 }
 
 func accountCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "reset-password" {
-		return fmt.Errorf("account requires reset-password")
+	if len(args) == 0 {
+		return fmt.Errorf("account requires create, list, disable, enable, or reset-password")
+	}
+	store := auth.NewStore(application.DB)
+	if args[0] == "list" {
+		rows, err := application.DB.QueryContext(ctx, "SELECT id, username, role, disabled_at IS NOT NULL FROM accounts ORDER BY username")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type account struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+			Role     string `json:"role"`
+			Disabled bool   `json:"disabled"`
+		}
+		var result []account
+		for rows.Next() {
+			var value account
+			var disabled int
+			if err := rows.Scan(&value.ID, &value.Username, &value.Role, &disabled); err != nil {
+				return err
+			}
+			value.Disabled = disabled == 1
+			result = append(result, value)
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("account list", result))
+		}
+		for _, value := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%t\n", value.ID, value.Username, value.Role, value.Disabled)
+		}
+		return rows.Err()
+	}
+	if args[0] == "create" {
+		flags := flag.NewFlagSet("account create", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		username := flags.String("username", "", "username")
+		password := flags.String("password", "", "password")
+		role := flags.String("role", string(auth.Reviewer), "role")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		account, err := store.CreateAccount(ctx, *username, *password, auth.Role(*role), true)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("account create", account))
+		}
+		fmt.Fprintln(stdout, account.ID)
+		return nil
+	}
+	if args[0] == "disable" || args[0] == "enable" {
+		flags := flag.NewFlagSet("account state", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		accountID := flags.String("account-id", "", "account ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *accountID == "" {
+			return fmt.Errorf("account state requires --account-id")
+		}
+		if err := store.SetDisabled(ctx, *accountID, args[0] == "disable"); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "ok")
+		return nil
+	}
+	if args[0] != "reset-password" {
+		return fmt.Errorf("unknown account command %q", args[0])
 	}
 	flags := flag.NewFlagSet("account reset-password", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -245,6 +320,95 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		return writeJSON(stdout, envelope("account reset-password", map[string]bool{"reset": true}))
 	}
 	fmt.Fprintln(stdout, "Password reset; user must change it at next login.")
+	return nil
+}
+
+func peopleCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("people requires create or list")
+	}
+	if args[0] == "create" {
+		flags := flag.NewFlagSet("people create", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		name := flags.String("name", "", "person name")
+		provisional := flags.Bool("provisional", false, "mark provisional")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *name == "" {
+			return fmt.Errorf("people create requires --name")
+		}
+		personID, err := id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := application.DB.ExecContext(ctx, `INSERT INTO people (id, name, is_provisional, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, personID, *name, boolInt(*provisional), now, now); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("people create", map[string]any{"id": personID, "name": *name, "provisional": *provisional}))
+		}
+		fmt.Fprintln(stdout, personID)
+		return nil
+	}
+	if args[0] != "list" {
+		return fmt.Errorf("unknown people command %q", args[0])
+	}
+	rows, err := application.DB.QueryContext(ctx, "SELECT id, COALESCE(name, ''), is_provisional, dont_track FROM people ORDER BY name, id")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type person struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Provisional bool   `json:"provisional"`
+		DontTrack   bool   `json:"dont_track"`
+	}
+	var result []person
+	for rows.Next() {
+		var value person
+		var provisional, dontTrack int
+		if err := rows.Scan(&value.ID, &value.Name, &provisional, &dontTrack); err != nil {
+			return err
+		}
+		value.Provisional = provisional == 1
+		value.DontTrack = dontTrack == 1
+		result = append(result, value)
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("people list", result))
+	}
+	for _, value := range result {
+		fmt.Fprintf(stdout, "%s\t%s\n", value.ID, value.Name)
+	}
+	return rows.Err()
+}
+
+func searchCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("search", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	options := search.Options{}
+	person := flags.String("person-id", "", "person ID")
+	directory := flags.String("directory", "", "relative directory")
+	from := flags.String("from", "", "capture date lower bound")
+	until := flags.String("until", "", "capture date upper bound")
+	includeProvisional := flags.Bool("include-provisional", false, "include provisional assignments")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	options.PersonID, options.RelativePrefix, options.CaptureDateFrom, options.CaptureDateUntil, options.IncludeProvisional = *person, *directory, *from, *until, *includeProvisional
+	result, err := search.NewStore(application.DB).Photos(ctx, options)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("search", result))
+	}
+	for _, photo := range result {
+		fmt.Fprintf(stdout, "%s\t%d\t%s\n", photo.RelativePath, photo.FaceCount, photo.CaptureDate)
+	}
 	return nil
 }
 
@@ -400,4 +564,11 @@ func writeJSON(stdout io.Writer, value any) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(value)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

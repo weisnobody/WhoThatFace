@@ -86,6 +86,15 @@ func (s Store) ResetPassword(ctx context.Context, accountID, password string, mu
 	return err
 }
 
+func (s Store) SetDisabled(ctx context.Context, accountID string, disabled bool) error {
+	var value any
+	if disabled {
+		value = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET disabled_at = ?, updated_at = ? WHERE id = ?`, value, time.Now().UTC().Format(time.RFC3339Nano), accountID)
+	return err
+}
+
 // Authenticate updates lockout state transactionally. Ten failures inside a
 // rolling thirty-minute window disable the account.
 func (s Store) Authenticate(ctx context.Context, username, password string) (Account, error) {
