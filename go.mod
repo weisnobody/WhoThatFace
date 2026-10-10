@@ -4,6 +4,8 @@ go 1.26
 
 require modernc.org/sqlite v1.39.1
 
+require golang.org/x/crypto v0.36.0
+
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
