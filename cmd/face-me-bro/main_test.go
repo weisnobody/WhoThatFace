@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,5 +122,37 @@ func TestReadOnlyListCommands(t *testing.T) {
 		if err := run(ctx, args, &output, &output); err != nil {
 			t.Fatalf("%v failed: %v", command, err)
 		}
+	}
+}
+
+func TestListCommandsSupportZeroBasedPagination(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	databasePath := filepath.Join(dir, "catalog.sqlite3")
+	database, err := db.Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, name := range []string{"A", "B", "C"} {
+		if _, err := database.ExecContext(ctx, `INSERT INTO people (id, name, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, fmt.Sprintf("person-%d", index), name); err != nil {
+			database.Close()
+			t.Fatal(err)
+		}
+	}
+	database.Close()
+	configPath := filepath.Join(dir, "config.json")
+	configData, err := json.Marshal(map[string]string{"runtime_data_root": dir, "database_path": databasePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := run(ctx, []string{"--config", configPath, "people", "list", "--limit", "1", "--page", "1"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "\tB\n") || strings.Contains(output.String(), "\tA\n") || strings.Contains(output.String(), "\tC\n") {
+		t.Fatalf("unexpected paginated output: %q", output.String())
 	}
 }

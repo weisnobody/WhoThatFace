@@ -200,20 +200,20 @@ type helpTopic struct {
 
 var commandHelp = map[string]helpTopic{
 	"status":     {Usage: "face-me-bro [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
-	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get/list: --collection-id ID; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
-	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; status: --scan-run-id ID; pause/resume/cancel/retry: SCAN_RUN_ID"},
-	"job":        {Usage: "face-me-bro job <list|status|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "status and controls use --job-id ID; list accepts --status STATUS"},
-	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get/list: --account-id ID; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
+	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
+	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
+	"job":        {Usage: "face-me-bro job <list|status|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; status and controls use --job-id ID"},
+	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
 	"setup":      {Usage: "face-me-bro setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
 	"serve":      {Usage: "face-me-bro serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
-	"pipeline":   {Usage: "face-me-bro pipeline <get|register|list> [options]", Description: "Register or inspect model and preprocessing pipeline identities.", Options: "get: --pipeline-id; register: --model-family --model-version --provider --model-checksums-json --detector-config-json --preprocessing-config-json"},
+	"pipeline":   {Usage: "face-me-bro pipeline <get|register|list> [options]", Description: "Register or inspect model and preprocessing pipeline identities.", Options: "get: --pipeline-id; list: --limit N --page N; register: --model-family --model-version --provider --model-checksums-json --detector-config-json --preprocessing-config-json"},
 	"config":     {Usage: "face-me-bro config <show|set-search> [options]", Description: "Show or change global application configuration.", Options: "set-search: --method exact|ann"},
 	"worker":     {Usage: "face-me-bro worker", Description: "Run the background worker loop for queued analysis and recognition jobs."},
-	"people":     {Usage: "face-me-bro people <get|list|create> [options]", Description: "Inspect, list, or create people records.", Options: "get: --person-id; create: --name NAME [--provisional]"},
-	"face":       {Usage: "face-me-bro face <get|list|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, dispositions, and reference status; list faces with their current state.", Options: "get: --face-id; list: [--limit N]; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
-	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID] [--scope all|unresolved-only|subset]; get/review: --cluster-id ID; list: [--run-id ID]; review changes require --yes"},
+	"people":     {Usage: "face-me-bro people <get|list|create> [options]", Description: "Inspect, list, or create people records.", Options: "get: --person-id; list: --limit N --page N; create: --name NAME [--provisional]"},
+	"face":       {Usage: "face-me-bro face <get|list|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, dispositions, and reference status; list faces with their current state.", Options: "get: --face-id; list: --limit N --page N; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
+	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID] [--scope all|unresolved-only|subset]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
 	"search":     {Usage: "face-me-bro search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
-	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID]; purge: --age-days N"},
+	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
 	"backup":     {Usage: "face-me-bro backup create", Description: "Create a database backup in the configured backup directory."},
 	"restore":    {Usage: "face-me-bro restore --input FILE --yes", Description: "Replace the configured database from a backup after explicit confirmation."},
 	"export":     {Usage: "face-me-bro export metadata [--output FILE]", Description: "Export application metadata as versioned JSON."},
@@ -479,7 +479,17 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		fmt.Fprintln(stdout, id)
 		return nil
 	case "list":
-		rows, err := application.DB.QueryContext(ctx, "SELECT id, name, root_path, enabled, neighbor_search_method FROM collections ORDER BY name")
+		flags := flag.NewFlagSet("collection list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination("SELECT id, name, root_path, enabled, neighbor_search_method FROM collections ORDER BY name", nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 		if err != nil {
 			return err
 		}
@@ -553,7 +563,17 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 			fmt.Fprintln(stdout, "ok")
 			return nil
 		}
-		rows, err := application.DB.QueryContext(ctx, `SELECT id, collection_id, status, created_at, completed_at FROM scan_runs ORDER BY created_at DESC`)
+		flags := flag.NewFlagSet("scan status", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination("SELECT id, collection_id, status, created_at, completed_at FROM scan_runs ORDER BY created_at DESC", nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 		if err != nil {
 			return err
 		}
@@ -692,10 +712,20 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		fmt.Fprintln(stdout, "ok")
 		return nil
 	}
-	if len(args) != 1 || args[0] != "list" {
+	if len(args) == 0 || args[0] != "list" {
 		return fmt.Errorf("job requires list, get, pause, resume, cancel, or retry")
 	}
-	rows, err := application.DB.QueryContext(ctx, "SELECT id, kind, priority, status, created_at, attempts, max_attempts FROM jobs ORDER BY created_at DESC")
+	flags := flag.NewFlagSet("job list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	limit, page := paginationFlags(flags)
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	query, queryArgs, err := applyPagination("SELECT id, kind, priority, status, created_at, attempts, max_attempts FROM jobs ORDER BY created_at DESC", nil, *limit, *page)
+	if err != nil {
+		return err
+	}
+	rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return err
 	}
@@ -750,7 +780,17 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		return writeCommandResult(stdout, jsonOutput, "account get", map[string]any{"id": id, "username": username, "role": role, "disabled": disabled == 1, "must_change_password": mustChange == 1, "created_at": created, "updated_at": updated})
 	}
 	if args[0] == "list" {
-		rows, err := application.DB.QueryContext(ctx, "SELECT id, username, role, disabled_at IS NOT NULL FROM accounts ORDER BY username")
+		flags := flag.NewFlagSet("account list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination("SELECT id, username, role, disabled_at IS NOT NULL FROM accounts ORDER BY username", nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 		if err != nil {
 			return err
 		}
@@ -914,7 +954,17 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 	if args[0] != "list" {
 		return fmt.Errorf("unknown people command %q", args[0])
 	}
-	rows, err := application.DB.QueryContext(ctx, "SELECT id, COALESCE(name, ''), is_provisional, dont_track FROM people ORDER BY name, id")
+	flags := flag.NewFlagSet("people list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	limit, page := paginationFlags(flags)
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	query, queryArgs, err := applyPagination("SELECT id, COALESCE(name, ''), is_provisional, dont_track FROM people ORDER BY name, id", nil, *limit, *page)
+	if err != nil {
+		return err
+	}
+	rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return err
 	}
@@ -1008,20 +1058,16 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 	disposition := flags.String("disposition", "", "face disposition")
 	reference := flags.Bool("reference", false, "set as reference")
 	yes := flags.Bool("yes", false, "confirm identity-changing operation")
-	limit := flags.Int("limit", 0, "maximum number of faces to return; zero means unlimited")
+	limit, page := paginationFlags(flags)
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
 	if args[0] == "list" {
-		if *limit < 0 {
-			return fmt.Errorf("face list requires a non-negative --limit")
-		}
 		query := `SELECT f.id, f.analysis_id, f.face_index, f.detection_confidence, f.quality, COALESCE(a.state, 'unassigned'), COALESCE(a.person_id, ''), COALESCE(p.name, '')
 			FROM faces f LEFT JOIN current_face_assignments a ON a.face_id = f.id LEFT JOIN people p ON p.id = a.person_id ORDER BY f.created_at, f.id`
-		var queryArgs []any
-		if *limit > 0 {
-			query += " LIMIT ?"
-			queryArgs = append(queryArgs, *limit)
+		query, queryArgs, err := applyPagination(query, nil, *limit, *page)
+		if err != nil {
+			return err
 		}
 		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 		if err != nil {
@@ -1150,6 +1196,7 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 		flags := flag.NewFlagSet("cluster list", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		runID := flags.String("run-id", "", "clustering run ID")
+		limit, page := paginationFlags(flags)
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -1161,6 +1208,11 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 			queryArgs = append(queryArgs, *runID)
 		}
 		query += " GROUP BY c.id ORDER BY c.created_at, c.id"
+		var err error
+		query, queryArgs, err = applyPagination(query, queryArgs, *limit, *page)
+		if err != nil {
+			return err
+		}
 		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 		if err != nil {
 			return err
@@ -1262,6 +1314,22 @@ func writeCommandResult(stdout io.Writer, jsonOutput bool, command string, resul
 	return err
 }
 
+// paginationFlags uses zero-based pages so page 10 with a limit of 20 starts
+// at row 201, matching the CLI's documented offset semantics.
+func paginationFlags(flags *flag.FlagSet) (*int, *int) {
+	return flags.Int("limit", 100, "maximum rows to return"), flags.Int("page", 0, "zero-based page number")
+}
+
+func applyPagination(query string, args []any, limit, page int) (string, []any, error) {
+	if limit < 1 {
+		return "", nil, fmt.Errorf("--limit must be positive")
+	}
+	if page < 0 {
+		return "", nil, fmt.Errorf("--page must be non-negative")
+	}
+	return query + " LIMIT ? OFFSET ?", append(args, limit, page*limit), nil
+}
+
 func searchCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("search", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -1297,12 +1365,9 @@ func auditCommand(ctx context.Context, application *app.App, args []string, json
 		flags.SetOutput(stderr)
 		entityType := flags.String("entity-type", "", "filter by entity type")
 		entityID := flags.String("entity-id", "", "filter by entity ID")
-		limit := flags.Int("limit", 100, "maximum number of events to return")
+		limit, page := paginationFlags(flags)
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
-		}
-		if *limit < 1 {
-			return fmt.Errorf("audit list requires a positive --limit")
 		}
 		query := `SELECT id, COALESCE(account_id, ''), action, entity_type, entity_id, COALESCE(target_event_id, ''), COALESCE(previous_json, ''), COALESCE(new_json, ''), conflict, created_at FROM audit_events WHERE 1 = 1`
 		var queryArgs []any
@@ -1314,8 +1379,12 @@ func auditCommand(ctx context.Context, application *app.App, args []string, json
 			query += " AND entity_id = ?"
 			queryArgs = append(queryArgs, *entityID)
 		}
-		query += " ORDER BY created_at DESC, id DESC LIMIT ?"
-		queryArgs = append(queryArgs, *limit)
+		query += " ORDER BY created_at DESC, id DESC"
+		var err error
+		query, queryArgs, err = applyPagination(query, queryArgs, *limit, *page)
+		if err != nil {
+			return err
+		}
 		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 		if err != nil {
 			return err
@@ -1449,7 +1518,17 @@ func pipelineCommand(ctx context.Context, application *app.App, args []string, j
 		return writeCommandResult(stdout, jsonOutput, "pipeline get", result)
 	}
 	if args[0] == "list" {
-		rows, err := application.DB.QueryContext(ctx, `SELECT id, model_family, model_version, embedding_dimension, embedding_dtype, normalization, execution_provider, model_checksums_json, detector_config_json, preprocessing_config_json FROM pipelines ORDER BY created_at DESC`)
+		flags := flag.NewFlagSet("pipeline list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination(`SELECT id, model_family, model_version, embedding_dimension, embedding_dtype, normalization, execution_provider, model_checksums_json, detector_config_json, preprocessing_config_json FROM pipelines ORDER BY created_at DESC`, nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
 		if err != nil {
 			return err
 		}
