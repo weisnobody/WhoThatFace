@@ -47,6 +47,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /review/photos", s.reviewPhotos)
 	mux.HandleFunc("GET /review/people", s.reviewPeople)
 	mux.HandleFunc("GET /review/clusters", s.reviewClusters)
+	mux.HandleFunc("GET /review/clusters/{clusterID}", s.reviewCluster)
+	mux.HandleFunc("POST /api/clusters/{clusterID}/review", s.reviewClusterAPI)
 	return securityHeaders(mux)
 }
 
@@ -205,10 +207,73 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
-		body.WriteString(`<tr><td>` + template.HTMLEscapeString(key) + `</td><td>` + fmt.Sprint(purity.Float64) + `</td><td>` + fmt.Sprint(connectivity.Float64) + `</td><td>` + fmt.Sprint(mixed == 1) + `</td><td>` + template.HTMLEscapeString(status) + `</td></tr>`)
+		body.WriteString(`<tr><td><a href="/review/clusters/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(key) + `</a></td><td>` + fmt.Sprint(purity.Float64) + `</td><td>` + fmt.Sprint(connectivity.Float64) + `</td><td>` + fmt.Sprint(mixed == 1) + `</td><td>` + template.HTMLEscapeString(status) + `</td></tr>`)
 	}
 	body.WriteString(`</table>`)
 	s.render(w, map[string]any{"Title": "Clusters", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	clusterID := r.PathValue("clusterID")
+	rows, err := s.db.QueryContext(r.Context(), `SELECT cm.face_id, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, '') FROM cluster_memberships cm LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id WHERE cm.cluster_id = ? ORDER BY cm.face_id`, clusterID)
+	if err != nil {
+		http.Error(w, "cluster lookup failed", 500)
+		return
+	}
+	defer rows.Close()
+	var body strings.Builder
+	body.WriteString(`<h1>Cluster ` + template.HTMLEscapeString(clusterID) + `</h1><table><tr><th>Face</th><th>State</th><th>Person</th></tr>`)
+	for rows.Next() {
+		var faceID, state, personID string
+		if err := rows.Scan(&faceID, &state, &personID); err != nil {
+			http.Error(w, "cluster lookup failed", 500)
+			return
+		}
+		body.WriteString(`<tr><td>` + template.HTMLEscapeString(faceID) + `</td><td>` + template.HTMLEscapeString(state) + `</td><td>` + template.HTMLEscapeString(personID) + `</td></tr>`)
+	}
+	body.WriteString(`</table><p>Review decisions can be submitted through the authenticated cluster review API.</p>`)
+	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) reviewClusterAPI(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if !validCSRFApi(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	clusterID := r.PathValue("clusterID")
+	var collectionID string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id FROM cluster_memberships cm JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE cm.cluster_id = ? LIMIT 1`, clusterID).Scan(&collectionID); err != nil {
+		http.Error(w, "cluster not found", http.StatusNotFound)
+		return
+	}
+	allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, true, false)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var input struct {
+		DefaultPersonID string                       `json:"default_person_id"`
+		Status          string                       `json:"status"`
+		Note            string                       `json:"note"`
+		Decisions       []review.ClusterFaceDecision `json:"decisions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "invalid review", http.StatusBadRequest)
+		return
+	}
+	if err := review.NewStore(s.db).ReviewCluster(r.Context(), clusterID, input.DefaultPersonID, input.Status, input.Decisions, review.Actor{Type: "user", AccountID: account.ID}, input.Note); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cluster_id": clusterID, "status": input.Status})
 }
 
 func (s *Server) photos(w http.ResponseWriter, r *http.Request) {

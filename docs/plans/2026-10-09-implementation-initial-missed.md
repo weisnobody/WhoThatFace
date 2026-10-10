@@ -44,15 +44,15 @@ complete in the current implementation audit. It is intended to supplement
 ## Cluster review workflow
 
 - [ ] Add cluster detail pages with face images and candidate evidence.
-- [ ] Implement cluster default-person assignment.
+- [x] Implement cluster default-person assignment.
 - [ ] Implement green, yellow, and red face-state borders.
-- [ ] Support partial saves and per-face dispositions.
+- [x] Support partial saves and per-face dispositions.
 - [ ] Support mixed-cluster review and explicit needs-review states.
 - [ ] Support unknown, ambiguous, false-detection, and don't-track actions.
 - [ ] Support singleton virtual review groups with explicit confirmation.
 - [ ] Add superseded-run warnings and historical-run review behavior.
 - [ ] Add optimistic concurrency/version checks for review mutations.
-- [ ] Record all cluster review actions in the audit history.
+- [x] Record all cluster review actions in the audit history.
 
 ## Web service, authorization, and audit
 
