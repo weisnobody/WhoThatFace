@@ -13,6 +13,8 @@ InsightFace Python worker.
 
 ## Setup
 
+### Python Worker
+
 From the repository root:
 
 ```sh
@@ -24,6 +26,23 @@ This installs the pinned worker dependencies, downloads and verifies the
 `buffalo_l` model, and records the complete environment freeze. See
 [`docs/installation.md`](docs/installation.md) for configuration overrides,
 offline validation, and the optional Docker worker.
+
+### Set up Go and build the application
+
+The Go toolchain version must satisfy the `go` version in `go.mod`. From the
+repository root:
+
+```sh
+go version
+go mod download
+mkdir -p bin
+go build -o bin/face-me-bro ./cmd/face-me-bro
+go build -o bin/face-me-bro-benchmark ./cmd/face-me-bro-benchmark
+```
+
+The first build produces the main CLI. The second produces the optional
+performance benchmark executable. The binaries can be run directly, for
+example `./bin/face-me-bro help`.
 
 ## Run and test
 
