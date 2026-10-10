@@ -10,8 +10,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pjg/face_me_bro/internal/db"
+	"github.com/pjg/face_me_bro/internal/jobs"
 )
 
 func TestHelpListsCommandsWithoutOpeningDatabase(t *testing.T) {
@@ -154,5 +156,33 @@ func TestListCommandsSupportZeroBasedPagination(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "\tB\n") || strings.Contains(output.String(), "\tA\n") || strings.Contains(output.String(), "\tC\n") {
 		t.Fatalf("unexpected paginated output: %q", output.String())
+	}
+}
+
+func TestJobStatusReportsProgressAndEstimate(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(ctx, filepath.Join(t.TempDir(), "jobs.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	started := time.Now().UTC().Add(-10 * time.Second).Format(time.RFC3339Nano)
+	if _, err := database.ExecContext(ctx, `INSERT INTO jobs (id, kind, status, payload_json, started_at, created_at) VALUES ('job-status', 'analysis', 'running', '{}', ?, ?)`, started, started); err != nil {
+		t.Fatal(err)
+	}
+	for index, status := range []string{"completed", "completed", "running", "failed"} {
+		if _, err := database.ExecContext(ctx, `INSERT INTO job_items (id, job_id, item_key, status, updated_at) VALUES (?, 'job-status', ?, ?, ?)`, fmt.Sprintf("item-%d", index), fmt.Sprintf("asset-%d", index), status, started); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, err := currentJobStatus(ctx, jobs.NewStore(database), "job-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ItemsCompleted != 2 || report.ItemsProcessed != 3 || report.ItemsRemaining != 1 || report.FailedItems != 1 || report.PercentageComplete != 75 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	if report.CurrentItem == nil || *report.CurrentItem != "asset-2" || report.EstimatedTimeRemaining == nil {
+		t.Fatalf("missing current item or estimate: %+v", report)
 	}
 }

@@ -109,7 +109,7 @@ func commandIsReadOnly(command string, args []string) bool {
 	case "scan":
 		return subcommand == "status"
 	case "job":
-		return subcommand == "list" || subcommand == "get"
+		return subcommand == "list" || subcommand == "get" || subcommand == "status"
 	case "account":
 		return subcommand == "list" || subcommand == "get"
 	case "setup":
@@ -202,7 +202,7 @@ var commandHelp = map[string]helpTopic{
 	"status":     {Usage: "face-me-bro [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
 	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
 	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
-	"job":        {Usage: "face-me-bro job <list|status|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; status and controls use --job-id ID"},
+	"job":        {Usage: "face-me-bro job <list|get|status|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; controls use JOB_ID"},
 	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
 	"setup":      {Usage: "face-me-bro setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
 	"serve":      {Usage: "face-me-bro serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
@@ -662,7 +662,7 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 
 func jobCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("job requires list, get, pause, resume, cancel, or retry")
+		return fmt.Errorf("job requires list, get, status, pause, resume, cancel, or retry")
 	}
 	store := jobs.NewStore(application.DB)
 	if args[0] == "throttle" {
@@ -676,6 +676,38 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "job throttle", map[string]string{"mode": *mode})
+	}
+	if args[0] == "status" {
+		flags := flag.NewFlagSet("job status", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jobID := flags.String("job-id", "", "job ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *jobID == "" {
+			return fmt.Errorf("job status requires --job-id")
+		}
+		report, err := currentJobStatus(ctx, store, *jobID)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("job status", report))
+		}
+		current := "-"
+		if report.CurrentItem != nil {
+			current = *report.CurrentItem
+		}
+		eta := "-"
+		if report.EstimatedTimeRemaining != nil {
+			eta = *report.EstimatedTimeRemaining
+		}
+		started := "-"
+		if report.StartedAt != nil {
+			started = report.StartedAt.Format(time.RFC3339Nano)
+		}
+		fmt.Fprintf(stdout, "Job:                         %s\nStatus:                      %s\nItems completed:             %d\nItems remaining:             %d\nCurrent item:                %s\nPercentage complete:         %.1f%%\nTime started:                %s\nTime running:                %s\nEstimated time remaining:    %s\nFailed item count:           %d\n", report.JobID, report.Status, report.ItemsCompleted, report.ItemsRemaining, current, report.PercentageComplete, started, report.TimeRunning, eta, report.FailedItems)
+		return nil
 	}
 	if args[0] == "get" {
 		if len(args) != 2 {
@@ -713,7 +745,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		return nil
 	}
 	if len(args) == 0 || args[0] != "list" {
-		return fmt.Errorf("job requires list, get, pause, resume, cancel, or retry")
+		return fmt.Errorf("job requires list, get, status, pause, resume, cancel, or retry")
 	}
 	flags := flag.NewFlagSet("job list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -755,6 +787,80 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\tattempts=%d/%d\n", value.ID, value.Kind, value.Status, value.Priority, value.Attempts, value.MaxAttempts)
 	}
 	return rows.Err()
+}
+
+type jobStatusReport struct {
+	JobID                         string      `json:"job_id"`
+	Status                        jobs.Status `json:"status"`
+	ItemsCompleted                int         `json:"items_completed"`
+	ItemsProcessed                int         `json:"items_processed"`
+	ItemsRemaining                int         `json:"items_remaining"`
+	CurrentItem                   *string     `json:"current_item"`
+	PercentageComplete            float64     `json:"percentage_complete"`
+	StartedAt                     *time.Time  `json:"started_at,omitempty"`
+	TimeRunning                   string      `json:"time_running"`
+	TimeRunningSeconds            float64     `json:"time_running_seconds"`
+	EstimatedTimeRemaining        *string     `json:"estimated_time_remaining,omitempty"`
+	EstimatedTimeRemainingSeconds *float64    `json:"estimated_time_remaining_seconds,omitempty"`
+	FailedItems                   int         `json:"failed_items"`
+}
+
+func currentJobStatus(ctx context.Context, store jobs.Store, jobID string) (jobStatusReport, error) {
+	job, err := store.Get(ctx, jobID)
+	if err != nil {
+		return jobStatusReport{}, err
+	}
+	items, err := store.Items(ctx, jobID)
+	if err != nil {
+		return jobStatusReport{}, err
+	}
+	completed, failed, skipped := 0, 0, 0
+	var current *jobs.Item
+	for index := range items {
+		item := &items[index]
+		switch item.Status {
+		case "completed":
+			completed++
+		case "failed":
+			failed++
+		case "skipped":
+			skipped++
+		case "running":
+			if current == nil || item.UpdatedAt.After(current.UpdatedAt) {
+				current = item
+			}
+		}
+	}
+	processed := completed + failed + skipped
+	remaining := len(items) - processed
+	if remaining < 0 {
+		remaining = 0
+	}
+	percentage := 0.0
+	if len(items) > 0 {
+		percentage = float64(processed) * 100 / float64(len(items))
+	}
+	end := time.Now().UTC()
+	if job.CompletedAt != nil {
+		end = job.CompletedAt.UTC()
+	}
+	running := time.Duration(0)
+	if job.StartedAt != nil && end.After(job.StartedAt.UTC()) {
+		running = end.Sub(job.StartedAt.UTC())
+	}
+	report := jobStatusReport{JobID: job.ID, Status: job.Status, ItemsCompleted: completed, ItemsProcessed: processed, ItemsRemaining: remaining, PercentageComplete: percentage, StartedAt: job.StartedAt, TimeRunning: running.String(), TimeRunningSeconds: running.Seconds(), FailedItems: failed}
+	if current != nil {
+		value := current.Key
+		report.CurrentItem = &value
+	}
+	if processed > 0 && remaining > 0 && running > 0 {
+		seconds := running.Seconds() * float64(remaining) / float64(processed)
+		report.EstimatedTimeRemainingSeconds = &seconds
+		duration := (time.Duration(seconds * float64(time.Second))).Round(time.Second)
+		value := duration.String()
+		report.EstimatedTimeRemaining = &value
+	}
+	return report, nil
 }
 
 func accountCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
