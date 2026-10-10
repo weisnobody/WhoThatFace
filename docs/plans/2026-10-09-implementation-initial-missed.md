@@ -70,13 +70,13 @@ complete in the current implementation audit. It is intended to supplement
 ## CLI and operational controls
 
 - [x] Add collection remove and lifecycle commands.
-- [ ] Add scan status, pause, resume, cancel, and retry commands.
-- [ ] Add job pause, resume, cancel, retry, and detailed-status commands.
-- [ ] Add face and cluster inspection/review commands.
-- [ ] Add configuration/model-settings commands.
+- [x] Add scan status, pause, resume, cancel, and retry commands.
+- [x] Add job pause, resume, cancel, retry, and detailed-status commands.
+- [x] Add face and cluster inspection/review commands.
+- [x] Add configuration/model-settings commands.
 - [x] Add export, derived-data purge, database backup, and restore commands.
-- [ ] Make structured JSON output consistent across all command families.
-- [ ] Require explicit confirmation for all identity-changing non-interactive
+- [x] Make structured JSON output consistent across all command families.
+- [x] Require explicit confirmation for all identity-changing non-interactive
       commands.
 
 ## Background processing and resource policy

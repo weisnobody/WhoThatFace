@@ -24,6 +24,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
 	"github.com/pjg/face_me_bro/internal/recognition"
+	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
 	"github.com/pjg/face_me_bro/internal/setup"
 	"github.com/pjg/face_me_bro/internal/web"
@@ -116,10 +117,16 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return serveCommand(ctx, application, args, stdout, stderr)
 	case "pipeline":
 		return pipelineCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "config":
+		return configCommand(application, args, jsonOutput, stdout)
 	case "worker":
 		return workerCommand(ctx, application, args, stdout, stderr)
 	case "people":
 		return peopleCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "face":
+		return faceCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "cluster":
+		return clusterCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "search":
 		return searchCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "audit":
@@ -131,7 +138,7 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 	case "purge":
 		return purgeCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve, pipeline, worker, people, search)", command)
+		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve, pipeline, config, worker, people, face, cluster, search)", command)
 	}
 }
 
@@ -489,7 +496,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		if jsonOutput {
 			return writeJSON(stdout, envelope("job get", job))
 		}
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\n", job.ID, job.Kind, job.Status, job.Priority)
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\tattempts=%d/%d\n", job.ID, job.Kind, job.Status, job.Priority, job.Attempts, job.MaxAttempts)
 		return nil
 	}
 	if len(args) == 2 && (args[0] == "pause" || args[0] == "resume" || args[0] == "cancel" || args[0] == "retry") {
@@ -516,22 +523,24 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 	if len(args) != 1 || args[0] != "list" {
 		return fmt.Errorf("job requires list, get, pause, resume, cancel, or retry")
 	}
-	rows, err := application.DB.QueryContext(ctx, "SELECT id, kind, priority, status, created_at FROM jobs ORDER BY created_at DESC")
+	rows, err := application.DB.QueryContext(ctx, "SELECT id, kind, priority, status, created_at, attempts, max_attempts FROM jobs ORDER BY created_at DESC")
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	type item struct {
-		ID        string `json:"id"`
-		Kind      string `json:"kind"`
-		Priority  int    `json:"priority"`
-		Status    string `json:"status"`
-		CreatedAt string `json:"created_at"`
+		ID          string `json:"id"`
+		Kind        string `json:"kind"`
+		Priority    int    `json:"priority"`
+		Status      string `json:"status"`
+		CreatedAt   string `json:"created_at"`
+		Attempts    int    `json:"attempts"`
+		MaxAttempts int    `json:"max_attempts"`
 	}
 	var result []item
 	for rows.Next() {
 		var value item
-		if err := rows.Scan(&value.ID, &value.Kind, &value.Priority, &value.Status, &value.CreatedAt); err != nil {
+		if err := rows.Scan(&value.ID, &value.Kind, &value.Priority, &value.Status, &value.CreatedAt, &value.Attempts, &value.MaxAttempts); err != nil {
 			return err
 		}
 		result = append(result, value)
@@ -540,7 +549,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		return writeJSON(stdout, envelope("job list", result))
 	}
 	for _, value := range result {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\n", value.ID, value.Kind, value.Status, value.Priority)
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\tattempts=%d/%d\n", value.ID, value.Kind, value.Status, value.Priority, value.Attempts, value.MaxAttempts)
 	}
 	return rows.Err()
 }
@@ -673,11 +682,12 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 		flags.SetOutput(stderr)
 		name := flags.String("name", "", "person name")
 		provisional := flags.Bool("provisional", false, "mark provisional")
+		yes := flags.Bool("yes", false, "confirm creation of an identity record")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		if *name == "" {
-			return fmt.Errorf("people create requires --name")
+		if *name == "" || !*yes {
+			return fmt.Errorf("people create requires --name and --yes")
 		}
 		personID, err := id.NewUUIDv7()
 		if err != nil {
@@ -725,6 +735,155 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 		fmt.Fprintf(stdout, "%s\t%s\n", value.ID, value.Name)
 	}
 	return rows.Err()
+}
+
+func configCommand(application *app.App, args []string, jsonOutput bool, stdout io.Writer) error {
+	if len(args) != 1 || args[0] != "show" {
+		return fmt.Errorf("config requires show")
+	}
+	status, err := application.Status(context.Background())
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("config show", status))
+	}
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, string(data))
+	return err
+}
+
+func faceCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("face requires get, assign, disposition, or reference")
+	}
+	flags := flag.NewFlagSet("face "+args[0], flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	faceID := flags.String("face-id", "", "face ID")
+	personID := flags.String("person-id", "", "person ID")
+	state := flags.String("state", "", "assignment state")
+	disposition := flags.String("disposition", "", "face disposition")
+	reference := flags.Bool("reference", false, "set as reference")
+	yes := flags.Bool("yes", false, "confirm identity-changing operation")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *faceID == "" {
+		return fmt.Errorf("face %s requires --face-id", args[0])
+	}
+	if args[0] == "get" {
+		var currentState, currentPerson, currentEvent string
+		var dispositionValue, referenceValue sql.NullString
+		if err := application.DB.QueryRowContext(ctx, `SELECT COALESCE(state, 'unassigned'), COALESCE(person_id, ''), event_id FROM current_face_assignments WHERE face_id = ?`, *faceID).Scan(&currentState, &currentPerson, &currentEvent); err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		_ = application.DB.QueryRowContext(ctx, `SELECT disposition FROM current_face_dispositions WHERE face_id = ?`, *faceID).Scan(&dispositionValue)
+		_ = application.DB.QueryRowContext(ctx, `SELECT reference FROM current_face_references WHERE face_id = ?`, *faceID).Scan(&referenceValue)
+		result := map[string]any{"face_id": *faceID, "state": currentState, "person_id": currentPerson, "event_id": currentEvent, "disposition": dispositionValue.String, "reference": referenceValue.String == "1"}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("face get", result))
+		}
+		return writeJSON(stdout, result)
+	}
+	if !*yes {
+		return fmt.Errorf("face %s requires --yes", args[0])
+	}
+	store := review.NewStore(application.DB)
+	switch args[0] {
+	case "assign":
+		if *state == "" {
+			return fmt.Errorf("face assign requires --state")
+		}
+		assignment, err := store.Assign(ctx, *faceID, *personID, review.AssignmentState(*state), review.Actor{Type: "user"}, review.Evidence{}, "cli")
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("face assign", assignment))
+		}
+		fmt.Fprintln(stdout, assignment.EventID)
+		return nil
+	case "disposition":
+		if *disposition == "" {
+			return fmt.Errorf("face disposition requires --disposition")
+		}
+		if err := store.SetDisposition(ctx, *faceID, *disposition, true, review.Actor{Type: "user"}, "cli"); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "face disposition", map[string]any{"face_id": *faceID, "disposition": *disposition})
+	case "reference":
+		if *personID == "" {
+			return fmt.Errorf("face reference requires --person-id")
+		}
+		if err := store.SetReference(ctx, *faceID, *personID, *reference, review.Actor{Type: "user"}, "cli"); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "face reference", map[string]any{"face_id": *faceID, "person_id": *personID, "reference": *reference})
+	default:
+		return fmt.Errorf("unknown face command %q", args[0])
+	}
+}
+
+func clusterCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("cluster requires get or review")
+	}
+	flags := flag.NewFlagSet("cluster "+args[0], flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	clusterID := flags.String("cluster-id", "", "cluster ID")
+	status := flags.String("status", "reviewed", "review status")
+	defaultPersonID := flags.String("default-person-id", "", "default person ID")
+	expectedVersion := flags.Int("expected-version", 0, "optimistic review version")
+	faceID := flags.String("face-id", "", "optional face decision ID")
+	facePersonID := flags.String("face-person-id", "", "person ID for the face decision")
+	faceState := flags.String("face-state", "", "state for the face decision")
+	disposition := flags.String("disposition", "", "face disposition")
+	yes := flags.Bool("yes", false, "confirm identity-changing operation")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *clusterID == "" {
+		return fmt.Errorf("cluster %s requires --cluster-id", args[0])
+	}
+	if args[0] == "get" {
+		var key, reviewStatus string
+		var version, mixed int
+		var purity, connectivity sql.NullFloat64
+		if err := application.DB.QueryRowContext(ctx, `SELECT cluster_key, review_status, review_version, is_mixed, purity, connectivity FROM clusters WHERE id = ?`, *clusterID).Scan(&key, &reviewStatus, &version, &mixed, &purity, &connectivity); err != nil {
+			return err
+		}
+		result := map[string]any{"id": *clusterID, "cluster_key": key, "review_status": reviewStatus, "review_version": version, "mixed": mixed == 1, "purity": purity.Float64, "connectivity": connectivity.Float64}
+		return writeCommandResult(stdout, jsonOutput, "cluster get", result)
+	}
+	if args[0] != "review" {
+		return fmt.Errorf("unknown cluster command %q", args[0])
+	}
+	if !*yes {
+		return fmt.Errorf("cluster review requires --yes")
+	}
+	var decisions []review.ClusterFaceDecision
+	if *faceID != "" {
+		decisions = append(decisions, review.ClusterFaceDecision{FaceID: *faceID, PersonID: *facePersonID, State: review.AssignmentState(*faceState), Disposition: *disposition})
+	}
+	if err := review.NewStore(application.DB).ReviewCluster(ctx, *clusterID, *defaultPersonID, *status, *expectedVersion, decisions, review.Actor{Type: "user"}, "cli"); err != nil {
+		return err
+	}
+	return writeCommandResult(stdout, jsonOutput, "cluster review", map[string]any{"cluster_id": *clusterID, "status": *status, "expected_version": *expectedVersion + 1})
+}
+
+func writeCommandResult(stdout io.Writer, jsonOutput bool, command string, result any) error {
+	if jsonOutput {
+		return writeJSON(stdout, envelope(command, result))
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, string(data))
+	return err
 }
 
 func searchCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
@@ -823,8 +982,37 @@ func serveCommand(ctx context.Context, application *app.App, args []string, stdo
 }
 
 func pipelineCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "register" {
-		return fmt.Errorf("pipeline requires register")
+	if len(args) == 0 {
+		return fmt.Errorf("pipeline requires register or list")
+	}
+	if args[0] == "list" {
+		rows, err := application.DB.QueryContext(ctx, `SELECT id, model_family, model_version, embedding_dimension, embedding_dtype, normalization, execution_provider, model_checksums_json, detector_config_json, preprocessing_config_json FROM pipelines ORDER BY created_at DESC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var result []map[string]any
+		for rows.Next() {
+			var id, family, version, dtype, normalization, provider, checksums, detector, preprocessing string
+			var dimension int
+			if err := rows.Scan(&id, &family, &version, &dimension, &dtype, &normalization, &provider, &checksums, &detector, &preprocessing); err != nil {
+				return err
+			}
+			result = append(result, map[string]any{"id": id, "model_family": family, "model_version": version, "embedding_dimension": dimension, "embedding_dtype": dtype, "normalization": normalization, "execution_provider": provider, "model_checksums": json.RawMessage(checksums), "detector_config": json.RawMessage(detector), "preprocessing_config": json.RawMessage(preprocessing)})
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("pipeline list", result))
+		}
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item["id"], item["model_family"], item["model_version"], item["execution_provider"])
+		}
+		return nil
+	}
+	if args[0] != "register" {
+		return fmt.Errorf("pipeline requires register or list")
 	}
 	flags := flag.NewFlagSet("pipeline register", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -832,10 +1020,24 @@ func pipelineCommand(ctx context.Context, application *app.App, args []string, j
 	version := flags.String("model-version", "2.0.0", "model version")
 	dimension := flags.Int("embedding-dimension", 512, "embedding dimension")
 	provider := flags.String("provider", "CPUExecutionProvider", "execution provider")
+	checksums := flags.String("model-checksums-json", "{}", "model checksum JSON object")
+	detector := flags.String("detector-config-json", "{}", "detector configuration JSON object")
+	preprocessing := flags.String("preprocessing-config-json", "{}", "preprocessing configuration JSON object")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	pipelineID, err := analysis.NewStore(application.DB).RegisterPipeline(ctx, analysis.Pipeline{ModelFamily: *family, ModelVersion: *version, EmbeddingDimension: *dimension, EmbeddingDType: "float32", Normalization: "l2", ExecutionProvider: *provider})
+	var checksumValue map[string]string
+	if err := json.Unmarshal([]byte(*checksums), &checksumValue); err != nil {
+		return fmt.Errorf("invalid model checksums JSON: %w", err)
+	}
+	var detectorValue, preprocessingValue any
+	if err := json.Unmarshal([]byte(*detector), &detectorValue); err != nil {
+		return fmt.Errorf("invalid detector config JSON: %w", err)
+	}
+	if err := json.Unmarshal([]byte(*preprocessing), &preprocessingValue); err != nil {
+		return fmt.Errorf("invalid preprocessing config JSON: %w", err)
+	}
+	pipelineID, err := analysis.NewStore(application.DB).RegisterPipeline(ctx, analysis.Pipeline{ModelFamily: *family, ModelVersion: *version, ModelChecksums: checksumValue, DetectorConfig: detectorValue, PreprocessingConfig: preprocessingValue, EmbeddingDimension: *dimension, EmbeddingDType: "float32", Normalization: "l2", ExecutionProvider: *provider})
 	if err != nil {
 		return err
 	}
