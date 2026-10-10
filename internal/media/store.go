@@ -1,0 +1,136 @@
+package media
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/pjg/face_me_bro/internal/id"
+)
+
+// Store persists scan results behind a small media-oriented repository API.
+type Store struct{ db *sql.DB }
+
+func NewStore(database *sql.DB) Store { return Store{db: database} }
+
+func (s Store) CreateCollection(ctx context.Context, name, root string) (string, error) {
+	collectionID, err := id.NewUUIDv7()
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO collections (id, name, root_path, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?)`, collectionID, name, root, now, now)
+	if err != nil {
+		return "", fmt.Errorf("create collection: %w", err)
+	}
+	return collectionID, nil
+}
+
+// PersistScan updates assets and paths in one transaction. The input may
+// contain duplicate content hashes; they become one asset with many paths.
+func (s Store) PersistScan(ctx context.Context, collectionID string, records []FileRecord) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	seen := make(map[string]struct{})
+	for _, record := range records {
+		if record.Status != StatusSupported || record.ContentSHA256 == "" {
+			continue
+		}
+		assetID, err := ensureAsset(ctx, tx, record, now)
+		if err != nil {
+			return err
+		}
+		pathID, err := id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO photo_paths (
+				id, collection_id, asset_id, relative_path, filesystem_created_at,
+				filesystem_modified_at, first_seen_at, last_seen_at, missing_at,
+				file_size, media_kind, motion_metadata_json
+			) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL, ?, ?, NULL)
+			ON CONFLICT(collection_id, relative_path) DO UPDATE SET
+				asset_id = excluded.asset_id,
+				filesystem_created_at = excluded.filesystem_created_at,
+				filesystem_modified_at = excluded.filesystem_modified_at,
+				last_seen_at = excluded.last_seen_at,
+				missing_at = NULL,
+				file_size = excluded.file_size,
+				media_kind = excluded.media_kind`,
+			pathID, collectionID, assetID, record.RelativePath,
+			formatTime(record.FilesystemCreatedAt), formatTime(record.FilesystemModifiedAt),
+			now, now, record.ByteSize, record.MediaKind); err != nil {
+			return fmt.Errorf("persist path %q: %w", record.RelativePath, err)
+		}
+		seen[record.RelativePath] = struct{}{}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT relative_path FROM photo_paths WHERE collection_id = ? AND missing_at IS NULL`, collectionID)
+	if err != nil {
+		return err
+	}
+	var existing []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			rows.Close()
+			return err
+		}
+		existing = append(existing, path)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, path := range existing {
+		if _, ok := seen[path]; !ok {
+			if _, err := tx.ExecContext(ctx, `UPDATE photo_paths SET missing_at = ? WHERE collection_id = ? AND relative_path = ?`, now, collectionID, path); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE collections SET updated_at = ? WHERE id = ?`, now, collectionID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func ensureAsset(ctx context.Context, tx *sql.Tx, record FileRecord, now string) (string, error) {
+	var assetID string
+	err := tx.QueryRowContext(ctx, `SELECT id FROM photo_assets WHERE content_sha256 = ?`, record.ContentSHA256).Scan(&assetID)
+	if err == nil {
+		return assetID, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
+	assetID, err = id.NewUUIDv7()
+	if err != nil {
+		return "", err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO photo_assets (
+			id, content_sha256, byte_size, media_kind, width, height,
+			exif_capture_date, exif_metadata_json, motion_metadata_json,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, NULLIF(?, 0), NULLIF(?, 0), NULL, NULL, NULL, ?, ?)`,
+		assetID, record.ContentSHA256, record.ByteSize, record.MediaKind,
+		record.Width, record.Height, now, now)
+	if err != nil {
+		return "", fmt.Errorf("persist asset %q: %w", record.ContentSHA256, err)
+	}
+	return assetID, nil
+}
+
+func formatTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
