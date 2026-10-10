@@ -49,6 +49,42 @@ func Backup(filename, backupDir string) (string, error) {
 	return name, nil
 }
 
+// Restore replaces a database from a backup. Callers must ensure no database
+// connection is open; the CLI performs this operation before app startup.
+func Restore(filename, backup string) error {
+	input, err := os.Open(backup)
+	if err != nil {
+		return fmt.Errorf("open restore source: %w", err)
+	}
+	defer input.Close()
+	info, err := input.Stat()
+	if err != nil || info.Size() == 0 {
+		return fmt.Errorf("restore source is empty or unavailable")
+	}
+	if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
+		return err
+	}
+	temporary := filename + ".restore.tmp"
+	output, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		output.Close()
+		_ = os.Remove(temporary)
+		return err
+	}
+	if err := output.Close(); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	if err := os.Rename(temporary, filename); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
+
 // OpenOptions controls database startup behavior.
 type OpenOptions struct {
 	// NoMigrate refuses to create or upgrade the schema.

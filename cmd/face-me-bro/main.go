@@ -17,6 +17,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/clustering"
+	"github.com/pjg/face_me_bro/internal/config"
 	"github.com/pjg/face_me_bro/internal/db"
 	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/jobs"
@@ -49,6 +50,30 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	command := "status"
 	if flags.NArg() > 0 {
 		command = flags.Arg(0)
+	}
+	if command == "restore" {
+		restoreFlags := flag.NewFlagSet("restore", flag.ContinueOnError)
+		restoreFlags.SetOutput(stderr)
+		input := restoreFlags.String("input", "", "backup file")
+		confirmed := restoreFlags.Bool("yes", false, "confirm database replacement")
+		if err := restoreFlags.Parse(flags.Args()[1:]); err != nil {
+			return err
+		}
+		if *input == "" || !*confirmed {
+			return fmt.Errorf("restore requires --input and --yes")
+		}
+		settings, err := config.Load(*configPath)
+		if err != nil {
+			return err
+		}
+		if err := db.Restore(settings.DatabasePath, *input); err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeJSON(stdout, envelope("restore", map[string]string{"database": settings.DatabasePath}))
+		}
+		fmt.Fprintln(stdout, settings.DatabasePath)
+		return nil
 	}
 	application, err := app.Open(ctx, *configPath, *noMigrate)
 	if err != nil {

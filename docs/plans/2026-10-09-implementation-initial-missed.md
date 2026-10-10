@@ -74,7 +74,7 @@ complete in the current implementation audit. It is intended to supplement
 - [ ] Add job pause, resume, cancel, retry, and detailed-status commands.
 - [ ] Add face and cluster inspection/review commands.
 - [ ] Add configuration/model-settings commands.
-- [ ] Add export, derived-data purge, database backup, and restore commands.
+- [x] Add export, derived-data purge, database backup, and restore commands.
 - [ ] Make structured JSON output consistent across all command families.
 - [ ] Require explicit confirmation for all identity-changing non-interactive
       commands.
