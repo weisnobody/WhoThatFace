@@ -13,6 +13,7 @@ import (
 
 	"github.com/pjg/face_me_bro/internal/analysis"
 	"github.com/pjg/face_me_bro/internal/app"
+	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/clustering"
 	"github.com/pjg/face_me_bro/internal/id"
@@ -93,6 +94,8 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return peopleCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "search":
 		return searchCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "audit":
+		return auditCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	default:
 		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve, pipeline, worker, people, search)", command)
 	}
@@ -409,6 +412,27 @@ func searchCommand(ctx context.Context, application *app.App, args []string, jso
 	for _, photo := range result {
 		fmt.Fprintf(stdout, "%s\t%d\t%s\n", photo.RelativePath, photo.FaceCount, photo.CaptureDate)
 	}
+	return nil
+}
+
+func auditCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 || args[0] != "purge" {
+		return fmt.Errorf("audit requires purge")
+	}
+	flags := flag.NewFlagSet("audit purge", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	ageDays := flags.Int("age-days", 365, "remove events older than this many days")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	removed, err := audit.NewStore(application.DB).PurgeBefore(ctx, time.Now().UTC().AddDate(0, 0, -*ageDays))
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("audit purge", map[string]int64{"removed": removed}))
+	}
+	fmt.Fprintf(stdout, "Removed %d audit events\n", removed)
 	return nil
 }
 
