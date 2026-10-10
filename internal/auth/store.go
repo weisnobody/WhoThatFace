@@ -235,6 +235,33 @@ func (s Store) CanAccessCollection(ctx context.Context, accountID, collectionID 
 	return view == 1, nil
 }
 
+// AccessibleCollections returns the collections visible to an account. A
+// system administrator is represented by a nil slice and may access all
+// collections.
+func (s Store) AccessibleCollections(ctx context.Context, accountID string) ([]string, error) {
+	var role string
+	if err := s.db.QueryRowContext(ctx, `SELECT role FROM accounts WHERE id = ?`, accountID).Scan(&role); err != nil {
+		return nil, err
+	}
+	if role == string(SystemAdmin) {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT collection_id FROM collection_permissions WHERE account_id = ? AND can_view = 1`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []string
+	for rows.Next() {
+		var collectionID string
+		if err := rows.Scan(&collectionID); err != nil {
+			return nil, err
+		}
+		result = append(result, collectionID)
+	}
+	return result, rows.Err()
+}
+
 func (s Store) account(ctx context.Context, accountID string) (Account, error) {
 	var account Account
 	var disabled, mustChange int

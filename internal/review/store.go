@@ -153,7 +153,7 @@ func (s Store) SetReference(ctx context.Context, faceID, personID string, refere
 		return err
 	}
 	if err := audit.NewStore(s.db).Record(ctx, audit.Event{
-		AccountID: actor.AccountID, Action: "reference-selection", EntityType: "face", EntityID: faceID,
+		AccountID: actor.AccountID, TargetEventID: eventID, Action: "reference-selection", EntityType: "face", EntityID: faceID,
 		New: map[string]any{"person_id": personID, "reference": reference},
 	}); err != nil {
 		return fmt.Errorf("record reference audit event: %w", err)
@@ -191,7 +191,7 @@ func (s Store) SetDisposition(ctx context.Context, faceID, disposition string, a
 		}
 	}
 	return audit.NewStore(s.db).Record(ctx, audit.Event{
-		AccountID: actor.AccountID, Action: "face-disposition", EntityType: "face", EntityID: faceID,
+		AccountID: actor.AccountID, TargetEventID: eventID, Action: "face-disposition", EntityType: "face", EntityID: faceID,
 		New: map[string]any{"disposition": disposition, "active": active},
 	})
 }
@@ -236,7 +236,7 @@ func (s Store) setAssignment(ctx context.Context, faceID, personID string, state
 		return Assignment{}, err
 	}
 	if err := audit.NewStore(s.db).Record(ctx, audit.Event{
-		AccountID: actor.AccountID, Action: action, EntityType: "face", EntityID: faceID,
+		AccountID: actor.AccountID, TargetEventID: eventID, Action: action, EntityType: "face", EntityID: faceID,
 		Previous: map[string]any{"state": previousState(current, currentErr), "person_id": previousPerson(current, currentErr)},
 		New:      map[string]any{"state": state, "person_id": personID},
 	}); err != nil {

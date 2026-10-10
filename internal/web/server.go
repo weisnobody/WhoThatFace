@@ -6,12 +6,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
 	"path/filepath"
 	"strings"
 
+	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
@@ -49,6 +51,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /review/clusters", s.reviewClusters)
 	mux.HandleFunc("GET /review/clusters/{clusterID}", s.reviewCluster)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/review", s.reviewClusterAPI)
+	mux.HandleFunc("POST /api/audit/{eventID}/undo", s.undoAudit)
+	mux.HandleFunc("GET /admin/accounts", s.adminAccounts)
+	mux.HandleFunc("GET /admin/collections", s.adminCollections)
 	return securityHeaders(mux)
 }
 
@@ -147,7 +152,12 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	result, err := search.NewStore(s.db).Photos(r.Context(), search.Options{CollectionID: query.Get("collection_id"), RelativePrefix: query.Get("directory"), IncludeProvisional: query.Get("include_provisional") == "true", IncludeDontTrack: query.Get("include_dont_track") == "true"})
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	result, err := search.NewStore(s.db).Photos(r.Context(), search.Options{AllowedCollectionIDs: allowed, CollectionID: query.Get("collection_id"), RelativePrefix: query.Get("directory"), IncludeProvisional: query.Get("include_provisional") == "true", IncludeDontTrack: query.Get("include_dont_track") == "true"})
 	if err != nil {
 		http.Error(w, "search failed", http.StatusInternalServerError)
 		return
@@ -165,7 +175,28 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(name, ''), is_provisional, dont_track FROM people ORDER BY name, id`)
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	peopleQuery := `SELECT id, COALESCE(name, ''), is_provisional, dont_track FROM people p`
+	var args []any
+	if allowed != nil {
+		if len(allowed) == 0 {
+			body := `<h1>People</h1><p>No collections are assigned to this account.</p>`
+			s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body)})
+			return
+		}
+		placeholders := make([]string, len(allowed))
+		for i, id := range allowed {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		peopleQuery += ` WHERE EXISTS (SELECT 1 FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN current_face_assignments ca ON ca.face_id = f.id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE ca.person_id = p.id AND pp.collection_id IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	peopleQuery += ` ORDER BY name, id`
+	rows, err := s.db.QueryContext(r.Context(), peopleQuery, args...)
 	if err != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
 		return
@@ -191,7 +222,27 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cr.status = 'active' ORDER BY c.is_mixed DESC, c.cluster_key`)
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cr.status = 'active'`
+	var clusterArgs []any
+	if allowed != nil {
+		if len(allowed) == 0 {
+			s.render(w, map[string]any{"Title": "Clusters", "Account": account, "Body": template.HTML(`<h1>Clusters</h1><p>No collections are assigned to this account.</p>`)})
+			return
+		}
+		placeholders := make([]string, len(allowed))
+		for i, id := range allowed {
+			placeholders[i] = "?"
+			clusterArgs = append(clusterArgs, id)
+		}
+		clusterQuery += ` AND EXISTS (SELECT 1 FROM cluster_memberships cm2 JOIN faces f2 ON f2.id = cm2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE cm2.cluster_id = c.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	clusterQuery += ` ORDER BY c.is_mixed DESC, c.cluster_key`
+	rows, err := s.db.QueryContext(r.Context(), clusterQuery, clusterArgs...)
 	if err != nil {
 		http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 		return
@@ -338,7 +389,7 @@ func (s *Server) reviewClusterAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, true, false)
-	if err != nil || !allowed {
+	if account.Role == auth.Viewer || err != nil || !allowed {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -354,19 +405,30 @@ func (s *Server) reviewClusterAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := review.NewStore(s.db).ReviewCluster(r.Context(), clusterID, input.DefaultPersonID, input.Status, input.ExpectedVersion, input.Decisions, review.Actor{Type: "user", AccountID: account.ID}, input.Note); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if errors.Is(err, review.ErrUndoConflict) || strings.Contains(err.Error(), "review conflict") {
+			http.Error(w, err.Error(), http.StatusConflict)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cluster_id": clusterID, "status": input.Status})
 }
 
 func (s *Server) photos(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireAccount(w, r); !ok {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
 	query := r.URL.Query()
 	options := search.Options{
-		CollectionID: query.Get("collection_id"), PersonID: query.Get("person_id"),
+		AllowedCollectionIDs: allowed,
+		CollectionID:         query.Get("collection_id"), PersonID: query.Get("person_id"),
 		RelativePrefix: query.Get("directory"), CaptureDateFrom: query.Get("capture_date_from"),
 		CaptureDateUntil:   query.Get("capture_date_until"),
 		IncludeProvisional: query.Get("include_provisional") == "true",
@@ -496,6 +558,9 @@ func (s *Server) referenceFace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) facePermission(r *http.Request, account auth.Account, faceID string, modify bool) (bool, error) {
+	if modify && account.Role == auth.Viewer {
+		return false, nil
+	}
 	rows, err := s.db.QueryContext(r.Context(), `SELECT DISTINCT pp.collection_id FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE f.id = ?`, faceID)
 	if err != nil {
 		return false, err
@@ -520,6 +585,107 @@ func (s *Server) facePermission(r *http.Request, account auth.Account, faceID st
 		return false, err
 	}
 	return false, fmt.Errorf("face %q is not in an accessible collection (found=%t)", faceID, found)
+}
+
+func (s *Server) undoAudit(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if account.Role == auth.Viewer || !validCSRFApi(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	eventID := r.PathValue("eventID")
+	event, err := audit.NewStore(s.db).Get(r.Context(), eventID)
+	if err != nil {
+		http.Error(w, "audit event not found", http.StatusNotFound)
+		return
+	}
+	var collectionID string
+	switch event.EntityType {
+	case "face":
+		err = s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE f.id = ? LIMIT 1`, event.EntityID).Scan(&collectionID)
+	case "cluster":
+		err = s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id FROM cluster_memberships cm JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE cm.cluster_id = ? LIMIT 1`, event.EntityID).Scan(&collectionID)
+	default:
+		http.Error(w, "audit event is not an identity review action", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, "entity not found", http.StatusNotFound)
+		return
+	}
+	allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, false, true)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := review.NewStore(s.db).UndoAuditEvent(r.Context(), eventID, review.Actor{Type: "user", AccountID: account.ID}); err != nil {
+		if errors.Is(err, review.ErrUndoConflict) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"undone_audit_event": eventID})
+}
+
+func (s *Server) adminAccounts(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if account.Role != auth.SystemAdmin {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT username, role, disabled_at IS NOT NULL FROM accounts ORDER BY username`)
+	if err != nil {
+		http.Error(w, "account lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var body strings.Builder
+	body.WriteString(`<h1>Accounts</h1><table><tr><th>Username</th><th>Role</th><th>Disabled</th></tr>`)
+	for rows.Next() {
+		var username, role string
+		var disabled int
+		if rows.Scan(&username, &role, &disabled) == nil {
+			body.WriteString(`<tr><td>` + template.HTMLEscapeString(username) + `</td><td>` + template.HTMLEscapeString(role) + `</td><td>` + fmt.Sprint(disabled == 1) + `</td></tr>`)
+		}
+	}
+	body.WriteString(`</table><p>Use the account CLI for creation, password reset, disablement, and collection permission changes.</p>`)
+	s.render(w, map[string]any{"Title": "Accounts", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) adminCollections(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if account.Role != auth.SystemAdmin && account.Role != auth.CollectionManager {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT name, root_path, enabled FROM collections ORDER BY name`)
+	if err != nil {
+		http.Error(w, "collection lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var body strings.Builder
+	body.WriteString(`<h1>Collections</h1><table><tr><th>Name</th><th>Root</th><th>Enabled</th></tr>`)
+	for rows.Next() {
+		var name, root string
+		var enabled int
+		if rows.Scan(&name, &root, &enabled) == nil {
+			body.WriteString(`<tr><td>` + template.HTMLEscapeString(name) + `</td><td>` + template.HTMLEscapeString(root) + `</td><td>` + fmt.Sprint(enabled == 1) + `</td></tr>`)
+		}
+	}
+	body.WriteString(`</table><p>Use the collection CLI for creation and lifecycle changes.</p>`)
+	s.render(w, map[string]any{"Title": "Collections", "Account": account, "Body": template.HTML(body.String())})
 }
 
 func (s *Server) requireAccount(w http.ResponseWriter, r *http.Request) (auth.Account, bool) {

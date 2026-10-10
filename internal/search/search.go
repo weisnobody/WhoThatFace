@@ -9,17 +9,18 @@ import (
 )
 
 type Options struct {
-	CollectionID       string
-	PersonID           string
-	RelativePrefix     string
-	CaptureDateFrom    string
-	CaptureDateUntil   string
-	IncludeProvisional bool
-	IncludeUnknown     bool
-	IncludeAmbiguous   bool
-	IncludeDontTrack   bool
-	OnlyConfirmed      bool
-	OnlyUnconfirmed    bool
+	AllowedCollectionIDs []string
+	CollectionID         string
+	PersonID             string
+	RelativePrefix       string
+	CaptureDateFrom      string
+	CaptureDateUntil     string
+	IncludeProvisional   bool
+	IncludeUnknown       bool
+	IncludeAmbiguous     bool
+	IncludeDontTrack     bool
+	OnlyConfirmed        bool
+	OnlyUnconfirmed      bool
 }
 
 type Photo struct {
@@ -50,6 +51,18 @@ func (s Store) Photos(ctx context.Context, options Options) ([]Photo, error) {
 	}
 	if options.CollectionID != "" {
 		add("pp.collection_id = ?", options.CollectionID)
+	}
+	if options.AllowedCollectionIDs != nil {
+		if len(options.AllowedCollectionIDs) == 0 {
+			query.WriteString(" AND 1 = 0")
+		} else {
+			placeholders := make([]string, len(options.AllowedCollectionIDs))
+			for index, collectionID := range options.AllowedCollectionIDs {
+				placeholders[index] = "?"
+				args = append(args, collectionID)
+			}
+			query.WriteString(" AND pp.collection_id IN (" + strings.Join(placeholders, ",") + ")")
+		}
 	}
 	if options.RelativePrefix != "" {
 		prefix := strings.TrimSuffix(strings.ReplaceAll(options.RelativePrefix, "\\", "/"), "/") + "/%"

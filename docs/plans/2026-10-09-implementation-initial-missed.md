@@ -57,14 +57,14 @@ complete in the current implementation audit. It is intended to supplement
 ## Web service, authorization, and audit
 
 - [x] Integrate audit recording into every mutating review and account action.
-- [ ] Implement targeted undo with conflict detection and compensating events.
-- [ ] Enforce system-admin, collection-manager, reviewer, and viewer roles.
-- [ ] Scope every people, cluster, photo, metadata, and image query to
+- [x] Implement targeted undo with conflict detection and compensating events.
+- [x] Enforce system-admin, collection-manager, reviewer, and viewer roles.
+- [x] Scope every people, cluster, photo, metadata, and image query to
       authorized collections.
-- [ ] Complete the authenticated review UI for photos, faces, people, and
+- [x] Complete the authenticated review UI for photos, faces, people, and
       clusters.
-- [ ] Add collection management and account administration pages as required.
-- [ ] Ensure image, face-crop, metadata, and path access never bypasses the
+- [x] Add collection management and account administration pages as required.
+- [x] Ensure image, face-crop, metadata, and path access never bypasses the
       authenticated service.
 
 ## CLI and operational controls

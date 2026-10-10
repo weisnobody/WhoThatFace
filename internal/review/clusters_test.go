@@ -41,3 +41,46 @@ func TestReviewClusterRequiresExplicitSingletonDecisionAndVersion(t *testing.T) 
 		t.Fatalf("state=%q, want assigned-user", state)
 	}
 }
+
+func TestUndoAssignmentRestoresPreviousStateAndDetectsConflict(t *testing.T) {
+	database, faceID, personID := fixture(t)
+	defer database.Close()
+	store := NewStore(database)
+	ctx := context.Background()
+	if err := store.InitializeFace(ctx, faceID, Actor{Type: "system"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Assign(ctx, faceID, personID, Provisional, Actor{Type: "system"}, Evidence{}, "candidate"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Assign(ctx, faceID, personID, AssignedUser, Actor{Type: "user", AccountID: "account-1"}, Evidence{}, "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	var auditID string
+	if err := database.QueryRow(`SELECT id FROM audit_events WHERE action = 'assignment' AND entity_id = ? ORDER BY rowid DESC LIMIT 1`, faceID).Scan(&auditID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UndoAuditEvent(ctx, auditID, Actor{Type: "user", AccountID: "account-1"}); err != nil {
+		t.Fatal(err)
+	}
+	assignment, err := store.Current(ctx, faceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.State != Provisional {
+		t.Fatalf("state=%s, want provisional", assignment.State)
+	}
+	if _, err := store.Assign(ctx, faceID, personID, AssignedUser, Actor{Type: "user", AccountID: "account-1"}, Evidence{}, "reconfirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UndoAuditEvent(ctx, auditID, Actor{Type: "user", AccountID: "account-1"}); err == nil {
+		t.Fatal("expected stale undo conflict")
+	}
+	var conflicts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action = 'undo'`).Scan(&conflicts); err != nil {
+		t.Fatal(err)
+	}
+	if conflicts == 0 {
+		t.Fatal("expected compensating audit event")
+	}
+}
