@@ -9,13 +9,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/pjg/face_me_bro/internal/analysis"
 	"github.com/pjg/face_me_bro/internal/app"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
 	"github.com/pjg/face_me_bro/internal/setup"
 	"github.com/pjg/face_me_bro/internal/web"
+	"github.com/pjg/face_me_bro/internal/worker"
 )
 
 const outputSchemaVersion = "1"
@@ -78,8 +81,12 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return setupCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "serve":
 		return serveCommand(ctx, application, args, stdout, stderr)
+	case "pipeline":
+		return pipelineCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "worker":
+		return workerCommand(ctx, application, args, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve)", command)
+		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve, pipeline, worker)", command)
 	}
 }
 
@@ -285,6 +292,67 @@ func serveCommand(ctx context.Context, application *app.App, args []string, stdo
 		return nil
 	}
 	return err
+}
+
+func pipelineCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 || args[0] != "register" {
+		return fmt.Errorf("pipeline requires register")
+	}
+	flags := flag.NewFlagSet("pipeline register", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	family := flags.String("model-family", "buffalo_l", "model family")
+	version := flags.String("model-version", "2.0.0", "model version")
+	dimension := flags.Int("embedding-dimension", 512, "embedding dimension")
+	provider := flags.String("provider", "CPUExecutionProvider", "execution provider")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	pipelineID, err := analysis.NewStore(application.DB).RegisterPipeline(ctx, analysis.Pipeline{ModelFamily: *family, ModelVersion: *version, EmbeddingDimension: *dimension, EmbeddingDType: "float32", Normalization: "l2", ExecutionProvider: *provider})
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("pipeline register", map[string]string{"id": pipelineID}))
+	}
+	fmt.Fprintln(stdout, pipelineID)
+	return nil
+}
+
+func workerCommand(ctx context.Context, application *app.App, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	pipelineID := flags.String("pipeline-id", "", "pipeline ID")
+	pythonPath := flags.String("python", "python3.11", "Python executable")
+	workerScript := flags.String("script", "worker/insightface_worker.py", "worker script")
+	maxPixels := flags.Int64("max-pixels", 100_000_000, "maximum decoded pixels")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *pipelineID == "" {
+		return fmt.Errorf("worker requires --pipeline-id")
+	}
+	client := worker.NewClient(*pythonPath, *workerScript)
+	if err := client.Start(ctx); err != nil {
+		return err
+	}
+	defer client.Close()
+	processor := analysis.NewProcessor(application.DB, client, *pipelineID, *maxPixels)
+	runner := jobs.Runner{Store: jobs.NewStore(application.DB), Handlers: map[string]jobs.Handler{
+		"analysis": func(jobContext context.Context, job jobs.Job) error {
+			var payload struct {
+				CollectionID string `json:"collection_id"`
+			}
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.CollectionID == "" {
+				return fmt.Errorf("analysis job has no collection_id")
+			}
+			return processor.ProcessCollection(jobContext, payload.CollectionID)
+		},
+	}, IdleWait: time.Second}
+	fmt.Fprintln(stdout, "Worker running")
+	return runner.Run(ctx)
 }
 
 func countSupported(records []media.FileRecord) int {
