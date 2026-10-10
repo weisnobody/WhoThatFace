@@ -62,7 +62,19 @@ func (s Store) EnsureBootstrapAdmin(ctx context.Context) (Account, error) {
 	if err != sql.ErrNoRows {
 		return Account{}, err
 	}
-	return s.CreateAccount(ctx, "admin", "admin1234", SystemAdmin, true)
+	hash, err := hashPassword("admin", false)
+	if err != nil {
+		return Account{}, err
+	}
+	adminID, err := id.NewUUIDv7()
+	if err != nil {
+		return Account{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO accounts (id, username, password_hash, role, must_change_password, created_at, updated_at) VALUES (?, 'admin', ?, ?, 1, ?, ?)`, adminID, hash, SystemAdmin, now, now); err != nil {
+		return Account{}, err
+	}
+	return s.account(ctx, adminID)
 }
 
 func (s Store) ResetPassword(ctx context.Context, accountID, password string, mustChange bool) error {

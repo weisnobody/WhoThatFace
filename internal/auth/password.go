@@ -34,8 +34,18 @@ func ValidatePassword(password string) error {
 }
 
 func HashPassword(password string) (string, error) {
-	if err := ValidatePassword(password); err != nil {
-		return "", err
+	return hashPassword(password, true)
+}
+
+func hashPassword(password string, enforcePolicy bool) (string, error) {
+	if enforcePolicy {
+		if err := ValidatePassword(password); err != nil {
+			return "", err
+		}
+	}
+
+	if len(password) == 0 {
+		return "", fmt.Errorf("password cannot be empty")
 	}
 	salt := make([]byte, argonSaltLength)
 	if _, err := rand.Read(salt); err != nil {

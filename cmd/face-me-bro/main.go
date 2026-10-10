@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
 	"github.com/pjg/face_me_bro/internal/setup"
+	"github.com/pjg/face_me_bro/internal/web"
 )
 
 const outputSchemaVersion = "1"
@@ -74,8 +76,10 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return accountCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "setup":
 		return setupCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "serve":
+		return serveCommand(ctx, application, args, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup)", command)
+		return fmt.Errorf("unknown command %q (available: status, collection, scan, job, account, setup, serve)", command)
 	}
 }
 
@@ -254,6 +258,33 @@ func setupCommand(ctx context.Context, application *app.App, args []string, json
 		return fmt.Errorf("setup validation failed")
 	}
 	return nil
+}
+
+func serveCommand(ctx context.Context, application *app.App, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	address := flags.String("address", "127.0.0.1:8080", "HTTP listen address")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if _, err := auth.NewStore(application.DB).EnsureBootstrapAdmin(ctx); err != nil {
+		return err
+	}
+	server, err := web.NewServer(auth.NewStore(application.DB), application.DB)
+	if err != nil {
+		return err
+	}
+	httpServer := &http.Server{Addr: *address, Handler: server.Handler()}
+	go func() {
+		<-ctx.Done()
+		_ = httpServer.Shutdown(context.Background())
+	}()
+	fmt.Fprintf(stdout, "Listening on http://%s\n", *address)
+	err = httpServer.ListenAndServe()
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
 }
 
 func countSupported(records []media.FileRecord) int {
