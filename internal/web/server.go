@@ -10,6 +10,7 @@ import (
 	"html/template"
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/review"
@@ -43,6 +44,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/faces/{faceID}/assignment", s.assignFace)
 	mux.HandleFunc("POST /api/faces/{faceID}/reference", s.referenceFace)
 	mux.HandleFunc("GET /", s.dashboard)
+	mux.HandleFunc("GET /review/photos", s.reviewPhotos)
+	mux.HandleFunc("GET /review/people", s.reviewPeople)
+	mux.HandleFunc("GET /review/clusters", s.reviewClusters)
 	return securityHeaders(mux)
 }
 
@@ -131,8 +135,80 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, map[string]any{
 		"Title": "Review dashboard", "Account": account, "CSRF": csrf,
-		"Body": template.HTML(`<h1>Review dashboard</h1><p>Authenticated review service is ready.</p><ul><li>Photo and face review endpoints are available to application services.</li><li>Cluster review and reference selection are protected by account permissions.</li></ul>`),
+		"Body": template.HTML(`<h1>Review dashboard</h1><p>Choose a review view:</p><ul><li><a href="/review/photos">Photos and faces</a></li><li><a href="/review/people">People</a></li><li><a href="/review/clusters">Clusters</a></li></ul>`),
 	})
+}
+
+func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	query := r.URL.Query()
+	result, err := search.NewStore(s.db).Photos(r.Context(), search.Options{CollectionID: query.Get("collection_id"), RelativePrefix: query.Get("directory"), IncludeProvisional: query.Get("include_provisional") == "true", IncludeDontTrack: query.Get("include_dont_track") == "true"})
+	if err != nil {
+		http.Error(w, "search failed", http.StatusInternalServerError)
+		return
+	}
+	var body strings.Builder
+	body.WriteString(`<h1>Photos</h1><p>Review faces and use the face API to assign people or select references.</p>`)
+	for _, photo := range result {
+		body.WriteString(`<figure><a href="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" style="max-width:20rem;max-height:15rem" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `"></a><figcaption>` + template.HTMLEscapeString(photo.RelativePath) + ` (` + fmt.Sprint(photo.FaceCount) + ` faces)</figcaption></figure>`)
+	}
+	s.render(w, map[string]any{"Title": "Photos", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(name, ''), is_provisional, dont_track FROM people ORDER BY name, id`)
+	if err != nil {
+		http.Error(w, "people lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var body strings.Builder
+	body.WriteString(`<h1>People</h1><table><tr><th>Name</th><th>Provisional</th><th>Don't track</th></tr>`)
+	for rows.Next() {
+		var id, name string
+		var provisional, dontTrack int
+		if err := rows.Scan(&id, &name, &provisional, &dontTrack); err != nil {
+			http.Error(w, "people lookup failed", http.StatusInternalServerError)
+			return
+		}
+		body.WriteString(`<tr><td>` + template.HTMLEscapeString(name) + `</td><td>` + fmt.Sprint(provisional == 1) + `</td><td>` + fmt.Sprint(dontTrack == 1) + `</td></tr>`)
+	}
+	body.WriteString(`</table>`)
+	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cr.status = 'active' ORDER BY c.is_mixed DESC, c.cluster_key`)
+	if err != nil {
+		http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var body strings.Builder
+	body.WriteString(`<h1>Clusters</h1><table><tr><th>Cluster</th><th>Purity</th><th>Connectivity</th><th>Mixed</th><th>Status</th></tr>`)
+	for rows.Next() {
+		var id, key, status string
+		var purity, connectivity sql.NullFloat64
+		var mixed int
+		if err := rows.Scan(&id, &key, &purity, &connectivity, &mixed, &status); err != nil {
+			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
+			return
+		}
+		body.WriteString(`<tr><td>` + template.HTMLEscapeString(key) + `</td><td>` + fmt.Sprint(purity.Float64) + `</td><td>` + fmt.Sprint(connectivity.Float64) + `</td><td>` + fmt.Sprint(mixed == 1) + `</td><td>` + template.HTMLEscapeString(status) + `</td></tr>`)
+	}
+	body.WriteString(`</table>`)
+	s.render(w, map[string]any{"Title": "Clusters", "Account": account, "Body": template.HTML(body.String())})
 }
 
 func (s *Server) photos(w http.ResponseWriter, r *http.Request) {
