@@ -370,16 +370,24 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	peopleRows.Close()
 
-	body.WriteString(`<style>.person-header{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.person-grid{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start}.person-card{box-sizing:border-box;width:min(420px,45vw);min-width:280px;border:1px solid #ccc;border-radius:4px;padding:10px;background:#fff;overflow:hidden}.person-viewer{position:relative;display:inline-block;vertical-align:top;max-width:100%;background:#f5f5f5}.person-viewer img{display:block;width:auto;max-width:100%;max-height:55vh;height:auto;object-fit:contain}.person-box{position:absolute;box-sizing:border-box;border:2px solid #d00;background:rgba(204,0,0,.15);pointer-events:none}.person-box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.person-path{margin-top:8px;overflow-wrap:anywhere;font-size:.9rem}.person-status{margin-top:8px;padding:6px;background:#f6f6f6;border-radius:3px}.person-status strong{font-weight:600}.person-scores{margin-top:8px;font-size:.9rem}.person-scores table{width:100%;border-collapse:collapse}.person-scores th,.person-scores td{padding:3px 4px;text-align:left;border-bottom:1px solid #eee}.person-scores .current{font-weight:600;background:#fff8d6}.person-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px}.person-actions button{padding:.4rem}.person-actions .right{margin-left:auto}.person-assignment{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.person-assignment select{min-width:0;flex:1}.person-empty{margin-top:1rem}</style>`)
+	body.WriteString(`<style>.person-header{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.grid{display:flex;flex-wrap:wrap;gap:18px}.card{width:min(420px,45vw);border:1px solid #ccc;padding:10px}.viewer{position:relative;display:inline-block;max-width:100%}.viewer img{max-width:100%;max-height:55vh}.box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15);pointer-events:none}.box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.path{margin-top:8px;overflow-wrap:anywhere}.actions{display:flex;justify-content:space-between;margin-top:8px}.person-status{margin-top:8px;padding:6px;background:#f6f6f6;border-radius:3px}.person-status strong{font-weight:600}.person-scores{margin-top:8px;font-size:.9rem}.person-scores table{width:100%;border-collapse:collapse}.person-scores th,.person-scores td{padding:3px 4px;text-align:left;border-bottom:1px solid #eee}.person-scores .current{font-weight:600;background:#fff8d6}.person-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px}.person-actions button{padding:.4rem}.person-actions .right{margin-left:auto}.person-assignment{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.person-assignment select{min-width:0;flex:1}.person-empty{margin-top:1rem}</style>`)
 	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><h1>` + template.HTMLEscapeString(personName) + ` (` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references)</h1></div>`)
-	body.WriteString(`<div class="person-grid">`)
+	body.WriteString(`<div id="photos" class="grid">`)
 	canModify := account.Role != auth.Viewer
 	for _, face := range faces {
-		boxClass := "person-box"
+		boxClass := "box"
 		if face.Reference {
 			boxClass += " reference"
 		}
-		body.WriteString(`<article class="person-card" id="face-` + template.HTMLEscapeString(face.FaceID) + `"><div class="person-viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(face.FaceID) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="person-path">` + template.HTMLEscapeString(face.RelativePath) + `</div><div class="person-status"><strong>Assignment:</strong> ` + template.HTMLEscapeString(face.State) + `; <strong>Face quality:</strong> ` + fmt.Sprintf("%.3f", face.Quality) + `; <strong>Detection:</strong> ` + fmt.Sprintf("%.3f", face.Detection) + `</div>`)
+		body.WriteString(`<article class="card" id="face-` + template.HTMLEscapeString(face.FaceID) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(face.FaceID) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path">` + template.HTMLEscapeString(face.RelativePath) + `</div>`)
+		if canModify {
+			body.WriteString(`<div class="actions"><button type="button" data-action="remove" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Remove assignment</button>`)
+			if face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser) {
+				body.WriteString(`<button type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-reference="` + fmt.Sprint(face.Reference) + `">Make ` + map[bool]string{true: "evaluation", false: "reference"}[face.Reference] + `</button>`)
+			}
+			body.WriteString(`</div>`)
+		}
+		body.WriteString(`<div class="person-status"><strong>Assignment:</strong> ` + template.HTMLEscapeString(face.State) + `; <strong>Face quality:</strong> ` + fmt.Sprintf("%.3f", face.Quality) + `; <strong>Detection:</strong> ` + fmt.Sprintf("%.3f", face.Detection) + `</div>`)
 		if len(face.Candidates) > 0 {
 			body.WriteString(`<div class="person-scores"><strong>Model candidates</strong><table><tr><th>Person</th><th>Similarity</th><th>Margin</th><th>Support</th><th>Evidence</th></tr>`)
 			for _, candidate := range face.Candidates {
@@ -401,11 +409,6 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				body.WriteString(`<option value="` + template.HTMLEscapeString(option.ID) + `"` + selected + `>` + template.HTMLEscapeString(option.Name) + `</option>`)
 			}
 			body.WriteString(`</select><select data-assignment-state="` + template.HTMLEscapeString(face.FaceID) + `"><option value="assigned-user"` + selectedAttr(face.State, string(review.AssignedUser)) + `>Assigned user</option><option value="assigned-system"` + selectedAttr(face.State, string(review.AssignedSystem)) + `>Assigned system</option><option value="provisional"` + selectedAttr(face.State, string(review.Provisional)) + `>Provisional</option><option value="unknown"` + selectedAttr(face.State, string(review.Unknown)) + `>Unknown</option><option value="ambiguous"` + selectedAttr(face.State, string(review.Ambiguous)) + `>Ambiguous</option></select><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Save assignment</button></div>`)
-			body.WriteString(`<div class="person-actions"><button type="button" data-action="remove" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Remove assignment</button>`)
-			if face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser) {
-				body.WriteString(`<button class="right" type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-reference="` + fmt.Sprint(face.Reference) + `">Make ` + map[bool]string{true: "evaluation", false: "reference"}[face.Reference] + `</button>`)
-			}
-			body.WriteString(`</div>`)
 		}
 		body.WriteString(`</article>`)
 	}
