@@ -1026,7 +1026,7 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 		}
 		var id, name, created, updated string
 		var provisional, dontTrack int
-		if err := application.DB.QueryRowContext(ctx, `SELECT id, COALESCE(name, ''), is_provisional, dont_track, created_at, updated_at FROM people WHERE id = ?`, *personID).Scan(&id, &name, &provisional, &dontTrack, &created, &updated); err != nil {
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)), is_provisional, dont_track, created_at, updated_at FROM people WHERE id = ?`, *personID).Scan(&id, &name, &provisional, &dontTrack, &created, &updated); err != nil {
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "people get", map[string]any{"id": id, "name": name, "provisional": provisional == 1, "dont_track": dontTrack == 1, "created_at": created, "updated_at": updated})
@@ -1066,7 +1066,7 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	query, queryArgs, err := applyPagination("SELECT id, COALESCE(name, ''), is_provisional, dont_track FROM people ORDER BY name, id", nil, *limit, *page)
+	query, queryArgs, err := applyPagination("SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)), is_provisional, dont_track FROM people ORDER BY COALESCE(NULLIF(name, ''), substr(id, -8)), id", nil, *limit, *page)
 	if err != nil {
 		return err
 	}
@@ -1169,7 +1169,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 		return err
 	}
 	if args[0] == "list" {
-		query := `SELECT f.id, f.analysis_id, f.face_index, f.detection_confidence, f.quality, COALESCE(a.state, 'unassigned'), COALESCE(a.person_id, ''), COALESCE(p.name, '')
+		query := `SELECT f.id, f.analysis_id, f.face_index, f.detection_confidence, f.quality, COALESCE(a.state, 'unassigned'), COALESCE(a.person_id, ''), COALESCE(NULLIF(p.name, ''), substr(p.id, -8), '')
 			FROM faces f LEFT JOIN current_face_assignments a ON a.face_id = f.id LEFT JOIN people p ON p.id = a.person_id ORDER BY f.created_at, f.id`
 		query, queryArgs, err := applyPagination(query, nil, *limit, *page)
 		if err != nil {
@@ -1306,7 +1306,7 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		query := `SELECT c.id, c.clustering_run_id, c.cluster_key, COALESCE(c.proposed_person_id, ''), COALESCE(p.name, ''), c.review_status, c.is_mixed, c.purity, c.connectivity, COUNT(cm.face_id)
+		query := `SELECT c.id, c.clustering_run_id, c.cluster_key, COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), substr(p.id, -8), ''), c.review_status, c.is_mixed, c.purity, c.connectivity, COUNT(cm.face_id)
 			FROM clusters c LEFT JOIN people p ON p.id = c.proposed_person_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id`
 		var queryArgs []any
 		if *runID != "" {

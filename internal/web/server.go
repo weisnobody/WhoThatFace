@@ -182,7 +182,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
-	peopleQuery := `SELECT p.id, COALESCE(p.name, ''), p.is_provisional, p.dont_track,
+	peopleQuery := `SELECT p.id, COALESCE(NULLIF(p.name, ''), substr(p.id, -8)), p.is_provisional, p.dont_track,
 		(SELECT COUNT(DISTINCT ca.face_id) FROM current_face_assignments ca
 		 JOIN faces f ON f.id = ca.face_id JOIN analyses a ON a.id = f.analysis_id
 		 JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths ppc ON ppc.asset_id = pa.id
@@ -205,7 +205,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		}
 		peopleQuery += ` WHERE EXISTS (SELECT 1 FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN current_face_assignments ca ON ca.face_id = f.id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE ca.person_id = p.id AND pp.collection_id IN (` + strings.Join(placeholders, ",") + `))`
 	}
-	peopleQuery += ` ORDER BY name, id`
+	peopleQuery += ` ORDER BY COALESCE(NULLIF(p.name, ''), substr(p.id, -8)), p.id`
 	rows, err := s.db.QueryContext(r.Context(), peopleQuery, args...)
 	if err != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
@@ -235,7 +235,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	personID := r.PathValue("personID")
 	var personName string
-	if err := s.db.QueryRowContext(r.Context(), `SELECT COALESCE(name, '') FROM people WHERE id = ?`, personID).Scan(&personName); err == sql.ErrNoRows {
+	if err := s.db.QueryRowContext(r.Context(), `SELECT COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people WHERE id = ?`, personID).Scan(&personName); err == sql.ErrNoRows {
 		http.NotFound(w, r)
 		return
 	} else if err != nil {
@@ -466,7 +466,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		}
 		color := faceStateColor(state)
 		body.WriteString(`<tr><td><div class="cluster-face" style="border-color:` + color + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="` + template.HTMLEscapeString(faceID) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div></div><br>` + template.HTMLEscapeString(faceID) + `</td><td>` + template.HTMLEscapeString(state) + `</td><td>` + template.HTMLEscapeString(personID) + `</td><td class="candidate">`)
-		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT COALESCE(p.name, rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? ORDER BY rc.created_at DESC, rc.rank LIMIT 5`, faceID)
+		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? ORDER BY rc.created_at DESC, rc.rank LIMIT 5`, faceID)
 		if candidateErr == nil {
 			for candidateRows.Next() {
 				var name string
