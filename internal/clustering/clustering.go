@@ -19,10 +19,11 @@ type Config struct {
 	SimilarityThreshold  float32
 	AlgorithmVersion     string
 	NeighborSearchMethod string
+	CandidateScope       string
 }
 
 func DefaultConfig() Config {
-	return Config{K: 40, SimilarityThreshold: 0.45, AlgorithmVersion: "mutual-knn-v1", NeighborSearchMethod: "exact"}
+	return Config{K: 40, SimilarityThreshold: 0.45, AlgorithmVersion: "mutual-knn-v1", NeighborSearchMethod: "exact", CandidateScope: "all"}
 }
 
 type Neighbor struct {

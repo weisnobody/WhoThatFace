@@ -31,6 +31,7 @@ type Thresholds struct {
 	MediumPurity       float32
 	HighConnectivity   float32
 	MediumConnectivity float32
+	RequireAgreement   bool
 }
 
 // DefaultThresholds are the production evidence thresholds from the spec.
@@ -42,6 +43,7 @@ func DefaultThresholds() Thresholds {
 		HighDetection: 0.75, MediumDetection: 0.60,
 		HighPurity: 0.95, MediumPurity: 0.90,
 		HighConnectivity: 0.95, MediumConnectivity: 0.90,
+		RequireAgreement: true,
 	}
 }
 
@@ -107,7 +109,7 @@ func Classify(candidate Candidate, thresholds Thresholds) EvidenceLevel {
 	level = lower(level, levelFor(candidate.Detection, thresholds.HighDetection, thresholds.MediumDetection, 0))
 	level = lower(level, levelFor(candidate.Purity, thresholds.HighPurity, thresholds.MediumPurity, 0))
 	level = lower(level, levelFor(candidate.Connectivity, thresholds.HighConnectivity, thresholds.MediumConnectivity, 0))
-	if !candidate.References || !candidate.Agreement {
+	if !candidate.References || (thresholds.RequireAgreement && !candidate.Agreement) {
 		level = lower(level, EvidenceMedium)
 	}
 	return level

@@ -1281,12 +1281,11 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 		flags := flag.NewFlagSet("cluster run", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		collectionID := flags.String("collection-id", "", "collection ID used for the per-collection search method")
-		scope := flags.String("scope", "all", "all, unresolved-only, or subset")
+		scope := flags.String("scope", application.Config.ClusteringConfig.CandidateScope, "all, unresolved-only, or subset")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		settings := clustering.DefaultConfig()
-		settings.NeighborSearchMethod = application.Config.NeighborSearchMethod
+		settings := application.Config.ClusteringConfig
 		if *collectionID != "" {
 			if err := application.DB.QueryRowContext(ctx, "SELECT neighbor_search_method FROM collections WHERE id = ?", *collectionID).Scan(&settings.NeighborSearchMethod); err != nil {
 				return err
@@ -1785,7 +1784,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			return err
 		},
 		"recognition": func(jobContext context.Context, _ jobs.Job) error {
-			if err := recognition.NewProcessor(application.DB, recognition.DefaultThresholds()).ProcessAll(jobContext); err != nil {
+			if err := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds).ProcessAll(jobContext); err != nil {
 				return err
 			}
 			_, err := jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"})
@@ -1801,12 +1800,11 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if payload.PersonID == "" {
 				return fmt.Errorf("reference reprocess job has no person_id")
 			}
-			recognitionProcessor := recognition.NewProcessor(application.DB, recognition.DefaultThresholds())
+			recognitionProcessor := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds)
 			if err := recognitionProcessor.ProcessAll(jobContext); err != nil {
 				return err
 			}
-			clusteringConfig := clustering.DefaultConfig()
-			clusteringConfig.NeighborSearchMethod = application.Config.NeighborSearchMethod
+			clusteringConfig := application.Config.ClusteringConfig
 			if _, err := clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, "all"); err != nil {
 				return err
 			}
@@ -1822,8 +1820,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if payload.Scope == "" {
 				payload.Scope = "all"
 			}
-			clusteringConfig := clustering.DefaultConfig()
-			clusteringConfig.NeighborSearchMethod = application.Config.NeighborSearchMethod
+			clusteringConfig := application.Config.ClusteringConfig
 			_, err := clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, payload.Scope)
 			return err
 		},

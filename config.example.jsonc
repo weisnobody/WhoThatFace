@@ -29,4 +29,26 @@
   // reference path or "ann" for the evaluation ANN prototype. A collection
   // can override this with `collection set-search`.
   // "neighbor_search_method": "exact"
+
+  // Recognition evidence thresholds. Scores are fractions from 0 to 1.
+  // "recognition_high_similarity": 0.50,
+  // "recognition_medium_similarity": 0.40,
+  // "recognition_low_similarity": 0.25,
+  // "recognition_margin": 0.05,
+  // "recognition_high_support": 5,
+  // "recognition_medium_support": 3,
+  // "recognition_high_quality": 0.75,
+  // "recognition_medium_quality": 0.60,
+  // "recognition_high_detection": 0.75,
+  // "recognition_medium_detection": 0.60,
+  // "recognition_high_purity": 0.95,
+  // "recognition_medium_purity": 0.90,
+  // "recognition_high_connectivity": 0.95,
+  // "recognition_medium_connectivity": 0.90,
+  // "recognition_require_agreement": true,
+
+  // Production clustering settings.
+  // "clustering_k": 40,
+  // "clustering_similarity_threshold": 0.45,
+  // "clustering_candidate_scope": "all"
 }
