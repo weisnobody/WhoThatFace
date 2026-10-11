@@ -17,7 +17,7 @@ are complete.
 
 ## Scanning, assets, and metadata
 
-- [ ] **P0** Implement actual Live Photo and motion-photo still extraction.
+- [x] **P0** Implement actual Live Photo and motion-photo still extraction.
   `internal/media/scanner.go` detects adjacent `.mov`/`.mp4` files and records
   metadata, but the analysis job passes the original path directly to the
   worker. It does not identify/extract and persist the reference still,
@@ -38,12 +38,12 @@ are complete.
 
 ## Worker contract and analysis integrity
 
-- [ ] **P0** Reconcile the worker protocol implementation and `SPEC.md`.
+- [x] **P0** Reconcile the worker protocol implementation and `SPEC.md`.
   The specification examples use `protocol_version`, `command`, `path`, and
   a nested `image` response; the implementation uses `type`, major/minor
   fields, `image_path`, and flat source-dimension fields. Choose one contract,
   update both sides, and add compatibility fixtures.
-- [ ] **P0** Bind runtime worker settings to the registered pipeline. The CLI
+- [x] **P0** Bind runtime worker settings to the registered pipeline. The CLI
   loads model/provider/checksum metadata from SQLite, but does not pass the
   pipeline's model root, provider, detector settings, or checksums into the
   worker environment/configuration. The worker primarily reads environment
@@ -66,11 +66,11 @@ are complete.
 
 ## Recognition, clustering, and configuration
 
-- [ ] **P0** Add configuration fields for recognition thresholds and evidence
+- [x] **P0** Add configuration fields for recognition thresholds and evidence
   categories: similarity, margin, support, quality, detection, purity,
   connectivity, and agreement behavior. These are currently hard-coded in
   `recognition.DefaultThresholds()`.
-- [ ] **P0** Add configuration fields for clustering `k`, face-to-face
+- [x] **P0** Add configuration fields for clustering `k`, face-to-face
   similarity threshold, candidate scope, and exact/ANN selection. The worker
   always queues clustering with `scope: all`, and `clustering.DefaultConfig()`
   supplies fixed values.
@@ -99,7 +99,7 @@ are complete.
 
 ## Cluster and face review workflow
 
-- [ ] **P0** Build the complete cluster review UI. The current cluster page
+- [x] **P0** Build the complete cluster review UI. The current cluster page
   displays faces and candidate text but instructs users to use an API; it does
   not provide the specified default-person controls, per-face selectors,
   disposition controls, save buttons, partial-save notes, or green/yellow/red
@@ -128,7 +128,7 @@ are complete.
 
 ## Search and authorization
 
-- [ ] **P0** Correct review-mode default filtering. The current search layer
+- [x] **P0** Correct review-mode default filtering. The current search layer
   excludes provisional/unknown/ambiguous by default, and `/review/photos`
   does not enable provisional results by default. It also does not implement
   the specified default exclusion of assigned-system and assigned-user results
@@ -150,7 +150,7 @@ are complete.
 
 ## CLI, jobs, export, and recovery
 
-- [ ] **P0** Connect the production worker to complete scan/analysis/
+- [x] **P0** Connect the production worker to complete scan/analysis/
   recognition/clustering progress reporting. Recognition and clustering jobs
   are enqueued, but their per-item work is not represented in `job_items`, so
   job status cannot accurately report their progress or current item.
