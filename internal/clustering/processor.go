@@ -63,7 +63,7 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	result, err := Group(faces, p.config)
+	result, err := GroupContext(ctx, faces, p.config)
 	if err != nil {
 		return "", err
 	}

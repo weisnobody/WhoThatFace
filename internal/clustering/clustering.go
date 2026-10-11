@@ -3,6 +3,7 @@
 package clustering
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sort"
@@ -97,6 +98,10 @@ func CalculateConnectivity(faceCount, internalEdges int) float32 {
 // returns connected components. Every input face appears in exactly one
 // cluster, including isolated singleton faces.
 func Group(faces []Face, config Config) (Result, error) {
+	return GroupContext(context.Background(), faces, config)
+}
+
+func GroupContext(ctx context.Context, faces []Face, config Config) (Result, error) {
 	if config.K <= 0 {
 		return Result{}, fmt.Errorf("k must be positive")
 	}
@@ -110,6 +115,11 @@ func Group(faces []Face, config Config) (Result, error) {
 		return Result{}, fmt.Errorf("neighbor search method must be exact or ann")
 	}
 	for index := range faces {
+		select {
+		case <-ctx.Done():
+			return Result{}, ctx.Err()
+		default:
+		}
 		if faces[index].ID == "" || len(faces[index].Embedding) == 0 {
 			return Result{}, fmt.Errorf("face %d has an empty ID or embedding", index)
 		}
@@ -154,6 +164,11 @@ func Group(faces []Face, config Config) (Result, error) {
 	}
 	var edges []Edge
 	for index, list := range neighbors {
+		select {
+		case <-ctx.Done():
+			return Result{}, ctx.Err()
+		default:
+		}
 		for _, neighbor := range list {
 			otherIndex := indices[neighbor.FaceID]
 			if !containsNeighbor(neighbors[otherIndex], faces[index].ID) || faces[index].ID >= neighbor.FaceID {

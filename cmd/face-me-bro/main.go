@@ -12,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pjg/face_me_bro/internal/analysis"
@@ -399,6 +401,25 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		return fmt.Errorf("collection requires add, get, list, remove, or set-search")
 	}
 	switch args[0] {
+	case "set-enabled":
+		flags := flag.NewFlagSet("collection set-enabled", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID")
+		enabled := flags.Bool("enabled", true, "enable or disable collection")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *collectionID == "" {
+			return fmt.Errorf("collection set-enabled requires --collection-id")
+		}
+		result, err := application.DB.ExecContext(ctx, `UPDATE collections SET enabled = ?, updated_at = ? WHERE id = ?`, boolInt(*enabled), time.Now().UTC().Format(time.RFC3339Nano), *collectionID)
+		if err != nil {
+			return err
+		}
+		if count, _ := result.RowsAffected(); count != 1 {
+			return fmt.Errorf("collection %q does not exist", *collectionID)
+		}
+		return writeCommandResult(stdout, jsonOutput, "collection set-enabled", map[string]any{"collection_id": *collectionID, "enabled": *enabled})
 	case "get":
 		flags := flag.NewFlagSet("collection get", flag.ContinueOnError)
 		flags.SetOutput(stderr)
@@ -1723,6 +1744,40 @@ func pipelineCommand(ctx context.Context, application *app.App, args []string, j
 }
 
 func workerCommand(ctx context.Context, application *app.App, args []string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && (args[0] == "status" || args[0] == "stop") {
+		pidPath := filepath.Join(application.Config.RuntimeDataRoot, "worker.pid")
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintln(stdout, "stopped")
+				return nil
+			}
+			return err
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return fmt.Errorf("invalid worker pid file: %w", err)
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return err
+		}
+		if args[0] == "status" {
+			if err := process.Signal(syscall.Signal(0)); err != nil {
+				fmt.Fprintln(stdout, "stopped")
+				_ = os.Remove(pidPath)
+				return nil
+			}
+			fmt.Fprintf(stdout, "running\t%d\n", pid)
+			return nil
+		}
+		if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		_ = os.Remove(pidPath)
+		fmt.Fprintln(stdout, "stopping")
+		return nil
+	}
 	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	pipelineID := flags.String("pipeline-id", "", "pipeline ID")
@@ -1762,6 +1817,11 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 		return err
 	}
 	defer client.Close()
+	pidPath := filepath.Join(application.Config.RuntimeDataRoot, "worker.pid")
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(pidPath)
 	processor := analysis.NewProcessor(application.DB, client, *pipelineID, *maxPixels)
 	jobStore := jobs.NewStore(application.DB)
 	runner := jobs.Runner{Store: jobStore, Handlers: map[string]jobs.Handler{
