@@ -132,6 +132,9 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
+	if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
+		t.Fatalf("CSP does not allow the page styles: %s", policy)
+	}
 	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card\"", "class=\"grid\"", "Assignment:", "assigned-user", "Face quality:", "Model candidates", "Second Person", "Remove assignment", "Make evaluation", "Save assignment", "/static/person.js"} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())

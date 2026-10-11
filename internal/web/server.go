@@ -26,15 +26,19 @@ type Server struct {
 }
 
 func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
+	//  body{font-family:system-ui,sans-serif;max-width:70rem;margin:2rem auto;padding:0 1rem}
+
 	page := template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{{.Title}}</title>
 <style>
- body{font-family:system-ui,sans-serif;
- max-width:70rem;margin:2rem auto;
- padding:0 1rem}nav{display:flex;
- justify-content:space-between}table{border-collapse:collapse}td,th{padding:.4rem;
- border:1px solid #ccc}input,button{padding:.4rem;
- margin:.2rem 0}.error{color:#a00}</style>{{with .PageStyle}}<style>{{.}}</style>{{end}}</head>
+ body { font: 14px system-ui; margin: 20px; color: #222 }
+ .page-header { position: sticky; top: 0; z-index: 10; background: #fff; padding: 10px 0; border-bottom: 1px solid #ccc }
+ nav{display:flex;justify-content:space-between}
+ table{border-collapse:collapse}
+ td,th{padding:.4rem;border:1px solid #ccc}
+ input,button{padding:.4rem;margin:.2rem 0}
+ .error{color:#a00}
+</style>{{with .PageStyle}}<style>{{.}}</style>{{end}}</head>
 <body><nav><a href="/">Face-Me-Bro</a>{{if .Account}}<span>{{.Account.Username}} ({{.Account.Role}}) <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
 	return &Server{auth: authStore, db: database, templates: page}, nil
 }
@@ -1052,7 +1056,7 @@ func validCSRFApi(r *http.Request) bool {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		next.ServeHTTP(w, r)
