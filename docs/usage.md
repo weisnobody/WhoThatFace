@@ -97,7 +97,6 @@ Run the worker in a second terminal and leave it running while the collection
 is processed:
 
 ```sh
-cd /path/to/face_me_bro
 export FACE_ME_BRO_MODEL_ROOT="$PWD/runtime/models"
 ./bin/face-me-bro worker \
   --pipeline-id "$PIPELINE_ID" \
