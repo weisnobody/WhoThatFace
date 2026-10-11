@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pjg/face_me_bro/internal/id"
@@ -15,6 +17,27 @@ type Store struct{ db *sql.DB }
 func NewStore(database *sql.DB) Store { return Store{db: database} }
 
 func (s Store) CreateCollection(ctx context.Context, name, root string) (string, error) {
+	resolved, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve collection root: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT root_path FROM collections WHERE enabled = 1`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var existing string
+		if err := rows.Scan(&existing); err != nil {
+			return "", err
+		}
+		if rootsOverlap(resolved, existing) {
+			return "", fmt.Errorf("collection root %q overlaps existing collection root %q", resolved, existing)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
 	collectionID, err := id.NewUUIDv7()
 	if err != nil {
 		return "", err
@@ -22,11 +45,24 @@ func (s Store) CreateCollection(ctx context.Context, name, root string) (string,
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO collections (id, name, root_path, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)`, collectionID, name, root, now, now)
+		VALUES (?, ?, ?, ?, ?)`, collectionID, name, resolved, now, now)
 	if err != nil {
 		return "", fmt.Errorf("create collection: %w", err)
 	}
 	return collectionID, nil
+}
+
+func rootsOverlap(left, right string) bool {
+	left, right = filepath.Clean(left), filepath.Clean(right)
+	if left == right {
+		return true
+	}
+	relative, err := filepath.Rel(left, right)
+	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return true
+	}
+	relative, err = filepath.Rel(right, left)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (s Store) DeleteCollection(ctx context.Context, collectionID string) error {

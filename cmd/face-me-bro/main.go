@@ -945,6 +945,22 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		fmt.Fprintln(stdout, account.ID)
 		return nil
 	}
+	if args[0] == "dont-track" {
+		flags := flag.NewFlagSet("people dont-track", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "person ID")
+		value := flags.Bool("value", true, "set or clear don't-track")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *personID == "" {
+			return fmt.Errorf("people dont-track requires --person-id")
+		}
+		if err := review.NewStore(application.DB).SetPersonDontTrack(ctx, *personID, *value, review.Actor{Type: "user"}, "cli"); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "people dont-track", map[string]any{"person_id": *personID, "dont_track": *value})
+	}
 	if args[0] == "disable" || args[0] == "enable" {
 		flags := flag.NewFlagSet("account state", flag.ContinueOnError)
 		flags.SetOutput(stderr)
@@ -1799,7 +1815,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 				return err
 			}
 			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "recognition", "items": len(faceIDs), "completed": 0})
-			if err := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds).ProcessAll(jobContext); err != nil {
+			if err := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds, *pipelineID).ProcessAll(jobContext); err != nil {
 				return err
 			}
 			if err := completeJobItems(jobContext, jobStore, job.ID, faceIDs); err != nil {
@@ -1819,8 +1835,8 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if payload.PersonID == "" {
 				return fmt.Errorf("reference reprocess job has no person_id")
 			}
-			recognitionProcessor := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds)
-			if err := recognitionProcessor.ProcessAll(jobContext); err != nil {
+			recognitionProcessor := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds, *pipelineID)
+			if err := recognitionProcessor.ProcessPerson(jobContext, payload.PersonID); err != nil {
 				return err
 			}
 			clusteringConfig := application.Config.ClusteringConfig

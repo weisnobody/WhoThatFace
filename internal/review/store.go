@@ -54,6 +54,25 @@ type Store struct{ db *sql.DB }
 
 func NewStore(database *sql.DB) Store { return Store{db: database} }
 
+func (s Store) SetPersonDontTrack(ctx context.Context, personID string, dontTrack bool, actor Actor, reason string) error {
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := s.db.ExecContext(ctx, `UPDATE people SET dont_track = ?, updated_at = ? WHERE id = ?`, boolInt(dontTrack), now, personID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return fmt.Errorf("person %q does not exist", personID)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO person_state_events (id, person_id, dont_track, account_id, reason, created_at) VALUES (?, ?, ?, NULLIF(?, ''), ?, ?)`, eventID, personID, boolInt(dontTrack), actor.AccountID, reason, now); err != nil {
+		return err
+	}
+	return audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: actor.AccountID, TargetEventID: eventID, Action: "person-state", EntityType: "person", EntityID: personID, New: map[string]any{"dont_track": dontTrack}})
+}
+
 // InitializeFace creates the initial unassigned state once analysis discovers
 // a face. It is safe to call repeatedly.
 func (s Store) InitializeFace(ctx context.Context, faceID string, actor Actor) error {
@@ -129,6 +148,8 @@ func (s Store) SetReference(ctx context.Context, faceID, personID string, refere
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var recommendationID sql.NullString
+	_ = s.db.QueryRowContext(ctx, `SELECT id FROM reference_recommendations WHERE face_id = ? AND person_id = ? AND is_current = 1 ORDER BY created_at DESC LIMIT 1`, faceID, personID).Scan(&recommendationID)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -137,8 +158,8 @@ func (s Store) SetReference(ctx context.Context, faceID, personID string, refere
 	var previousEvent sql.NullString
 	_ = tx.QueryRowContext(ctx, "SELECT event_id FROM current_face_references WHERE face_id = ?", faceID).Scan(&previousEvent)
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO reference_selection_events (id, face_id, person_id, reference, account_id, reason, supersedes_event_id, created_at)
-		VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, NULLIF(?, ''), ?)`, eventID, faceID, personID, boolInt(reference), actor.AccountID, reason, previousEvent.String, now)
+		INSERT INTO reference_selection_events (id, face_id, person_id, reference, account_id, recommendation_id, reason, supersedes_event_id, created_at)
+		VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?)`, eventID, faceID, personID, boolInt(reference), actor.AccountID, recommendationID.String, reason, previousEvent.String, now)
 	if err != nil {
 		return err
 	}
@@ -157,6 +178,19 @@ func (s Store) SetReference(ctx context.Context, faceID, personID string, refere
 		New: map[string]any{"person_id": personID, "reference": reference},
 	}); err != nil {
 		return fmt.Errorf("record reference audit event: %w", err)
+	}
+	if recommendationID.Valid {
+		decision := "rejected"
+		if reference {
+			decision = "approved"
+		}
+		decisionID, err := id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO reference_recommendation_decisions (id, recommendation_id, person_id, face_id, decision, account_id, created_at) VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, decisionID, recommendationID.String, personID, faceID, decision, actor.AccountID, now); err != nil {
+			return err
+		}
 	}
 	_, err = jobs.NewStore(s.db).Enqueue(ctx, "reference-reprocess", 1, map[string]string{"person_id": personID, "face_id": faceID})
 	return err

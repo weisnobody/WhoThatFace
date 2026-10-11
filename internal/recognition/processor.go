@@ -16,10 +16,16 @@ type Processor struct {
 	db         *sql.DB
 	review     review.Store
 	thresholds Thresholds
+	pipelineID string
+	personID   string
 }
 
-func NewProcessor(database *sql.DB, thresholds Thresholds) Processor {
-	return Processor{db: database, review: review.NewStore(database), thresholds: thresholds}
+func NewProcessor(database *sql.DB, thresholds Thresholds, pipelineIDs ...string) Processor {
+	pipelineID := ""
+	if len(pipelineIDs) > 0 {
+		pipelineID = pipelineIDs[0]
+	}
+	return Processor{db: database, review: review.NewStore(database), thresholds: thresholds, pipelineID: pipelineID}
 }
 
 // ProcessAll evaluates every face with the current approved reference gallery.
@@ -29,11 +35,17 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	rows, err := p.db.QueryContext(ctx, `
+	query := `
 		SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
-		WHERE COALESCE(ca.state, 'unassigned') <> 'assigned-user'`)
+		WHERE COALESCE(ca.state, 'unassigned') <> 'assigned-user'`
+	args := []any{}
+	if p.personID != "" {
+		query += ` AND (ca.person_id = ? OR EXISTS (SELECT 1 FROM current_face_references fr WHERE fr.face_id = f.id AND fr.person_id = ?) OR EXISTS (SELECT 1 FROM recognition_candidates rc WHERE rc.face_id = f.id AND rc.person_id = ?))`
+		args = append(args, p.personID, p.personID, p.personID)
+	}
+	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -81,6 +93,11 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 		}
 	}
 	return rows.Err()
+}
+
+func (p Processor) ProcessPerson(ctx context.Context, personID string) error {
+	p.personID = personID
+	return p.ProcessAll(ctx)
 }
 
 // RefreshRecommendations rebuilds the current recommendation set for one
@@ -145,7 +162,8 @@ func (p Processor) loadReferences(ctx context.Context) (map[string][][]float32, 
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT r.person_id, f.embedding, f.embedding_dimension
 		FROM current_face_references r JOIN faces f ON f.id = r.face_id
-		WHERE r.reference = 1 AND f.embedding IS NOT NULL`)
+		JOIN analyses a ON a.id = f.analysis_id
+		WHERE r.reference = 1 AND f.embedding IS NOT NULL AND (? = '' OR a.pipeline_id = ?)`, p.pipelineID, p.pipelineID)
 	if err != nil {
 		return nil, err
 	}
