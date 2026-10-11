@@ -1093,7 +1093,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	if runStatus == "superseded" {
 		body.WriteString(`<p class="error">This is a historical clustering run. A newer run is active`)
 		if supersededBy != "" {
-			body.WriteString(` (` + template.HTMLEscapeString(supersededBy) + `)`)
+			body.WriteString(` (` + template.HTMLEscapeString(idSuffix(supersededBy)) + `)`)
 		}
 		body.WriteString(`. Review changes are still recorded against this historical cluster.</p>`)
 	}

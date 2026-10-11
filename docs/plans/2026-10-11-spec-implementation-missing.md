@@ -60,7 +60,7 @@ are complete.
   A worker/analysis error currently aborts the handler; the affected
   `job_item` is not reliably marked failed with its categorized error and the
   remaining assets are not guaranteed to continue.
-- [ ] **P2** Add real concurrent worker/CLI and worker restart integration
+- [x] **P2** Add real concurrent worker/CLI and worker restart integration
   tests, including timeout, malformed output, changed-file, cancellation, and
   retry scenarios.
 
@@ -122,7 +122,7 @@ are complete.
   complete in the UI. Old-run warnings exist, but the page still exposes raw
   IDs and does not provide the full read-only/exception-save semantics in the
   specification.
-- [ ] **P2** Apply the web display conventions consistently beyond the person
+- [x] **P2** Apply the web display conventions consistently beyond the person
   page: percentage formatting for scores and final-eight-character display
   for visible IDs on cluster, face, audit, account, and collection pages.
 
@@ -171,7 +171,7 @@ are complete.
 - [x] **P1** Add restore safety checks: refuse restore while another process is
   using the database, validate the backup schema/version, use an atomic
   replacement strategy, and verify the restored database before success.
-- [ ] **P2** Ensure all mutating CLI operations consistently record actor
+- [x] **P2** Ensure all mutating CLI operations consistently record actor
   identity and enforce the intended system-admin/collection-manager scope;
   local CLI operations currently call stores directly without authorization
   context.
@@ -204,7 +204,7 @@ are complete.
 - [x] **P1** Mark the implementation status of the requirements above in
   `docs/SPEC.md` and remove claims that the corresponding behavior is already
   complete.
-- [ ] **P2** Document the actual production command chain, including how the
+- [x] **P2** Document the actual production command chain, including how the
   worker receives model/provider configuration, how jobs are monitored, and
   which review features are currently CLI/API-only.
 

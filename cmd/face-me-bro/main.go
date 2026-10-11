@@ -419,6 +419,7 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		if count, _ := result.RowsAffected(); count != 1 {
 			return fmt.Errorf("collection %q does not exist", *collectionID)
 		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "collection-state", EntityType: "collection", EntityID: *collectionID, New: map[string]any{"enabled": *enabled, "actor": "cli"}})
 		return writeCommandResult(stdout, jsonOutput, "collection set-enabled", map[string]any{"collection_id": *collectionID, "enabled": *enabled})
 	case "get":
 		flags := flag.NewFlagSet("collection get", flag.ContinueOnError)
@@ -457,6 +458,7 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		if count, _ := result.RowsAffected(); count != 1 {
 			return fmt.Errorf("collection %q does not exist", *collectionID)
 		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "collection-search-method", EntityType: "collection", EntityID: *collectionID, New: map[string]any{"method": *method, "actor": "cli"}})
 		return writeCommandResult(stdout, jsonOutput, "collection set-search", map[string]any{"collection_id": *collectionID, "method": *method})
 	case "remove":
 		flags := flag.NewFlagSet("collection remove", flag.ContinueOnError)
@@ -472,6 +474,7 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		if err := media.NewStore(application.DB).DeleteCollection(ctx, *collectionID); err != nil {
 			return err
 		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "collection-remove", EntityType: "collection", EntityID: *collectionID, New: map[string]any{"actor": "cli", "confirmed": true}})
 		if jsonOutput {
 			return writeJSON(stdout, envelope("collection remove", map[string]string{"id": *collectionID}))
 		}
@@ -496,6 +499,7 @@ func collectionCommand(ctx context.Context, application *app.App, args []string,
 		if err != nil {
 			return err
 		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "collection-create", EntityType: "collection", EntityID: id, New: map[string]any{"name": *name, "root": resolved, "actor": "cli"}})
 		if jsonOutput {
 			return writeJSON(stdout, envelope("collection add", map[string]string{"id": id, "name": *name, "root": resolved}))
 		}
@@ -979,7 +983,7 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		if *personID == "" {
 			return fmt.Errorf("people dont-track requires --person-id")
 		}
-		if err := review.NewStore(application.DB).SetPersonDontTrack(ctx, *personID, *value, review.Actor{Type: "user"}, "cli"); err != nil {
+		if err := review.NewStore(application.DB).SetPersonDontTrack(ctx, *personID, *value, review.Actor{Type: "cli"}, "cli"); err != nil {
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "people dont-track", map[string]any{"person_id": *personID, "dont_track": *value})
@@ -1090,6 +1094,7 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 		if _, err := application.DB.ExecContext(ctx, `INSERT INTO people (id, name, is_provisional, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, personID, *name, boolInt(*provisional), now, now); err != nil {
 			return err
 		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "person-create", EntityType: "person", EntityID: personID, New: map[string]any{"name": *name, "provisional": *provisional, "actor": "cli"}})
 		if jsonOutput {
 			return writeJSON(stdout, envelope("people create", map[string]any{"id": personID, "name": *name, "provisional": *provisional}))
 		}
@@ -1282,7 +1287,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if *state == "" {
 			return fmt.Errorf("face assign requires --state")
 		}
-		assignment, err := store.Assign(ctx, *faceID, *personID, review.AssignmentState(*state), review.Actor{Type: "user"}, review.Evidence{}, "cli")
+		assignment, err := store.Assign(ctx, *faceID, *personID, review.AssignmentState(*state), review.Actor{Type: "cli"}, review.Evidence{}, "cli")
 		if err != nil {
 			return err
 		}
@@ -1295,7 +1300,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if *disposition == "" {
 			return fmt.Errorf("face disposition requires --disposition")
 		}
-		if err := store.SetDisposition(ctx, *faceID, *disposition, true, review.Actor{Type: "user"}, "cli"); err != nil {
+		if err := store.SetDisposition(ctx, *faceID, *disposition, true, review.Actor{Type: "cli"}, "cli"); err != nil {
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "face disposition", map[string]any{"face_id": *faceID, "disposition": *disposition})
@@ -1303,7 +1308,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if *personID == "" {
 			return fmt.Errorf("face reference requires --person-id")
 		}
-		if err := store.SetReference(ctx, *faceID, *personID, *reference, review.Actor{Type: "user"}, "cli"); err != nil {
+		if err := store.SetReference(ctx, *faceID, *personID, *reference, review.Actor{Type: "cli"}, "cli"); err != nil {
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "face reference", map[string]any{"face_id": *faceID, "person_id": *personID, "reference": *reference})
@@ -1440,7 +1445,7 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 	if *faceID != "" {
 		decisions = append(decisions, review.ClusterFaceDecision{FaceID: *faceID, PersonID: *facePersonID, State: review.AssignmentState(*faceState), Disposition: *disposition})
 	}
-	if err := review.NewStore(application.DB).ReviewCluster(ctx, *clusterID, *defaultPersonID, *status, *expectedVersion, decisions, review.Actor{Type: "user"}, "cli"); err != nil {
+	if err := review.NewStore(application.DB).ReviewCluster(ctx, *clusterID, *defaultPersonID, *status, *expectedVersion, decisions, review.Actor{Type: "cli"}, "cli"); err != nil {
 		return err
 	}
 	return writeCommandResult(stdout, jsonOutput, "cluster review", map[string]any{"cluster_id": *clusterID, "status": *status, "expected_version": *expectedVersion + 1})

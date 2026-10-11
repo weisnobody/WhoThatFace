@@ -25,3 +25,30 @@ or collection-specific search method.
 The exact/ANN setting is configured globally in `config.json` with
 `neighbor_search_method: "exact"` or `"ann"`. A collection can override it
 with `collection set-search --collection-id ID --method exact|ann`.
+
+## Representative-library run
+
+The synthetic benchmark is a sizing and regression harness, not evidence for
+production throughput. For representative-library measurements, use a copy of
+the intended photo library and keep the generated database and reports out of
+git:
+
+```sh
+./bin/face-me-bro collection add --name benchmark --root /path/to/photos
+./bin/face-me-bro --json scan --collection-id COLLECTION_ID > scan.json
+./bin/face-me-bro --json job list > jobs.json
+./bin/face-me-bro --json job status --job-id JOB_ID > job-status.json
+./bin/face-me-bro --json face list --limit 1 --page 1 > face-sample.json
+```
+
+Record the machine label, OS, CPU/GPU/provider, core count, RAM, worker/model
+versions, photo and face counts, first-scan and unchanged-rescan durations,
+peak memory, failed/retried items, recognition and grouping settings, and
+review-query latency. Repeat with duplicate paths, renamed paths, and an
+incremental batch. Run the same collection with exact and ANN search and
+compare neighbor recall, grouping purity/connectivity, runtime, memory, and
+manual review counts before changing the configured method.
+
+These measurements require representative data and the target Apple Silicon
+machines; they are release-validation gates and are not fabricated by the
+synthetic harness.
