@@ -104,14 +104,14 @@ are complete.
   not provide the specified default-person controls, per-face selectors,
   disposition controls, save buttons, partial-save notes, or green/yellow/red
   state behavior.
-- [ ] **P1** Implement the complete photo/face review UI. `/review/photos`
+- [x] **P1** Implement the complete photo/face review UI. `/review/photos`
   currently renders photo thumbnails and a description, but does not display
   numbered face boxes, assignment state, candidate choices, unknown/
   ambiguous/false-detection/don't-track controls, or reference controls.
-- [ ] **P1** Add person creation, rename, and review actions to the web flow.
+- [x] **P1** Add person creation, rename, and review actions to the web flow.
   The current people page is primarily a list and the person page cannot
   create a person or rename a provisional person.
-- [ ] **P1** Add reference/recommendation views to the web flow, including up
+- [x] **P1** Add reference/recommendation views to the web flow, including up
   to 20 recommendations per person, approval/rejection, current references,
   and the evidence used for each recommendation.
 - [x] **P1** Implement singleton virtual review groups and their explicit
@@ -136,7 +136,7 @@ are complete.
 - [x] **P1** Add explicit assignment-state filters to CLI and web search,
   including assigned-system, assigned-user, unassigned, provisional,
   unknown, ambiguous, confirmed-only, and not-confirmed-only behavior.
-- [ ] **P1** Scope all person/candidate choices and metadata to accessible
+- [x] **P1** Scope all person/candidate choices and metadata to accessible
   collections. The person detail page loads the global people list and
   candidate names, which can reveal people outside the account's permitted
   collections.
@@ -178,11 +178,11 @@ are complete.
 
 ## Testing, performance, and release validation
 
-- [ ] **P1** Add end-to-end fixtures covering duplicates, renamed paths,
+- [x] **P1** Add end-to-end fixtures covering duplicates, renamed paths,
   rotation, unsupported/corrupt files, missing/restored paths, unknown and
   ambiguous faces, multiple people, and reference changes through the actual
   scan-to-worker-to-review pipeline.
-- [ ] **P1** Add integration tests for all role/collection combinations,
+- [x] **P1** Add integration tests for all role/collection combinations,
   image/path authorization, old review pages, undo conflicts, and metadata
   leakage through candidate/person lists.
 - [ ] **P2** Replace synthetic-only claims with representative-library
@@ -198,10 +198,10 @@ are complete.
 
 ## Documentation and contract cleanup
 
-- [ ] **P1** Update `docs/SPEC.md` worker examples to match the selected
+- [x] **P1** Update `docs/SPEC.md` worker examples to match the selected
   implemented protocol, or update the implementation to match the normative
   examples; currently both cannot be used as a single contract.
-- [ ] **P1** Mark the implementation status of the requirements above in
+- [x] **P1** Mark the implementation status of the requirements above in
   `docs/SPEC.md` and remove claims that the corresponding behavior is already
   complete.
 - [ ] **P2** Document the actual production command chain, including how the

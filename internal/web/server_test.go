@@ -145,4 +145,17 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if headEnd < 0 || gridStyle < 0 || gridStyle > headEnd {
 		t.Fatalf("person photo styles were not rendered in the document head: %s", response.Body.String())
 	}
+	photoRequest := httptest.NewRequest(http.MethodGet, "/review/photos?path_id=path-1", nil)
+	photoRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	photoRequest.AddCookie(&http.Cookie{Name: "csrf", Value: "csrf-token"})
+	photoResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(photoResponse, photoRequest)
+	if photoResponse.Code != http.StatusOK {
+		t.Fatalf("photo review status = %d, body = %s", photoResponse.Code, photoResponse.Body.String())
+	}
+	for _, value := range []string{"Face 1", "photo-box", "data-action=\"unknown\"", "data-action=\"ambiguous\"", "data-action=\"assign\"", "data-action=\"role\"", "/static/photo.js"} {
+		if !strings.Contains(photoResponse.Body.String(), value) {
+			t.Errorf("photo review is missing %q: %s", value, photoResponse.Body.String())
+		}
+	}
 }

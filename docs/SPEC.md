@@ -266,6 +266,7 @@ not required for the MVP.
   },
   "faces": [
     {
+      "face_index": 0,
       "box": {
         "left": 120,
         "top": 240,
@@ -1517,3 +1518,9 @@ IMPLEMENTATION IN PROGRESS.
 The specification remains the source of requirements and acceptance criteria.
 Incomplete implementation items and validation work are tracked in the
 implementation plans under `docs/plans/`.
+
+The initial P0 requirements and the P1 implementation requirements in
+`docs/plans/2026-10-11-spec-implementation-missing.md` are implemented unless
+explicitly marked as validation work. The plan remains the authoritative
+checklist for tests, benchmark gates, and release-hardening work that still
+needs representative-library or platform-specific validation.

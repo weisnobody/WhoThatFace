@@ -78,8 +78,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/photos", s.photos)
 	mux.HandleFunc("GET /api/photos/{pathID}", s.photo)
 	mux.HandleFunc("GET /static/person.js", s.personScript)
+	mux.HandleFunc("GET /static/photo.js", s.photoScript)
 	mux.HandleFunc("GET /static/cluster.js", s.clusterScript)
 	mux.HandleFunc("POST /api/faces/{faceID}/assignment", s.assignFace)
+	mux.HandleFunc("POST /api/faces/{faceID}/disposition", s.faceDisposition)
 	mux.HandleFunc("POST /api/faces/{faceID}/reference", s.referenceFace)
 	mux.HandleFunc("GET /", s.dashboard)
 	mux.HandleFunc("GET /review/photos", s.reviewPhotos)
@@ -235,7 +237,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT f.id, f.face_index, f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(ca.state, 'unassigned'), COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ''), COALESCE(rc.similarity, 0), COALESCE(rc.margin, 0) FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_assignments ca ON ca.face_id = f.id LEFT JOIN people p ON p.id = ca.person_id LEFT JOIN recognition_candidates rc ON rc.id = (SELECT id FROM recognition_candidates WHERE face_id = f.id ORDER BY created_at DESC, rank LIMIT 1) WHERE pp.id = ? ORDER BY f.face_index`, pathID)
+	rows, err := s.db.QueryContext(r.Context(), `SELECT f.id, f.face_index, f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ''), COALESCE(rc.similarity, 0), COALESCE(rc.margin, 0), COALESCE(cfr.reference, 0) FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_assignments ca ON ca.face_id = f.id LEFT JOIN people p ON p.id = ca.person_id LEFT JOIN current_face_references cfr ON cfr.face_id = f.id AND cfr.person_id = ca.person_id LEFT JOIN recognition_candidates rc ON rc.id = (SELECT id FROM recognition_candidates WHERE face_id = f.id ORDER BY created_at DESC, rank LIMIT 1) WHERE pp.id = ? ORDER BY f.face_index`, pathID)
 	if err != nil {
 		http.Error(w, "face lookup failed", http.StatusInternalServerError)
 		return
@@ -247,24 +249,67 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		ID                       string
 		Index                    int
 		Left, Top, Right, Bottom float64
-		State, Person            string
+		State, PersonID, Person  string
 		Similarity, Margin       float64
+		Reference                bool
 	}
 	var faces []face
 	for rows.Next() {
 		var value face
-		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.Person, &value.Similarity, &value.Margin); err != nil {
+		var reference int
+		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.PersonID, &value.Person, &value.Similarity, &value.Margin, &reference); err != nil {
 			return
 		}
+		value.Reference = reference == 1
 		body.WriteString(fmt.Sprintf(`<span class="photo-box" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span>`, percent(value.Left, width), percent(value.Top, height), percent(value.Right-value.Left, width), percent(value.Bottom-value.Top, height)))
 		faces = append(faces, value)
 	}
-	body.WriteString(`</div><div>`)
+	body.WriteString(`</div><div id="photo-page" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-person-id="` + template.HTMLEscapeString(collectionID) + `">`)
+	peopleQuery := `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people`
+	peopleArgs := []any{collectionID}
+	peopleQuery += ` WHERE EXISTS (SELECT 1 FROM current_face_assignments ca2 JOIN faces f2 ON f2.id = ca2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE ca2.person_id = people.id AND pp2.collection_id = ?)`
+	peopleQuery += ` ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8))), id`
+	peopleRows, peopleErr := s.db.QueryContext(r.Context(), peopleQuery, peopleArgs...)
+	if peopleErr != nil {
+		http.Error(w, "people lookup failed", http.StatusInternalServerError)
+		return
+	}
+	type photoPerson struct{ ID, Name string }
+	var people []photoPerson
+	for peopleRows.Next() {
+		var p photoPerson
+		if err := peopleRows.Scan(&p.ID, &p.Name); err != nil {
+			peopleRows.Close()
+			http.Error(w, "people lookup failed", http.StatusInternalServerError)
+			return
+		}
+		people = append(people, p)
+	}
+	peopleRows.Close()
 	for _, value := range faces {
-		body.WriteString(`<article class="photo-face"><strong>Face ` + fmt.Sprint(value.Index+1) + `</strong>: ` + template.HTMLEscapeString(value.State) + ` · ` + template.HTMLEscapeString(value.Person) + ` · confidence ` + formatScore(value.Similarity) + `%, margin ` + formatScore(value.Margin) + `%</article>`)
+		boxClass := "photo-face"
+		body.WriteString(`<article class="` + boxClass + `" data-face-id="` + template.HTMLEscapeString(value.ID) + `"><strong>Face ` + fmt.Sprint(value.Index+1) + `</strong>: ` + template.HTMLEscapeString(value.State) + ` · ` + template.HTMLEscapeString(value.Person) + ` · confidence ` + formatScore(value.Similarity) + `%, margin ` + formatScore(value.Margin) + `%`)
+		if value.Reference {
+			body.WriteString(` · reference`)
+		}
+		if account.Role != auth.Viewer {
+			body.WriteString(`<div class="photo-actions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Ambiguous</button><button type="button" data-action="disposition" data-disposition="false-detection" data-face-id="` + template.HTMLEscapeString(value.ID) + `">False detection</button><button type="button" data-action="disposition" data-disposition="dont-track" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Don't track</button><select data-assignment-person="` + template.HTMLEscapeString(value.ID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+			for _, person := range people {
+				body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selectedAttr(person.ID, value.PersonID) + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
+			}
+			body.WriteString(`</select><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Save</button>`)
+			if value.PersonID != "" && (value.State == string(review.AssignedSystem) || value.State == string(review.AssignedUser)) {
+				body.WriteString(`<button type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(value.ID) + `" data-person-id="` + template.HTMLEscapeString(value.PersonID) + `" data-reference="` + fmt.Sprint(value.Reference) + `">` + map[bool]string{true: "Evaluation", false: "Reference"}[value.Reference] + `</button>`)
+			}
+			body.WriteString(`</div>`)
+		}
+		body.WriteString(`</article>`)
 	}
 	body.WriteString(`</div>`)
-	s.render(w, map[string]any{"Title": "Photo review", "Account": account, "Body": template.HTML(body.String())})
+	if account.Role != auth.Viewer {
+		body.WriteString(`<script src="/static/photo.js" defer></script>`)
+	}
+	s.render(w, map[string]any{"Title": "Photo review", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`.photo-detail{position:relative;display:inline-block}.photo-detail img{max-width:90vw;max-height:70vh}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15)}.photo-box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.photo-face{border:1px solid #ccc;padding:8px;margin:8px 0}.photo-actions{display:flex;justify-content:space-between;gap:8px;align-items:center}`)})
 }
 
 func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
@@ -308,7 +353,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	var body strings.Builder
-	body.WriteString(`<h1>People</h1><table><tr><th>Name</th><th>Faces</th><th>Provisional</th><th>Don't track</th></tr>`)
+	body.WriteString(`<h1>People</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><table><tr><th>Name</th><th>Faces</th><th>Provisional</th><th>Don't track</th></tr>`)
 	for rows.Next() {
 		var id, name string
 		var provisional, dontTrack int
@@ -319,7 +364,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		}
 		body.WriteString(`<tr><td><a href="/review/people/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(name) + `</a></td><td>` + fmt.Sprint(faceCount) + `</td><td>` + fmt.Sprint(provisional == 1) + `</td><td>` + fmt.Sprint(dontTrack == 1) + `</td></tr>`)
 	}
-	body.WriteString(`</table>`)
+	body.WriteString(`</table><script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
 	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String())})
 }
 
@@ -571,7 +616,18 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 .person-dispositions{display:flex;gap:20px}
 .person-assignment{display:flex;justify-content:flex-end;gap:6px;margin-top:8px}
 .person-assignment select{min-width:12rem}`)
-	peopleRows, peopleErr := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8), id) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8), id)), id`)
+	peopleQuery := `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8), id) FROM people`
+	peopleArgs := []any{}
+	if allowed != nil {
+		placeholders := make([]string, len(allowed))
+		for i, collectionID := range allowed {
+			placeholders[i] = "?"
+			peopleArgs = append(peopleArgs, collectionID)
+		}
+		peopleQuery += ` WHERE EXISTS (SELECT 1 FROM current_face_assignments ca2 JOIN faces f2 ON f2.id = ca2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE ca2.person_id = people.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
+	}
+	peopleQuery += ` ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8), id)), id`
+	peopleRows, peopleErr := s.db.QueryContext(r.Context(), peopleQuery, peopleArgs...)
 	if peopleErr != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
 		return
@@ -589,7 +645,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	peopleRows.Close()
 
-	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Max: ` + formatScore(maxConfidence) + `%, Min: ` + formatScore(minConfidence) + `%)</span></h1>`)
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Max: ` + formatScore(maxConfidence) + `%, Min: ` + formatScore(minConfidence) + `%)</span></h1><form id="rename-person"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button></form>`)
 	if len(clusterSummaryOrder) > 0 {
 		body.WriteString(`<div>Clusters: `)
 		for index, clusterPerson := range clusterSummaryOrder {
@@ -668,6 +724,9 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	if canModify {
 		body.WriteString(`<script src="/static/person.js" defer></script>`)
 	}
+	if canModify {
+		body.WriteString(`<script>(function(){const form=document.getElementById('rename-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people/` + template.JSEscapeString(personID) + `',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
+	}
 	s.render(w, map[string]any{"Title": personName, "Account": account, "PageStyle": pageStyle, "Body": template.HTML(body.String())})
 }
 
@@ -742,7 +801,27 @@ func (s *Server) personReferences(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT rr.id, rr.face_id, rr.is_current, COALESCE(rr.recommendation_score, 0), COALESCE(rr.quality, 0), COALESCE(rr.detection_confidence, 0), COALESCE(rr.similarity, 0), COALESCE(rr.margin, 0), COALESCE(rr.support_count, 0), COALESCE(rr.purity, 0), COALESCE(rr.connectivity, 0), COALESCE(cfr.reference, 0) FROM reference_recommendations rr LEFT JOIN current_face_references cfr ON cfr.face_id = rr.face_id AND cfr.person_id = rr.person_id WHERE rr.person_id = ? ORDER BY rr.is_current DESC, rr.recommendation_score DESC LIMIT 20`, personID)
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if allowed != nil && len(allowed) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"person_id": personID, "recommendations": []any{}})
+		return
+	}
+	referenceQuery := `SELECT rr.id, rr.face_id, rr.is_current, COALESCE(rr.recommendation_score, 0), COALESCE(rr.quality, 0), COALESCE(rr.detection_confidence, 0), COALESCE(rr.similarity, 0), COALESCE(rr.margin, 0), COALESCE(rr.support_count, 0), COALESCE(rr.purity, 0), COALESCE(rr.connectivity, 0), COALESCE(cfr.reference, 0) FROM reference_recommendations rr JOIN faces f ON f.id = rr.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_references cfr ON cfr.face_id = rr.face_id AND cfr.person_id = rr.person_id WHERE rr.person_id = ?`
+	referenceArgs := []any{personID}
+	if allowed != nil {
+		placeholders := make([]string, len(allowed))
+		for i, collectionID := range allowed {
+			placeholders[i] = "?"
+			referenceArgs = append(referenceArgs, collectionID)
+		}
+		referenceQuery += ` AND pp.collection_id IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	referenceQuery += ` ORDER BY rr.is_current DESC, rr.recommendation_score DESC LIMIT 20`
+	rows, err := s.db.QueryContext(r.Context(), referenceQuery, referenceArgs...)
 	if err != nil {
 		http.Error(w, "reference lookup failed", http.StatusInternalServerError)
 		return
@@ -779,21 +858,42 @@ func (s *Server) reviewPersonReferences(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT rr.face_id, rr.is_current, COALESCE(rr.recommendation_score, 0), pp.id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0), f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(cfr.reference, 0) FROM reference_recommendations rr JOIN faces f ON f.id = rr.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_references cfr ON cfr.face_id = rr.face_id AND cfr.person_id = rr.person_id WHERE rr.person_id = ? ORDER BY rr.is_current DESC, rr.recommendation_score DESC LIMIT 20`, personID)
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if allowed != nil && len(allowed) == 0 {
+		s.render(w, map[string]any{"Title": "Person references", "Account": account, "Body": template.HTML(`<h1>References</h1><p>No collections are assigned to this account.</p>`)})
+		return
+	}
+	referenceQuery := `SELECT rr.face_id, rr.is_current, COALESCE(rr.recommendation_score, 0), pp.id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0), f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0), COALESCE(cfr.reference, 0) FROM reference_recommendations rr JOIN faces f ON f.id = rr.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_references cfr ON cfr.face_id = rr.face_id AND cfr.person_id = rr.person_id WHERE rr.person_id = ?`
+	referenceArgs := []any{personID}
+	if allowed != nil {
+		placeholders := make([]string, len(allowed))
+		for i, collectionID := range allowed {
+			placeholders[i] = "?"
+			referenceArgs = append(referenceArgs, collectionID)
+		}
+		referenceQuery += ` AND pp.collection_id IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	referenceQuery += ` ORDER BY rr.is_current DESC, rr.recommendation_score DESC LIMIT 20`
+	rows, err := s.db.QueryContext(r.Context(), referenceQuery, referenceArgs...)
 	if err != nil {
 		http.Error(w, "reference lookup failed", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 	body := strings.Builder{}
-	body.WriteString(`<h1>References for ` + template.HTMLEscapeString(name) + `</h1><p>Current approved references and the latest recommendations are shown below.</p><div class="grid">`)
+	body.WriteString(`<div id="photo-page" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `"><h1>References for ` + template.HTMLEscapeString(name) + `</h1><p>Current approved references and the latest recommendations are shown below.</p><div class="grid">`)
 	for rows.Next() {
 		var faceID, pathID, relative string
 		var current, reference int
 		var score float64
+		var quality, detection float64
 		var width, height int
 		var left, top, right, bottom float64
-		if err := rows.Scan(&faceID, &current, &score, &pathID, &relative, &width, &height, &left, &top, &right, &bottom, &reference); err != nil {
+		if err := rows.Scan(&faceID, &current, &score, &pathID, &relative, &width, &height, &left, &top, &right, &bottom, &quality, &detection, &reference); err != nil {
 			http.Error(w, "reference lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -802,9 +902,9 @@ func (s *Server) reviewPersonReferences(w http.ResponseWriter, r *http.Request) 
 			class += " reference"
 		}
 		label := map[bool]string{true: "Approved reference", false: "Recommendation"}[reference == 1]
-		body.WriteString(fmt.Sprintf(`<article class="card"><div class="viewer"><img loading="lazy" src="/api/photos/%s"><span class="%s" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span></div><div class="path">%s</div><div>%s · score %s%%</div></article>`, template.HTMLEscapeString(pathID), class, percent(left, width), percent(top, height), percent(right-left, width), percent(bottom-top, height), template.HTMLEscapeString(relative), label, formatScore(score)))
+		body.WriteString(fmt.Sprintf(`<article class="card"><div class="viewer"><img loading="lazy" src="/api/photos/%s"><span class="%s" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span></div><div class="path">%s</div><div>%s · score %s%%</div><div>Quality %s%% · Detection %s%%</div><div class="actions"><button type="button" data-action="role" data-face-id="%s" data-person-id="%s" data-reference="%t">%s</button></div></article>`, template.HTMLEscapeString(pathID), class, percent(left, width), percent(top, height), percent(right-left, width), percent(bottom-top, height), template.HTMLEscapeString(relative), label, formatScore(score), formatScore(quality), formatScore(detection), template.HTMLEscapeString(faceID), template.HTMLEscapeString(personID), reference == 1, map[bool]string{true: "Make evaluation", false: "Approve reference"}[reference == 1]))
 	}
-	body.WriteString(`</div>`)
+	body.WriteString(`</div></div><script src="/static/photo.js" defer></script>`)
 	s.render(w, map[string]any{"Title": "Person references", "Account": account, "Body": template.HTML(body.String())})
 }
 
@@ -842,6 +942,35 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
     button.onclick = () => send(button.dataset.faceId,
       '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/reference',
       {person_id: page.dataset.personId, reference: button.dataset.reference !== 'true'});
+  });
+})();
+`))
+}
+
+func (s *Server) photoScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write([]byte(`(function () {
+  const page = document.getElementById('photo-page'); if (!page) return;
+  async function send(faceID, url, payload) {
+    const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':page.dataset.csrf}, body:JSON.stringify(payload)});
+    if (!response.ok) { alert(await response.text()); return; }
+    location.reload();
+  }
+  document.querySelectorAll('[data-action="unknown"],[data-action="ambiguous"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment', {person_id:'', state:button.dataset.action});
+  });
+  document.querySelectorAll('[data-action="assign"]').forEach((button) => {
+    button.onclick = () => {
+      const person = document.querySelector('[data-assignment-person="' + CSS.escape(button.dataset.faceId) + '"]').value;
+      const state = person === '__ambiguous__' ? 'ambiguous' : (person ? 'assigned-user' : 'unknown');
+      send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment', {person_id:person === '__ambiguous__' ? '' : person, state:state});
+    };
+  });
+  document.querySelectorAll('[data-action="role"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/reference', {person_id:button.dataset.personId, reference:button.dataset.reference !== 'true'});
+  });
+  document.querySelectorAll('[data-action="disposition"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/disposition', {disposition:button.dataset.disposition, active:true});
   });
 })();
 `))
@@ -1275,6 +1404,40 @@ func (s *Server) referenceFace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"face_id": faceID, "person_id": input.PersonID, "reference": input.Reference})
+}
+
+func (s *Server) faceDisposition(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if !validCSRFApi(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	faceID := r.PathValue("faceID")
+	allowed, err := s.facePermission(r, account, faceID, true)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var input struct {
+		Disposition string `json:"disposition"`
+		Active      *bool  `json:"active"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil || input.Disposition == "" {
+		http.Error(w, "invalid disposition", http.StatusBadRequest)
+		return
+	}
+	active := true
+	if input.Active != nil {
+		active = *input.Active
+	}
+	if err := review.NewStore(s.db).SetDisposition(r.Context(), faceID, input.Disposition, active, review.Actor{Type: "user", AccountID: account.ID}, "web-review"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"face_id": faceID, "disposition": input.Disposition, "active": active})
 }
 
 func (s *Server) facePermission(r *http.Request, account auth.Account, faceID string, modify bool) (bool, error) {
