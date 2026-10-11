@@ -263,10 +263,11 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(pa.width, a.source_width, 0), COALESCE(pa.height, a.source_height, 0),
 		f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
-		COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(cfr.reference, 0)
+		COALESCE(ae.similarity, 0), COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(cfr.reference, 0)
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
 		JOIN current_face_assignments ca ON ca.face_id = f.id
+		LEFT JOIN assignment_events ae ON ae.id = ca.event_id
 		LEFT JOIN current_face_references cfr ON cfr.face_id = f.id AND cfr.person_id = ?
 		WHERE ca.person_id = ? AND pp.missing_at IS NULL`
 	args := []any{personID, personID}
@@ -309,7 +310,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var face personFace
 		var reference int
-		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &face.State, &face.PersonID, &reference); err != nil {
+		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &face.Confidence, &face.State, &face.PersonID, &reference); err != nil {
 			http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -358,10 +359,12 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				face.Candidates = append([]personCandidate{candidate}, face.Candidates[:min(4, len(face.Candidates))]...)
 			}
 		}
-		for _, candidate := range face.Candidates {
-			if candidate.PersonID == face.PersonID {
-				face.Confidence = candidate.Similarity
-				break
+		if face.Confidence == 0 {
+			for _, candidate := range face.Candidates {
+				if candidate.PersonID == face.PersonID {
+					face.Confidence = candidate.Similarity
+					break
+				}
 			}
 		}
 		var recommendation int
