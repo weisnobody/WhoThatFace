@@ -434,8 +434,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
   position:sticky;
   top:0;z-index:10;
   background:#fff;
-  padding:10px 0;
-  border-bottom:1px solid #ccc}
+  padding:10px 0}
 .grid{
   display:flex;
   flex-wrap:wrap;
