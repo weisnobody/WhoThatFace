@@ -73,7 +73,7 @@ func (c *Client) startLocked(ctx context.Context) error {
 		c.stopLocked()
 		return err
 	}
-	if err := c.sendLocked(Message{Type: "hello", ID: requestID, ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor}); err != nil {
+	if err := c.sendLocked(Message{ProtocolVersion: ProtocolMajor, Command: "hello", ID: requestID}); err != nil {
 		c.stopLocked()
 		return err
 	}
@@ -82,20 +82,16 @@ func (c *Client) startLocked(ctx context.Context) error {
 		c.stopLocked()
 		return fmt.Errorf("read worker handshake: %w", err)
 	}
-	if response.Type == "error" {
+	if response.Command == "error" {
 		c.stopLocked()
 		return workerError(response.Error)
 	}
-	if response.Type != "hello_ack" || response.ProtocolMajor != ProtocolMajor || response.ProtocolMinor < 0 {
+	if response.Command != "hello_ack" || response.ProtocolVersion != ProtocolMajor {
 		c.stopLocked()
 		return fmt.Errorf("invalid worker handshake response")
 	}
 	c.ack = response
-	if response.ProtocolMinor < ProtocolMinor {
-		c.minor = response.ProtocolMinor
-	} else {
-		c.minor = ProtocolMinor
-	}
+	c.minor = ProtocolMinor
 	if err := validateCapabilities(response.Capabilities, c.expectation); err != nil {
 		c.stopLocked()
 		return err
@@ -190,7 +186,7 @@ func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxP
 	if err != nil {
 		return Message{}, err
 	}
-	if err := c.sendLocked(Message{Type: "analyze", ID: requestID, ProtocolMajor: ProtocolMajor, ProtocolMinor: c.minor, ImagePath: imagePath, ExpectedSHA256: identity.sha256, ExpectedSize: identity.size, PipelineID: pipelineID, MaxPixels: maxPixels}); err != nil {
+	if err := c.sendLocked(Message{ProtocolVersion: ProtocolMajor, Command: "analyze", ID: requestID, Path: imagePath, ExpectedSHA256: identity.sha256, ExpectedSize: identity.size, Model: &ModelInfo{PipelineID: pipelineID}, MaxPixels: maxPixels}); err != nil {
 		_ = c.restartLocked()
 		return Message{}, err
 	}
@@ -216,7 +212,7 @@ func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxP
 			_ = c.restartLocked()
 			return Message{}, fmt.Errorf("worker response ID %q does not match request", result.message.ID)
 		}
-		if result.message.Type == "error" {
+		if result.message.Command == "error" || (result.message.OK != nil && !*result.message.OK) {
 			if result.message.Error != nil && result.message.Error.Retryable {
 				_ = c.restartLocked()
 			}

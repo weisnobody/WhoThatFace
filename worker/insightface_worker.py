@@ -6,6 +6,7 @@ is delayed until startup so protocol and setup diagnostics remain usable when
 the model environment is incomplete.
 """
 
+import argparse
 import base64
 import hashlib
 import json
@@ -16,6 +17,7 @@ from pathlib import Path
 
 PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 0
+RUNTIME = {"model": "buffalo_l", "model_root": "", "providers": ["CPUExecutionProvider"], "checksums": {}, "detector_size": (640, 640)}
 
 
 def send(message):
@@ -34,12 +36,12 @@ def capabilities():
         "worker_version": "1.0.0",
         "python_version": platform.python_version(),
         "insightface_version": version,
-        "providers": providers(),
-        "models": [os.environ.get("FACE_ME_BRO_MODEL", "buffalo_l")],
+        "providers": RUNTIME["providers"],
+        "models": [RUNTIME["model"]],
         "embedding_dimension": 512,
         "embedding_dtype": "float32",
         "embedding_metric": "cosine",
-        "model_checksums": model_checksums(),
+        "model_checksums": RUNTIME["checksums"],
         "modules": ["detection", "recognition"],
         "preprocessing": "pillow-exif-transpose-opencv-bgr-v1",
         "detector_size": detector_size_text(),
@@ -47,22 +49,14 @@ def capabilities():
 
 
 def providers():
-    configured = os.environ.get("FACE_ME_BRO_PROVIDERS", "")
-    if configured:
-        return [value for value in configured.split(",") if value]
-    return ["CPUExecutionProvider"]
+    return RUNTIME["providers"]
 
 
 def model_checksums():
-    configured = os.environ.get("FACE_ME_BRO_MODEL_CHECKSUMS_JSON", "{}")
-    try:
-        value = json.loads(configured)
-        if isinstance(value, dict) and value:
-            return value
-    except json.JSONDecodeError:
-        pass
-    model_root = os.environ.get("FACE_ME_BRO_MODEL_ROOT", "")
-    model_name = os.environ.get("FACE_ME_BRO_MODEL", "buffalo_l")
+    if RUNTIME["checksums"]:
+        return RUNTIME["checksums"]
+    model_root = RUNTIME["model_root"]
+    model_name = RUNTIME["model"]
     if not model_root:
         return {}
     manifest = Path(model_root) / "models" / model_name / "checksums.json"
@@ -74,12 +68,7 @@ def model_checksums():
 
 
 def detector_size():
-    configured = os.environ.get("FACE_ME_BRO_DET_SIZE", "640,640")
-    try:
-        width, height = (int(value.strip()) for value in configured.split(",", 1))
-        return width, height
-    except (ValueError, TypeError):
-        return 640, 640
+    return RUNTIME["detector_size"]
 
 
 def detector_size_text():
@@ -89,8 +78,10 @@ def detector_size_text():
 
 def error(message_id, code, message, retryable=False, detail=""):
     result = {
-        "type": "error",
+        "protocol_version": PROTOCOL_MAJOR,
+        "command": "error",
         "id": message_id,
+        "ok": False,
         "error": {"code": code, "message": message, "retryable": retryable},
     }
     if detail:
@@ -99,24 +90,23 @@ def error(message_id, code, message, retryable=False, detail=""):
 
 
 def handle(message):
-    message_type = message.get("type")
+    message_type = message.get("command")
     message_id = message.get("id", "")
     if message_type == "hello":
-        requested_major = message.get("protocol_major", PROTOCOL_MAJOR)
-        if requested_major != PROTOCOL_MAJOR:
+        requested_version = int(message.get("protocol_version", PROTOCOL_MAJOR) or 0)
+        if requested_version != PROTOCOL_MAJOR:
             error(message_id, "protocol_mismatch", "unsupported protocol major", False)
             return False
-        requested_minor = int(message.get("protocol_minor", PROTOCOL_MINOR) or 0)
         send({
-            "type": "hello_ack",
+            "protocol_version": PROTOCOL_MAJOR,
+            "command": "hello_ack",
             "id": message_id,
-            "protocol_major": PROTOCOL_MAJOR,
-            "protocol_minor": min(PROTOCOL_MINOR, requested_minor),
+            "ok": True,
             "capabilities": capabilities(),
         })
         return True
     if message_type == "analyze":
-        path = message.get("image_path", "")
+        path = message.get("path", "")
         if not path or not os.path.isfile(path):
             error(message_id, "missing_image", "image path does not exist", False)
             return True
@@ -161,28 +151,27 @@ def handle(message):
                 quality = quality_score(crop, cv2)
                 faces.append({
                     "face_index": index,
-                    "box": box,
+                    "box": {"left": box[0], "top": box[1], "right": box[2], "bottom": box[3]},
                     "detection_confidence": float(face.det_score),
                     "quality": quality,
-                    "embedding_base64": base64.b64encode(embedding.tobytes()).decode("ascii"),
-                    "embedding_dimension": int(embedding.shape[0]),
-                    "embedding_dtype": "float32",
-                    "normalized": True,
+                    "embedding": {"encoding": "base64", "dtype": "float32", "byte_order": "little",
+                                  "dimension": int(embedding.shape[0]), "normalized": True,
+                                  "data": base64.b64encode(embedding.tobytes()).decode("ascii")},
                 })
             send({
-                "type": "analysis_result",
+                "protocol_version": PROTOCOL_MAJOR,
+                "command": "analysis_result",
                 "id": message_id,
-                "pipeline_id": message.get("pipeline_id", ""),
+                "ok": True,
+                "model": message.get("model", {}),
                 "faces": faces,
-                "source_width": source_width,
-                "source_height": source_height,
-                "inference_width": source_width,
-                "inference_height": source_height,
+                "image": {"width": source_width, "height": source_height,
+                          "inference_width": source_width, "inference_height": source_height},
             })
         except Exception as exc:  # model providers expose varied exception types
             error(message_id, "analysis_failed", str(exc), True)
         return True
-    error(message_id, "unknown_message", "unknown message type", False)
+    error(message_id, "unknown_message", "unknown command", False)
     return True
 
 
@@ -220,8 +209,8 @@ def load_model():
     try:
         from insightface.app import FaceAnalysis  # type: ignore
 
-        model_kwargs = {"name": os.environ.get("FACE_ME_BRO_MODEL", "buffalo_l"), "providers": providers()}
-        model_root = os.environ.get("FACE_ME_BRO_MODEL_ROOT", "")
+        model_kwargs = {"name": RUNTIME["model"], "providers": providers()}
+        model_root = RUNTIME["model_root"]
         if model_root:
             model_kwargs["root"] = model_root
         MODEL = FaceAnalysis(**model_kwargs)
@@ -231,6 +220,28 @@ def load_model():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Face-Me-Bro InsightFace NDJSON worker")
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--model-root", default="")
+    parser.add_argument("--providers", required=True)
+    parser.add_argument("--model-checksums-json", default="{}")
+    parser.add_argument("--detector-config-json", default="{}")
+    parser.add_argument("--preprocessing-config-json", default="{}")
+    parser.add_argument("--modules", default="detection,recognition")
+    args = parser.parse_args()
+    RUNTIME["model"] = args.model
+    RUNTIME["model_root"] = args.model_root
+    RUNTIME["providers"] = [value for value in args.providers.split(",") if value]
+    try:
+        checksums = json.loads(args.model_checksums_json)
+        if isinstance(checksums, dict):
+            RUNTIME["checksums"] = checksums
+        detector = json.loads(args.detector_config_json)
+        size = detector.get("size") if isinstance(detector, dict) else None
+        if isinstance(size, (list, tuple)) and len(size) == 2:
+            RUNTIME["detector_size"] = (int(size[0]), int(size[1]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(f"invalid pipeline configuration: {exc}")
     load_model()
     for line in sys.stdin:
         try:

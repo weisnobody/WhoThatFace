@@ -67,11 +67,11 @@ func (s Store) RegisterPipeline(ctx context.Context, pipeline Pipeline) (string,
 // Persist stores one successful worker response. A no-face response is a
 // valid completed analysis and inserts zero rows into faces.
 func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response worker.Message) (string, error) {
-	if response.Type != "analysis_result" {
-		return "", fmt.Errorf("worker response type %q is not analysis_result", response.Type)
+	if response.Command != "analysis_result" || response.OK == nil || !*response.OK {
+		return "", fmt.Errorf("worker response command %q is not a successful analysis_result", response.Command)
 	}
-	if response.PipelineID != "" && response.PipelineID != pipelineID {
-		return "", fmt.Errorf("worker pipeline %q does not match requested pipeline %q", response.PipelineID, pipelineID)
+	if response.Model != nil && response.Model.PipelineID != "" && response.Model.PipelineID != pipelineID {
+		return "", fmt.Errorf("worker pipeline %q does not match requested pipeline %q", response.Model.PipelineID, pipelineID)
 	}
 	analysisID, err := id.NewUUIDv7()
 	if err != nil {
@@ -83,18 +83,22 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 		return "", err
 	}
 	defer tx.Rollback()
+	var width, height, inferenceWidth, inferenceHeight int
+	if response.Image != nil {
+		width, height = response.Image.Width, response.Image.Height
+		inferenceWidth, inferenceHeight = response.Image.InferenceWidth, response.Image.InferenceHeight
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO analyses (
 			id, asset_id, pipeline_id, status, source_width, source_height,
 			inference_width, inference_height, completed_at, created_at
 		) VALUES (?, ?, ?, 'completed', NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, 0), ?, ?)`,
-		analysisID, assetID, pipelineID, response.SourceWidth, response.SourceHeight,
-		response.InferenceWidth, response.InferenceHeight, now, now)
+		analysisID, assetID, pipelineID, width, height, inferenceWidth, inferenceHeight, now, now)
 	if err != nil {
 		return "", fmt.Errorf("persist analysis: %w", err)
 	}
 	for _, face := range response.Faces {
-		if face.Box[2] < face.Box[0] || face.Box[3] < face.Box[1] {
+		if face.Box.Right < face.Box.Left || face.Box.Bottom < face.Box.Top {
 			return "", fmt.Errorf("face %d has an invalid bounding box", face.FaceIndex)
 		}
 		embedding, err := encodeEmbedding(face)
@@ -111,9 +115,9 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 				box_bottom, detection_confidence, quality, embedding,
 				embedding_dimension, embedding_dtype, embedding_normalized, created_at
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			faceID, analysisID, face.FaceIndex, face.Box[0], face.Box[1], face.Box[2], face.Box[3],
-			face.DetectionConfidence, face.Quality, embedding, face.EmbeddingDimension,
-			face.EmbeddingDType, boolInt(face.Normalized), now)
+			faceID, analysisID, face.FaceIndex, face.Box.Left, face.Box.Top, face.Box.Right, face.Box.Bottom,
+			face.DetectionConfidence, face.Quality, embedding, embeddingDimension(face),
+			embeddingDType(face), boolInt(embeddingNormalized(face)), now)
 		if err != nil {
 			return "", fmt.Errorf("persist face %d: %w", face.FaceIndex, err)
 		}
@@ -122,6 +126,24 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 		return "", err
 	}
 	return analysisID, nil
+}
+
+func embeddingDimension(face worker.FaceResult) int {
+	if face.Embedding == nil {
+		return 0
+	}
+	return face.Embedding.Dimension
+}
+
+func embeddingDType(face worker.FaceResult) string {
+	if face.Embedding == nil {
+		return ""
+	}
+	return face.Embedding.DType
+}
+
+func embeddingNormalized(face worker.FaceResult) bool {
+	return face.Embedding != nil && face.Embedding.Normalized
 }
 
 func encodeEmbedding(face worker.FaceResult) ([]byte, error) {

@@ -1710,11 +1710,11 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 	if *pipelineID == "" {
 		return fmt.Errorf("worker requires --pipeline-id")
 	}
-	var modelFamily, provider, checksumsJSON string
+	var modelFamily, provider, checksumsJSON, detectorJSON, preprocessingJSON string
 	var dimension int
 	if err := application.DB.QueryRowContext(ctx, `
-		SELECT model_family, execution_provider, model_checksums_json, embedding_dimension
-		FROM pipelines WHERE id = ?`, *pipelineID).Scan(&modelFamily, &provider, &checksumsJSON, &dimension); err != nil {
+		SELECT model_family, execution_provider, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension
+		FROM pipelines WHERE id = ?`, *pipelineID).Scan(&modelFamily, &provider, &checksumsJSON, &detectorJSON, &preprocessingJSON, &dimension); err != nil {
 		return fmt.Errorf("load pipeline contract: %w", err)
 	}
 	var checksums map[string]string
@@ -1729,7 +1729,10 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 		EmbeddingDType:     "float32",
 		EmbeddingMetric:    "cosine",
 		Modules:            []string{"detection", "recognition"},
-	}, *workerScript)
+	}, *workerScript, "--model", modelFamily, "--model-root", application.Config.ModelRoot,
+		"--providers", provider, "--model-checksums-json", checksumsJSON,
+		"--detector-config-json", detectorJSON, "--preprocessing-config-json", preprocessingJSON,
+		"--modules", "detection,recognition")
 	if err := client.Start(ctx); err != nil {
 		return err
 	}
