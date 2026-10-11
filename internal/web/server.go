@@ -251,8 +251,9 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		s.render(w, map[string]any{"Title": personName, "Account": account, "Body": template.HTML(`<h1>` + template.HTMLEscapeString(personName) + `</h1><p>No collections are assigned to this account.</p>`)})
 		return
 	}
-	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0),
-		f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(cfr.reference, 0)
+	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(pa.width, a.source_width, 0), COALESCE(pa.height, a.source_height, 0),
+		f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
+		COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(cfr.reference, 0)
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
 		JOIN current_face_assignments ca ON ca.face_id = f.id
@@ -272,22 +273,74 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
+	type personCandidate struct {
+		PersonID, Name, Evidence string
+		Similarity, Margin       float64
+		Support                  int
+	}
 	type personFace struct {
 		FaceID, PathID, RelativePath string
 		Width, Height                int
 		Left, Top, Right, Bottom     float64
+		Quality, Detection           float64
+		State, PersonID              string
 		Reference                    bool
+		Candidates                   []personCandidate
 	}
 	var faces []personFace
 	referenceCount := 0
 	for rows.Next() {
 		var face personFace
 		var reference int
-		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &reference); err != nil {
+		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &face.State, &face.PersonID, &reference); err != nil {
 			http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 			return
 		}
 		face.Reference = reference == 1
+		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `
+			SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id),
+			       rc.similarity, rc.margin, rc.support_count, rc.evidence
+			FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id
+			WHERE rc.face_id = ? AND rc.created_at = (SELECT MAX(created_at) FROM recognition_candidates WHERE face_id = ?)
+			ORDER BY rc.rank LIMIT 5`, face.FaceID, face.FaceID)
+		if candidateErr != nil {
+			http.Error(w, "person candidate lookup failed", http.StatusInternalServerError)
+			return
+		}
+		for candidateRows.Next() {
+			var candidate personCandidate
+			if err := candidateRows.Scan(&candidate.PersonID, &candidate.Name, &candidate.Similarity, &candidate.Margin, &candidate.Support, &candidate.Evidence); err != nil {
+				candidateRows.Close()
+				http.Error(w, "person candidate lookup failed", http.StatusInternalServerError)
+				return
+			}
+			face.Candidates = append(face.Candidates, candidate)
+		}
+		if err := candidateRows.Err(); err != nil {
+			candidateRows.Close()
+			http.Error(w, "person candidate lookup failed", http.StatusInternalServerError)
+			return
+		}
+		candidateRows.Close()
+		foundCurrent := false
+		for _, candidate := range face.Candidates {
+			if candidate.PersonID == face.PersonID {
+				foundCurrent = true
+				break
+			}
+		}
+		if !foundCurrent && face.PersonID != "" {
+			var candidate personCandidate
+			if err := s.db.QueryRowContext(r.Context(), `
+				SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id),
+				       rc.similarity, rc.margin, rc.support_count, rc.evidence
+				FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id
+				WHERE rc.face_id = ? AND rc.person_id = ?
+				ORDER BY rc.created_at DESC, rc.rank LIMIT 1`, face.FaceID, face.PersonID).
+				Scan(&candidate.PersonID, &candidate.Name, &candidate.Similarity, &candidate.Margin, &candidate.Support, &candidate.Evidence); err == nil {
+				face.Candidates = append([]personCandidate{candidate}, face.Candidates[:min(4, len(face.Candidates))]...)
+			}
+		}
 		if face.Reference {
 			referenceCount++
 		}
@@ -299,7 +352,25 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body := strings.Builder{}
-	body.WriteString(`<style>.person-header{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.person-grid{display:flex;flex-wrap:wrap;gap:18px}.person-card{width:min(420px,45vw);border:1px solid #ccc;padding:10px}.person-viewer{position:relative;display:inline-block;max-width:100%}.person-viewer img{display:block;max-width:100%;max-height:55vh}.person-box{position:absolute;border:2px solid #d00;background:rgba(204,0,0,.15);pointer-events:none}.person-box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.person-path{margin-top:8px;overflow-wrap:anywhere}.person-actions{display:flex;justify-content:space-between;gap:8px;margin-top:8px}.person-actions button{padding:.4rem}.person-empty{margin-top:1rem}</style>`)
+	peopleRows, peopleErr := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8), id) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8), id)), id`)
+	if peopleErr != nil {
+		http.Error(w, "people lookup failed", http.StatusInternalServerError)
+		return
+	}
+	type personOption struct{ ID, Name string }
+	var people []personOption
+	for peopleRows.Next() {
+		var option personOption
+		if err := peopleRows.Scan(&option.ID, &option.Name); err != nil {
+			peopleRows.Close()
+			http.Error(w, "people lookup failed", http.StatusInternalServerError)
+			return
+		}
+		people = append(people, option)
+	}
+	peopleRows.Close()
+
+	body.WriteString(`<style>.person-header{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.person-grid{display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start}.person-card{box-sizing:border-box;width:min(420px,45vw);min-width:280px;border:1px solid #ccc;border-radius:4px;padding:10px;background:#fff;overflow:hidden}.person-viewer{position:relative;display:inline-block;vertical-align:top;max-width:100%;background:#f5f5f5}.person-viewer img{display:block;width:auto;max-width:100%;max-height:55vh;height:auto;object-fit:contain}.person-box{position:absolute;box-sizing:border-box;border:2px solid #d00;background:rgba(204,0,0,.15);pointer-events:none}.person-box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.person-path{margin-top:8px;overflow-wrap:anywhere;font-size:.9rem}.person-status{margin-top:8px;padding:6px;background:#f6f6f6;border-radius:3px}.person-status strong{font-weight:600}.person-scores{margin-top:8px;font-size:.9rem}.person-scores table{width:100%;border-collapse:collapse}.person-scores th,.person-scores td{padding:3px 4px;text-align:left;border-bottom:1px solid #eee}.person-scores .current{font-weight:600;background:#fff8d6}.person-actions{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px}.person-actions button{padding:.4rem}.person-actions .right{margin-left:auto}.person-assignment{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.person-assignment select{min-width:0;flex:1}.person-empty{margin-top:1rem}</style>`)
 	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><h1>` + template.HTMLEscapeString(personName) + ` (` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references)</h1></div>`)
 	body.WriteString(`<div class="person-grid">`)
 	canModify := account.Role != auth.Viewer
@@ -308,9 +379,33 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		if face.Reference {
 			boxClass += " reference"
 		}
-		body.WriteString(`<article class="person-card" id="face-` + template.HTMLEscapeString(face.FaceID) + `"><div class="person-viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(face.FaceID) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="person-path">` + template.HTMLEscapeString(face.RelativePath) + `</div>`)
+		body.WriteString(`<article class="person-card" id="face-` + template.HTMLEscapeString(face.FaceID) + `"><div class="person-viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(face.FaceID) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="person-path">` + template.HTMLEscapeString(face.RelativePath) + `</div><div class="person-status"><strong>Assignment:</strong> ` + template.HTMLEscapeString(face.State) + `; <strong>Face quality:</strong> ` + fmt.Sprintf("%.3f", face.Quality) + `; <strong>Detection:</strong> ` + fmt.Sprintf("%.3f", face.Detection) + `</div>`)
+		if len(face.Candidates) > 0 {
+			body.WriteString(`<div class="person-scores"><strong>Model candidates</strong><table><tr><th>Person</th><th>Similarity</th><th>Margin</th><th>Support</th><th>Evidence</th></tr>`)
+			for _, candidate := range face.Candidates {
+				class := ""
+				if candidate.PersonID == face.PersonID {
+					class = ` class="current"`
+				}
+				body.WriteString(`<tr` + class + `><td>` + template.HTMLEscapeString(candidate.Name) + `</td><td>` + fmt.Sprintf("%.3f", candidate.Similarity) + `</td><td>` + fmt.Sprintf("%.3f", candidate.Margin) + `</td><td>` + fmt.Sprint(candidate.Support) + `</td><td>` + template.HTMLEscapeString(candidate.Evidence) + `</td></tr>`)
+			}
+			body.WriteString(`</table></div>`)
+		}
 		if canModify {
-			body.WriteString(`<div class="person-actions"><button type="button" data-action="remove" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Remove assignment</button><button type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-reference="` + fmt.Sprint(face.Reference) + `">Make ` + map[bool]string{true: "evaluation", false: "reference"}[face.Reference] + `</button></div>`)
+			body.WriteString(`<div class="person-assignment"><select data-assignment-person="` + template.HTMLEscapeString(face.FaceID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+			for _, option := range people {
+				selected := ""
+				if option.ID == face.PersonID {
+					selected = ` selected`
+				}
+				body.WriteString(`<option value="` + template.HTMLEscapeString(option.ID) + `"` + selected + `>` + template.HTMLEscapeString(option.Name) + `</option>`)
+			}
+			body.WriteString(`</select><select data-assignment-state="` + template.HTMLEscapeString(face.FaceID) + `"><option value="assigned-user"` + selectedAttr(face.State, string(review.AssignedUser)) + `>Assigned user</option><option value="assigned-system"` + selectedAttr(face.State, string(review.AssignedSystem)) + `>Assigned system</option><option value="provisional"` + selectedAttr(face.State, string(review.Provisional)) + `>Provisional</option><option value="unknown"` + selectedAttr(face.State, string(review.Unknown)) + `>Unknown</option><option value="ambiguous"` + selectedAttr(face.State, string(review.Ambiguous)) + `>Ambiguous</option></select><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Save assignment</button></div>`)
+			body.WriteString(`<div class="person-actions"><button type="button" data-action="remove" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Remove assignment</button>`)
+			if face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser) {
+				body.WriteString(`<button class="right" type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-reference="` + fmt.Sprint(face.Reference) + `">Make ` + map[bool]string{true: "evaluation", false: "reference"}[face.Reference] + `</button>`)
+			}
+			body.WriteString(`</div>`)
 		}
 		body.WriteString(`</article>`)
 	}
@@ -343,6 +438,19 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
     button.onclick = () => send(button.dataset.faceId,
       '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment',
       {person_id: '', state: 'unassigned'});
+  });
+  document.querySelectorAll('[data-action="assign"]').forEach((button) => {
+    button.onclick = () => {
+      const faceID = button.dataset.faceId;
+      const person = document.querySelector('[data-assignment-person="' + CSS.escape(faceID) + '"]').value;
+      let state = document.querySelector('[data-assignment-state="' + CSS.escape(faceID) + '"]').value;
+      const payload = {person_id: person, state: state};
+      if (person === '__ambiguous__') { payload.person_id = ''; payload.state = 'ambiguous'; }
+      if (!person && (state === 'assigned-user' || state === 'assigned-system' || state === 'provisional')) {
+        state = 'unknown'; payload.state = state;
+      }
+      send(faceID, '/api/faces/' + encodeURIComponent(faceID) + '/assignment', payload);
+    };
   });
   document.querySelectorAll('[data-action="role"]').forEach((button) => {
     button.onclick = () => send(button.dataset.faceId,
@@ -500,6 +608,20 @@ func percent(value float64, denominator int) string {
 		return "0"
 	}
 	return fmt.Sprintf("%.3f", value/float64(denominator)*100)
+}
+
+func selectedAttr(value, expected string) string {
+	if value == expected {
+		return ` selected`
+	}
+	return ""
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func csrfCookie(r *http.Request) string {
