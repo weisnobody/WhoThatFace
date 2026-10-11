@@ -24,6 +24,7 @@ type Options struct {
 	ReviewMode            bool
 	IncludeAssignedSystem bool
 	IncludeAssignedUser   bool
+	AssignmentStates      []string
 }
 
 type Photo struct {
@@ -79,6 +80,14 @@ func (s Store) Photos(ctx context.Context, options Options) ([]Photo, error) {
 	}
 	if options.PersonID != "" {
 		add(`EXISTS (SELECT 1 FROM faces pf JOIN analyses pan ON pan.id = pf.analysis_id JOIN current_face_assignments pca ON pca.face_id = pf.id WHERE pan.asset_id = pp.asset_id AND pca.person_id = ?)`, options.PersonID)
+	}
+	if len(options.AssignmentStates) > 0 {
+		placeholders := make([]string, len(options.AssignmentStates))
+		for index, state := range options.AssignmentStates {
+			placeholders[index] = "?"
+			args = append(args, state)
+		}
+		query.WriteString(` AND EXISTS (SELECT 1 FROM faces sf JOIN analyses san ON san.id = sf.analysis_id LEFT JOIN current_face_assignments sa ON sa.face_id = sf.id WHERE san.asset_id = pp.asset_id AND COALESCE(sa.state, 'unassigned') IN (` + strings.Join(placeholders, ",") + `))`)
 	}
 	if !options.IncludeDontTrack {
 		query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces df JOIN analyses dan ON dan.id = df.analysis_id JOIN current_face_dispositions d ON d.face_id = df.id WHERE dan.asset_id = pp.asset_id AND d.disposition = 'dont-track')`)

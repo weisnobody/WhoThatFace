@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
+	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
 )
@@ -23,6 +25,28 @@ type Server struct {
 	auth      auth.Store
 	db        *sql.DB
 	templates *template.Template
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func splitCSV(value string) []string {
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
@@ -61,12 +85,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /review/photos", s.reviewPhotos)
 	mux.HandleFunc("GET /review/people", s.reviewPeople)
 	mux.HandleFunc("GET /review/people/{personID}", s.reviewPerson)
+	mux.HandleFunc("POST /api/people", s.createPerson)
+	mux.HandleFunc("POST /api/people/{personID}", s.renamePerson)
+	mux.HandleFunc("GET /api/people/{personID}/references", s.personReferences)
 	mux.HandleFunc("GET /review/clusters", s.reviewClusters)
 	mux.HandleFunc("GET /review/clusters/{clusterID}", s.reviewCluster)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/review", s.reviewClusterAPI)
 	mux.HandleFunc("POST /api/audit/{eventID}/undo", s.undoAudit)
 	mux.HandleFunc("GET /admin/accounts", s.adminAccounts)
 	mux.HandleFunc("GET /admin/collections", s.adminCollections)
+	mux.HandleFunc("POST /api/admin/accounts", s.adminCreateAccount)
+	mux.HandleFunc("POST /api/admin/accounts/{accountID}/password", s.adminResetPassword)
+	mux.HandleFunc("POST /api/admin/accounts/{accountID}/disabled", s.adminDisableAccount)
+	mux.HandleFunc("POST /api/admin/permissions", s.adminPermission)
 	return securityHeaders(mux)
 }
 
@@ -587,6 +618,103 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	s.render(w, map[string]any{"Title": personName, "Account": account, "PageStyle": pageStyle, "Body": template.HTML(body.String())})
 }
 
+func (s *Server) createPerson(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if account.Role == auth.Viewer || !validCSRFApi(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var input struct {
+		Name        string `json:"name"`
+		Provisional bool   `json:"provisional"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil || strings.TrimSpace(input.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	personID, err := id.NewUUIDv7()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.ExecContext(r.Context(), `INSERT INTO people (id, name, is_provisional, dont_track, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)`, personID, strings.TrimSpace(input.Name), boolInt(input.Provisional), now, now); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, Action: "person-create", EntityType: "person", EntityID: personID, New: map[string]any{"name": input.Name}})
+	writeJSON(w, http.StatusCreated, map[string]string{"id": personID})
+}
+
+func (s *Server) renamePerson(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if account.Role == auth.Viewer || !validCSRFApi(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var input struct {
+		Name string `json:"name"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil || strings.TrimSpace(input.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	result, err := s.db.ExecContext(r.Context(), `UPDATE people SET name = ?, is_provisional = 0, updated_at = ? WHERE id = ?`, strings.TrimSpace(input.Name), time.Now().UTC().Format(time.RFC3339Nano), r.PathValue("personID"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	_ = audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, Action: "person-rename", EntityType: "person", EntityID: r.PathValue("personID"), New: map[string]any{"name": input.Name}})
+	writeJSON(w, http.StatusOK, map[string]string{"id": r.PathValue("personID"), "name": strings.TrimSpace(input.Name)})
+}
+
+func (s *Server) personReferences(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	personID := r.PathValue("personID")
+	var exists int
+	if err := s.db.QueryRowContext(r.Context(), `SELECT 1 FROM people WHERE id = ?`, personID).Scan(&exists); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT rr.id, rr.face_id, rr.is_current, COALESCE(rr.recommendation_score, 0), COALESCE(rr.quality, 0), COALESCE(rr.detection_confidence, 0), COALESCE(rr.similarity, 0), COALESCE(rr.margin, 0), COALESCE(rr.support_count, 0), COALESCE(rr.purity, 0), COALESCE(rr.connectivity, 0), COALESCE(cfr.reference, 0) FROM reference_recommendations rr LEFT JOIN current_face_references cfr ON cfr.face_id = rr.face_id AND cfr.person_id = rr.person_id WHERE rr.person_id = ? ORDER BY rr.is_current DESC, rr.recommendation_score DESC LIMIT 20`, personID)
+	if err != nil {
+		http.Error(w, "reference lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	type item struct {
+		RecommendationID, FaceID                                            string
+		Current, Reference                                                  bool
+		Score, Quality, Detection, Similarity, Margin, Purity, Connectivity float64
+		Support                                                             int
+	}
+	var result []item
+	for rows.Next() {
+		var value item
+		var current, reference int
+		if err := rows.Scan(&value.RecommendationID, &value.FaceID, &current, &value.Score, &value.Quality, &value.Detection, &value.Similarity, &value.Margin, &value.Support, &value.Purity, &value.Connectivity, &reference); err != nil {
+			http.Error(w, "reference lookup failed", http.StatusInternalServerError)
+			return
+		}
+		value.Current, value.Reference = current == 1, reference == 1
+		result = append(result, value)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"person_id": personID, "recommendations": result, "account_id": account.ID})
+}
+
 func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	_, _ = w.Write([]byte(`(function () {
@@ -874,9 +1002,13 @@ func (s *Server) reviewClusterAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clusterID := r.PathValue("clusterID")
-	var collectionID string
-	if err := s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id FROM cluster_memberships cm JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE cm.cluster_id = ? LIMIT 1`, clusterID).Scan(&collectionID); err != nil {
+	var collectionID, runStatus string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id, cr.status FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE cm.cluster_id = ? LIMIT 1`, clusterID).Scan(&collectionID, &runStatus); err != nil {
 		http.Error(w, "cluster not found", http.StatusNotFound)
+		return
+	}
+	if runStatus == "superseded" {
+		http.Error(w, "historical cluster runs are read-only", http.StatusConflict)
 		return
 	}
 	allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, true, false)
@@ -931,6 +1063,7 @@ func (s *Server) photos(w http.ResponseWriter, r *http.Request) {
 		ReviewMode:            query.Get("review_mode") == "true",
 		IncludeAssignedSystem: query.Get("include_assigned_system") == "true",
 		IncludeAssignedUser:   query.Get("include_assigned_user") == "true",
+		AssignmentStates:      splitCSV(query.Get("states")),
 	}
 	result, err := search.NewStore(s.db).Photos(r.Context(), options)
 	if err != nil {
@@ -1180,6 +1313,108 @@ func (s *Server) adminCollections(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</table><p>Use the collection CLI for creation and lifecycle changes.</p>`)
 	s.render(w, map[string]any{"Title": "Collections", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) adminActor(w http.ResponseWriter, r *http.Request, managerOK bool) (auth.Account, bool) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return auth.Account{}, false
+	}
+	if account.Role != auth.SystemAdmin && (!managerOK || account.Role != auth.CollectionManager) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return auth.Account{}, false
+	}
+	if !validCSRFApi(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return auth.Account{}, false
+	}
+	return account, true
+}
+
+func (s *Server) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	var input struct {
+		Username   string    `json:"username"`
+		Password   string    `json:"password"`
+		Role       auth.Role `json:"role"`
+		MustChange bool      `json:"must_change"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil {
+		http.Error(w, "invalid account", http.StatusBadRequest)
+		return
+	}
+	if actor.Role == auth.CollectionManager && (input.Role == auth.SystemAdmin || input.Role == auth.CollectionManager) {
+		http.Error(w, "collection managers may only create reviewer or viewer accounts", http.StatusForbidden)
+		return
+	}
+	account, err := s.auth.CreateAccount(r.Context(), input.Username, input.Password, input.Role, input.MustChange)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": account.ID, "username": account.Username, "role": account.Role})
+}
+
+func (s *Server) adminResetPassword(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.adminActor(w, r, false); !ok {
+		return
+	}
+	var input struct {
+		Password   string `json:"password"`
+		MustChange bool   `json:"must_change"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil {
+		http.Error(w, "invalid password", http.StatusBadRequest)
+		return
+	}
+	if err := s.auth.ResetPassword(r.Context(), r.PathValue("accountID"), input.Password, input.MustChange); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"reset": true})
+}
+
+func (s *Server) adminDisableAccount(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.adminActor(w, r, false); !ok {
+		return
+	}
+	var input struct {
+		Disabled bool `json:"disabled"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil {
+		http.Error(w, "invalid account state", http.StatusBadRequest)
+		return
+	}
+	if err := s.auth.SetDisabled(r.Context(), r.PathValue("accountID"), input.Disabled); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"disabled": input.Disabled})
+}
+
+func (s *Server) adminPermission(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.adminActor(w, r, false); !ok {
+		return
+	}
+	var input struct {
+		AccountID    string `json:"account_id"`
+		CollectionID string `json:"collection_id"`
+		View         bool   `json:"view"`
+		Modify       bool   `json:"modify"`
+		Undo         bool   `json:"undo"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil {
+		http.Error(w, "invalid permission", http.StatusBadRequest)
+		return
+	}
+	if err := s.auth.SetCollectionPermission(r.Context(), input.AccountID, input.CollectionID, input.View, input.Modify, input.Undo); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"saved": true})
 }
 
 func (s *Server) requireAccount(w http.ResponseWriter, r *http.Request) (auth.Account, bool) {

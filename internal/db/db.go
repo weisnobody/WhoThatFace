@@ -54,6 +54,9 @@ func Backup(filename, backupDir string) (string, error) {
 // Restore replaces a database from a backup. Callers must ensure no database
 // connection is open; the CLI performs this operation before app startup.
 func Restore(filename, backup string) error {
+	if err := validateBackup(backup); err != nil {
+		return err
+	}
 	input, err := os.Open(backup)
 	if err != nil {
 		return fmt.Errorf("open restore source: %w", err)
@@ -83,6 +86,33 @@ func Restore(filename, backup string) error {
 	if err := os.Rename(temporary, filename); err != nil {
 		_ = os.Remove(temporary)
 		return err
+	}
+	return nil
+}
+
+func validateBackup(filename string) error {
+	dsn, err := sqliteDSN(filename, true)
+	if err != nil {
+		return err
+	}
+	database, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open restore validation database: %w", err)
+	}
+	defer database.Close()
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		return fmt.Errorf("restore is not a face-me-bro database: %w", err)
+	}
+	if count == 0 {
+		return fmt.Errorf("restore database has no applied schema migrations")
+	}
+	var version string
+	if err := database.QueryRow(`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version); err != nil {
+		return err
+	}
+	if version == "" {
+		return fmt.Errorf("restore database has an invalid schema version")
 	}
 	return nil
 }

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/pjg/face_me_bro/internal/analysis"
@@ -281,7 +282,7 @@ func purgeCommand(ctx context.Context, application *app.App, args []string, json
 	defer tx.Rollback()
 	for _, statement := range []string{
 		`DELETE FROM current_face_references`, `DELETE FROM reference_selection_events`,
-		`DELETE FROM reference_recommendations`, `DELETE FROM current_face_dispositions`, `DELETE FROM face_disposition_events`,
+		`DELETE FROM reference_recommendation_decisions`, `DELETE FROM reference_recommendations`, `DELETE FROM current_face_dispositions`, `DELETE FROM face_disposition_events`,
 		`DELETE FROM current_face_assignments`, `DELETE FROM assignment_events`, `DELETE FROM cluster_memberships`,
 		`DELETE FROM cluster_review_events`, `DELETE FROM clusters`, `DELETE FROM clustering_runs`,
 		`DELETE FROM face_correspondences`, `DELETE FROM faces`, `DELETE FROM analyses`, `DELETE FROM job_items`, `DELETE FROM jobs`,
@@ -293,6 +294,7 @@ func purgeCommand(ctx context.Context, application *app.App, args []string, json
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "derived-purge", EntityType: "database", EntityID: application.Config.DatabasePath, New: map[string]any{"confirmed": true}})
 	if jsonOutput {
 		return writeJSON(stdout, envelope("purge derived", map[string]bool{"purged": true}))
 	}
@@ -324,7 +326,7 @@ func exportCommand(ctx context.Context, application *app.App, args []string, jso
 		Application   string   `json:"application"`
 		Records       []record `json:"records"`
 	}{FormatVersion: "1", ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Application: "face-me-bro"}
-	for _, table := range []string{"collections", "photo_assets", "photo_paths", "people", "current_face_assignments", "current_face_dispositions", "current_face_references", "clustering_runs", "clusters"} {
+	for _, table := range []string{"collections", "photo_assets", "photo_paths", "pipelines", "analyses", "faces", "face_correspondences", "people", "person_state_events", "assignment_events", "current_face_assignments", "face_disposition_events", "current_face_dispositions", "reference_recommendations", "reference_recommendation_decisions", "reference_selection_events", "current_face_references", "clustering_runs", "clusters", "cluster_memberships", "cluster_review_events", "jobs", "job_items", "scan_runs", "scan_items", "accounts", "collection_permissions", "audit_events"} {
 		rows, err := application.DB.QueryContext(ctx, "SELECT * FROM "+table)
 		if err != nil {
 			return err
@@ -1463,11 +1465,15 @@ func searchCommand(ctx context.Context, application *app.App, args []string, jso
 	reviewMode := flags.Bool("review-mode", false, "show faces needing review; excludes assigned faces by default")
 	includeAssignedSystem := flags.Bool("include-assigned-system", false, "include system-assigned faces in review mode")
 	includeAssignedUser := flags.Bool("include-assigned-user", false, "include user-assigned faces in review mode")
+	states := flags.String("states", "", "comma-separated assignment states")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	options.PersonID, options.RelativePrefix, options.CaptureDateFrom, options.CaptureDateUntil, options.IncludeProvisional = *person, *directory, *from, *until, *includeProvisional
 	options.ReviewMode, options.IncludeAssignedSystem, options.IncludeAssignedUser = *reviewMode, *includeAssignedSystem, *includeAssignedUser
+	if *states != "" {
+		options.AssignmentStates = strings.Split(*states, ",")
+	}
 	result, err := search.NewStore(application.DB).Photos(ctx, options)
 	if err != nil {
 		return err
