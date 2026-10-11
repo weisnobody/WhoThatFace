@@ -81,7 +81,7 @@ func (s Store) ReviewCluster(ctx context.Context, clusterID string, defaultPerso
 		}
 	}
 	if defaultPersonID != "" {
-		rows, err := s.db.QueryContext(ctx, `SELECT cm.face_id FROM cluster_memberships cm LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id WHERE cm.cluster_id = ? AND ca.face_id IS NULL`, clusterID)
+		rows, err := s.db.QueryContext(ctx, `SELECT cm.face_id FROM cluster_memberships cm LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id WHERE cm.cluster_id = ? AND (ca.face_id IS NULL OR ca.state = 'unassigned')`, clusterID)
 		if err != nil {
 			return err
 		}

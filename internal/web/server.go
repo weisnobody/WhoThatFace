@@ -54,6 +54,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/photos", s.photos)
 	mux.HandleFunc("GET /api/photos/{pathID}", s.photo)
 	mux.HandleFunc("GET /static/person.js", s.personScript)
+	mux.HandleFunc("GET /static/cluster.js", s.clusterScript)
 	mux.HandleFunc("POST /api/faces/{faceID}/assignment", s.assignFace)
 	mux.HandleFunc("POST /api/faces/{faceID}/reference", s.referenceFace)
 	mux.HandleFunc("GET /", s.dashboard)
@@ -169,7 +170,7 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
-	result, err := search.NewStore(s.db).Photos(r.Context(), search.Options{AllowedCollectionIDs: allowed, CollectionID: query.Get("collection_id"), RelativePrefix: query.Get("directory"), IncludeProvisional: query.Get("include_provisional") == "true", IncludeDontTrack: query.Get("include_dont_track") == "true"})
+	result, err := search.NewStore(s.db).Photos(r.Context(), search.Options{AllowedCollectionIDs: allowed, CollectionID: query.Get("collection_id"), RelativePrefix: query.Get("directory"), ReviewMode: true, IncludeAssignedSystem: query.Get("include_assigned_system") == "true", IncludeAssignedUser: query.Get("include_assigned_user") == "true", IncludeDontTrack: query.Get("include_dont_track") == "true"})
 	if err != nil {
 		http.Error(w, "search failed", http.StatusInternalServerError)
 		return
@@ -701,10 +702,28 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	peopleRows, err := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8))), id`)
+	if err != nil {
+		http.Error(w, "people lookup failed", http.StatusInternalServerError)
+		return
+	}
+	type personOption struct{ ID, Name string }
+	var people []personOption
+	for peopleRows.Next() {
+		var person personOption
+		if err := peopleRows.Scan(&person.ID, &person.Name); err != nil {
+			peopleRows.Close()
+			http.Error(w, "people lookup failed", http.StatusInternalServerError)
+			return
+		}
+		people = append(people, person)
+	}
+	peopleRows.Close()
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT cm.face_id, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''),
 		       COALESCE(pp.id, ''), COALESCE(pa.width, 0), COALESCE(pa.height, 0),
-		       f.box_left, f.box_top, f.box_right, f.box_bottom
+		       f.box_left, f.box_top, f.box_right, f.box_bottom,
+		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
 		FROM cluster_memberships cm
 		JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id
 		JOIN photo_assets pa ON pa.id = a.asset_id
@@ -717,8 +736,9 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	var body strings.Builder
-	body.WriteString(`<style>.cluster-face{display:inline-block;vertical-align:top;width:24rem;margin:1rem;padding:1rem;border:4px solid}.photo-frame{position:relative;display:inline-block;max-width:22rem}.photo-frame img{display:block;max-width:22rem;max-height:18rem}.face-box{position:absolute;border:3px solid #d00;box-sizing:border-box}.candidate{font-size:.9rem}</style>`)
-	body.WriteString(`<h1>Cluster ` + template.HTMLEscapeString(clusterID) + `</h1>`)
+	body.WriteString(`<style>.cluster-grid{display:flex;flex-wrap:wrap;gap:18px}.cluster-face{width:min(420px,45vw);border:4px solid;padding:10px}.photo-frame{position:relative;display:inline-block;max-width:100%}.photo-frame img{max-width:100%;max-height:55vh;display:block}.face-box{position:absolute;border:2px solid #f00;box-sizing:border-box;pointer-events:none}.cluster-face select{max-width:100%}.candidate{font-size:.9rem;margin-top:6px}.cluster-controls{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}</style>`)
+	body.WriteString(`<div id="cluster-page" data-cluster-id="` + template.HTMLEscapeString(clusterID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-version="` + fmt.Sprint(reviewVersion) + `">`)
+	body.WriteString(`<h1>Cluster ` + template.HTMLEscapeString(idSuffix(clusterID)) + `</h1>`)
 	body.WriteString(`<p>Review status: ` + template.HTMLEscapeString(reviewStatus) + `; version ` + fmt.Sprint(reviewVersion) + `; run: ` + template.HTMLEscapeString(runStatus) + `</p>`)
 	if runStatus == "superseded" {
 		body.WriteString(`<p class="error">This is a historical clustering run. A newer run is active`)
@@ -727,17 +747,30 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		}
 		body.WriteString(`. Review changes are still recorded against this historical cluster.</p>`)
 	}
-	body.WriteString(`<form method="post" action="/api/clusters/` + template.HTMLEscapeString(clusterID) + `/review"><input type="hidden" name="csrf" value="` + template.HTMLEscapeString(csrfCookie(r)) + `"><input type="hidden" name="expected_version" value="` + fmt.Sprint(reviewVersion) + `"><table><tr><th>Face</th><th>State</th><th>Person</th><th>Candidate evidence</th></tr>`)
+	body.WriteString(`<div class="cluster-controls"><label>Default person <select id="default-person"><option value="">No default</option>`)
+	for _, person := range people {
+		body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</option>`)
+	}
+	body.WriteString(`</select></label> <label>Status <select id="cluster-status"><option>in-progress</option><option>partially-reviewed</option><option>reviewed</option><option>needs-review</option></select></label> <label>Note <input id="cluster-note" size="45"></label> <button id="save-cluster" type="button">Save review</button></div><p id="cluster-message"></p><div class="cluster-grid">`)
 	for rows.Next() {
 		var faceID, state, personID, pathID string
 		var width, height int
-		var left, top, right, bottom float64
-		if err := rows.Scan(&faceID, &state, &personID, &pathID, &width, &height, &left, &top, &right, &bottom); err != nil {
+		var left, top, right, bottom, quality, detection float64
+		if err := rows.Scan(&faceID, &state, &personID, &pathID, &width, &height, &left, &top, &right, &bottom, &quality, &detection); err != nil {
 			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
 		color := faceStateColor(state)
-		body.WriteString(`<tr><td><div class="cluster-face" style="border-color:` + color + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="` + template.HTMLEscapeString(faceID) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div></div><br>` + template.HTMLEscapeString(faceID) + `</td><td>` + template.HTMLEscapeString(state) + `</td><td>` + template.HTMLEscapeString(personID) + `</td><td class="candidate">`)
+		body.WriteString(`<article class="cluster-face" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-original-state="` + template.HTMLEscapeString(state) + `" style="border-color:` + color + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="face ` + template.HTMLEscapeString(idSuffix(faceID)) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div><div>Face ` + template.HTMLEscapeString(idSuffix(faceID)) + ` · ` + template.HTMLEscapeString(state) + ` · Quality ` + formatScore(quality) + `% · Detection ` + formatScore(detection) + `%</div><label>Person <select class="face-person"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+		for _, person := range people {
+			selected := selectedAttr(person.ID, personID)
+			body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selected + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
+		}
+		body.WriteString(`</select></label> <label>State <select class="face-state">`)
+		for _, option := range []string{"unassigned", "unknown", "ambiguous", "assigned-user"} {
+			body.WriteString(`<option value="` + option + `"` + selectedAttr(option, state) + `>` + option + `</option>`)
+		}
+		body.WriteString(`</select></label> <label>Disposition <select class="face-disposition"><option value="">None</option><option value="dont-track">Don't track</option><option value="false-detection">False detection</option><option value="incorrect-assignment">Incorrect assignment</option></select></label><div class="candidate">`)
 		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? ORDER BY rc.created_at DESC, rc.rank LIMIT 5`, faceID)
 		if candidateErr == nil {
 			for candidateRows.Next() {
@@ -750,10 +783,29 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 			}
 			candidateRows.Close()
 		}
-		body.WriteString(`</td></tr>`)
+		body.WriteString(`</div></article>`)
 	}
-	body.WriteString(`</table><p>Use the authenticated cluster review API to submit assignments, unknown/ambiguous states, false-detection or don't-track dispositions. Saving must include the displayed review version.</p></form>`)
+	body.WriteString(`</div><p>Green means user-assigned, yellow means the selected/default person is provisional or system-assigned, and red means the face needs attention. Save may be used before every face is assigned.</p></div><script src="/static/cluster.js" defer></script>`)
 	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) clusterScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write([]byte(`(function () {
+  const page = document.getElementById('cluster-page'); if (!page) return;
+  const message = document.getElementById('cluster-message');
+  function stateFor(card) { const person = card.querySelector('.face-person').value; if (person && person !== '__ambiguous__') return 'assigned-user'; if (person === '__ambiguous__') return 'ambiguous'; return card.querySelector('.face-state').value; }
+  function refresh(card) { const state = stateFor(card); card.style.borderColor = state === 'assigned-user' ? '#2a9d50' : (state === 'unknown' || state === 'ambiguous' ? '#c62828' : '#d6a800'); }
+  document.querySelectorAll('.cluster-face').forEach((card) => { card.querySelector('.face-person').addEventListener('change', () => refresh(card)); refresh(card); });
+  document.getElementById('save-cluster').onclick = async () => {
+    const decisions = Array.from(document.querySelectorAll('.cluster-face')).map((card) => { const person = card.querySelector('.face-person').value; const disposition = card.querySelector('.face-disposition').value; const state = stateFor(card); return {face_id: card.dataset.faceId, person_id: person === '__ambiguous__' ? '' : person, state: state, disposition: disposition, original_state: card.dataset.originalState}; }).filter((decision) => decision.person_id || decision.disposition || decision.state !== decision.original_state);
+    const payload = {default_person_id: document.getElementById('default-person').value, status: document.getElementById('cluster-status').value, note: document.getElementById('cluster-note').value, expected_version: Number(page.dataset.version), decisions: decisions};
+    const response = await fetch('/api/clusters/' + encodeURIComponent(page.dataset.clusterId) + '/review', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':page.dataset.csrf}, body:JSON.stringify(payload)});
+    if (!response.ok) { message.textContent = await response.text(); message.className = 'error'; return; }
+    message.textContent = 'Review saved.'; location.reload();
+  };
+})();
+`))
 }
 
 func faceStateColor(state string) string {
@@ -869,13 +921,16 @@ func (s *Server) photos(w http.ResponseWriter, r *http.Request) {
 		AllowedCollectionIDs: allowed,
 		CollectionID:         query.Get("collection_id"), PersonID: query.Get("person_id"),
 		RelativePrefix: query.Get("directory"), CaptureDateFrom: query.Get("capture_date_from"),
-		CaptureDateUntil:   query.Get("capture_date_until"),
-		IncludeProvisional: query.Get("include_provisional") == "true",
-		IncludeUnknown:     query.Get("include_unknown") == "true",
-		IncludeAmbiguous:   query.Get("include_ambiguous") == "true",
-		IncludeDontTrack:   query.Get("include_dont_track") == "true",
-		OnlyConfirmed:      query.Get("only_confirmed") == "true",
-		OnlyUnconfirmed:    query.Get("only_unconfirmed") == "true",
+		CaptureDateUntil:      query.Get("capture_date_until"),
+		IncludeProvisional:    query.Get("include_provisional") == "true",
+		IncludeUnknown:        query.Get("include_unknown") == "true",
+		IncludeAmbiguous:      query.Get("include_ambiguous") == "true",
+		IncludeDontTrack:      query.Get("include_dont_track") == "true",
+		OnlyConfirmed:         query.Get("only_confirmed") == "true",
+		OnlyUnconfirmed:       query.Get("only_unconfirmed") == "true",
+		ReviewMode:            query.Get("review_mode") == "true",
+		IncludeAssignedSystem: query.Get("include_assigned_system") == "true",
+		IncludeAssignedUser:   query.Get("include_assigned_user") == "true",
 	}
 	result, err := search.NewStore(s.db).Photos(r.Context(), options)
 	if err != nil {

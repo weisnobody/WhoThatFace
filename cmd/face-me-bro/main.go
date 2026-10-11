@@ -1444,10 +1444,14 @@ func searchCommand(ctx context.Context, application *app.App, args []string, jso
 	from := flags.String("from", "", "capture date lower bound")
 	until := flags.String("until", "", "capture date upper bound")
 	includeProvisional := flags.Bool("include-provisional", false, "include provisional assignments")
+	reviewMode := flags.Bool("review-mode", false, "show faces needing review; excludes assigned faces by default")
+	includeAssignedSystem := flags.Bool("include-assigned-system", false, "include system-assigned faces in review mode")
+	includeAssignedUser := flags.Bool("include-assigned-user", false, "include user-assigned faces in review mode")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	options.PersonID, options.RelativePrefix, options.CaptureDateFrom, options.CaptureDateUntil, options.IncludeProvisional = *person, *directory, *from, *until, *includeProvisional
+	options.ReviewMode, options.IncludeAssignedSystem, options.IncludeAssignedUser = *reviewMode, *includeAssignedSystem, *includeAssignedUser
 	result, err := search.NewStore(application.DB).Photos(ctx, options)
 	if err != nil {
 		return err
@@ -1783,11 +1787,23 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			_, err = jobStore.Enqueue(jobContext, "recognition", 1, map[string]string{"pipeline_id": *pipelineID})
 			return err
 		},
-		"recognition": func(jobContext context.Context, _ jobs.Job) error {
+		"recognition": func(jobContext context.Context, job jobs.Job) error {
+			faceIDs, err := jobFaceIDs(jobContext, application.DB)
+			if err != nil {
+				return err
+			}
+			if err := jobStore.EnsureItems(jobContext, job.ID, faceIDs); err != nil {
+				return err
+			}
+			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "recognition", "items": len(faceIDs), "completed": 0})
 			if err := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds).ProcessAll(jobContext); err != nil {
 				return err
 			}
-			_, err := jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"})
+			if err := completeJobItems(jobContext, jobStore, job.ID, faceIDs); err != nil {
+				return err
+			}
+			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "recognition", "items": len(faceIDs), "completed": len(faceIDs)})
+			_, err = jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": application.Config.ClusteringConfig.CandidateScope})
 			return err
 		},
 		"reference-reprocess": func(jobContext context.Context, job jobs.Job) error {
@@ -1821,7 +1837,22 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 				payload.Scope = "all"
 			}
 			clusteringConfig := application.Config.ClusteringConfig
-			_, err := clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, payload.Scope)
+			faceIDs, err := jobFaceIDs(jobContext, application.DB)
+			if err != nil {
+				return err
+			}
+			if err := jobStore.EnsureItems(jobContext, job.ID, faceIDs); err != nil {
+				return err
+			}
+			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "clustering", "items": len(faceIDs), "completed": 0})
+			_, err = clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, payload.Scope)
+			if err != nil {
+				return err
+			}
+			if err := completeJobItems(jobContext, jobStore, job.ID, faceIDs); err != nil {
+				return err
+			}
+			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "clustering", "items": len(faceIDs), "completed": len(faceIDs)})
 			return err
 		},
 	}, IdleWait: time.Second}
@@ -1837,6 +1868,38 @@ func countSupported(records []media.FileRecord) int {
 		}
 	}
 	return count
+}
+
+func jobFaceIDs(ctx context.Context, database *sql.DB) ([]string, error) {
+	rows, err := database.QueryContext(ctx, `SELECT f.id FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.embedding IS NOT NULL AND COALESCE(ca.state, 'unassigned') <> 'assigned-user' ORDER BY f.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func completeJobItems(ctx context.Context, store jobs.Store, jobID string, ids []string) error {
+	for _, id := range ids {
+		claimed, err := store.ClaimItem(ctx, jobID, id)
+		if err != nil {
+			return err
+		}
+		if claimed {
+			if err := store.CompleteItem(ctx, jobID, id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func envelope(command string, result any) map[string]any {

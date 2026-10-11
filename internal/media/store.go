@@ -208,9 +208,9 @@ func ensureAsset(ctx context.Context, tx *sql.Tx, record FileRecord, now string)
 		exif_capture_date, capture_date, capture_date_source,
 			exif_metadata_json, motion_metadata_json,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULL, NULL, ?, ?)`,
+		) VALUES (?, ?, ?, ?, NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULL, NULLIF(?, ''), ?, ?)`,
 		assetID, record.ContentSHA256, record.ByteSize, record.MediaKind,
-		record.Width, record.Height, formatTime(record.EXIFCaptureDate), formatTime(record.CaptureDate.Value), record.CaptureDate.Source, now, now)
+		record.Width, record.Height, formatTime(record.EXIFCaptureDate), formatTime(record.CaptureDate.Value), record.CaptureDate.Source, record.MotionMetadataJSON, now, now)
 	if err != nil {
 		return "", fmt.Errorf("persist asset %q: %w", record.ContentSHA256, err)
 	}

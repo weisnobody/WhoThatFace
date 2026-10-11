@@ -9,18 +9,21 @@ import (
 )
 
 type Options struct {
-	AllowedCollectionIDs []string
-	CollectionID         string
-	PersonID             string
-	RelativePrefix       string
-	CaptureDateFrom      string
-	CaptureDateUntil     string
-	IncludeProvisional   bool
-	IncludeUnknown       bool
-	IncludeAmbiguous     bool
-	IncludeDontTrack     bool
-	OnlyConfirmed        bool
-	OnlyUnconfirmed      bool
+	AllowedCollectionIDs  []string
+	CollectionID          string
+	PersonID              string
+	RelativePrefix        string
+	CaptureDateFrom       string
+	CaptureDateUntil      string
+	IncludeProvisional    bool
+	IncludeUnknown        bool
+	IncludeAmbiguous      bool
+	IncludeDontTrack      bool
+	OnlyConfirmed         bool
+	OnlyUnconfirmed       bool
+	ReviewMode            bool
+	IncludeAssignedSystem bool
+	IncludeAssignedUser   bool
 }
 
 type Photo struct {
@@ -86,14 +89,30 @@ func (s Store) Photos(ctx context.Context, options Options) ([]Photo, error) {
 	if options.OnlyUnconfirmed {
 		query.WriteString(` AND EXISTS (SELECT 1 FROM faces uf JOIN analyses uan ON uan.id = uf.analysis_id JOIN current_face_assignments ua ON ua.face_id = uf.id WHERE uan.asset_id = pp.asset_id AND ua.state NOT IN ('assigned-user', 'assigned-system'))`)
 	}
-	if !options.IncludeProvisional {
-		query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces pf2 JOIN analyses pan2 ON pan2.id = pf2.analysis_id JOIN current_face_assignments pa2 ON pa2.face_id = pf2.id WHERE pan2.asset_id = pp.asset_id AND pa2.state = 'provisional')`)
+	if options.ReviewMode {
+		states := []string{"'unassigned'", "'provisional'", "'unknown'", "'ambiguous'"}
+		if options.IncludeAssignedSystem {
+			states = append(states, "'assigned-system'")
+		}
+		if options.IncludeAssignedUser {
+			states = append(states, "'assigned-user'")
+		}
+		query.WriteString(` AND EXISTS (SELECT 1 FROM faces rf JOIN analyses ran ON ran.id = rf.analysis_id LEFT JOIN current_face_assignments ra ON ra.face_id = rf.id WHERE ran.asset_id = pp.asset_id AND COALESCE(ra.state, 'unassigned') IN (` + strings.Join(states, ",") + `))`)
 	}
-	if !options.IncludeUnknown {
-		query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces uf2 JOIN analyses uan2 ON uan2.id = uf2.analysis_id JOIN current_face_assignments ua2 ON ua2.face_id = uf2.id WHERE uan2.asset_id = pp.asset_id AND ua2.state = 'unknown')`)
-	}
-	if !options.IncludeAmbiguous {
-		query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces af2 JOIN analyses aan2 ON aan2.id = af2.analysis_id JOIN current_face_assignments aa2 ON aa2.face_id = af2.id WHERE aan2.asset_id = pp.asset_id AND aa2.state = 'ambiguous')`)
+	if options.ReviewMode {
+		// Review mode selects the faces needing review above; the ordinary
+		// state-exclusion filters would incorrectly remove those same photos.
+		query.WriteString("")
+	} else {
+		if !options.IncludeProvisional {
+			query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces pf2 JOIN analyses pan2 ON pan2.id = pf2.analysis_id JOIN current_face_assignments pa2 ON pa2.face_id = pf2.id WHERE pan2.asset_id = pp.asset_id AND pa2.state = 'provisional')`)
+		}
+		if !options.IncludeUnknown {
+			query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces uf2 JOIN analyses uan2 ON uan2.id = uf2.analysis_id JOIN current_face_assignments ua2 ON ua2.face_id = uf2.id WHERE uan2.asset_id = pp.asset_id AND ua2.state = 'unknown')`)
+		}
+		if !options.IncludeAmbiguous {
+			query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces af2 JOIN analyses aan2 ON aan2.id = af2.analysis_id JOIN current_face_assignments aa2 ON aa2.face_id = af2.id WHERE aan2.asset_id = pp.asset_id AND aa2.state = 'ambiguous')`)
+		}
 	}
 	query.WriteString(" GROUP BY pp.id, pp.collection_id, pp.relative_path, pp.asset_id, pa.capture_date ORDER BY pp.relative_path")
 	rows, err := s.db.QueryContext(ctx, query.String(), args...)

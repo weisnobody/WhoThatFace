@@ -175,8 +175,10 @@ func (s Scanner) inspect(root, path string, entry fs.DirEntry) (FileRecord, erro
 	}
 	if companion, kind := motionCompanion(path); companion != "" {
 		record.MediaKind = kind
-		metadata, _ := json.Marshal(map[string]string{"companion_path": filepath.Base(companion), "still_source": "paired-reference-still", "extraction_method": "paired-file-v1"})
+		metadata, _ := json.Marshal(map[string]string{"companion_path": filepath.Base(companion), "still_source": "paired-reference-still", "extraction_method": "jpeg-reference-segment-v2"})
 		record.MotionMetadataJSON = string(metadata)
+	} else if kind, metadata := embeddedMotionMetadata(path); kind != MediaStill {
+		record.MediaKind, record.MotionMetadataJSON = kind, metadata
 	}
 	if !isSupported(path) {
 		return record, nil
@@ -199,10 +201,25 @@ func (s Scanner) inspect(root, path string, entry fs.DirEntry) (FileRecord, erro
 		return FileRecord{}, err
 	}
 	record.ContentSHA256 = hash
+	if record.MediaKind != MediaStill {
+		still, stillErr := referenceStillBytes(path)
+		if stillErr != nil {
+			record.Status = StatusCorrupt
+			record.Error = "motion-photo reference still extraction failed: " + stillErr.Error()
+			return record, nil
+		}
+		if dimensions, decodeErr := decodeDimensionsBytes(still); decodeErr == nil {
+			record.Width, record.Height = dimensions.width, dimensions.height
+		} else {
+			record.Status = StatusCorrupt
+			record.Error = "motion-photo reference still decode failed: " + decodeErr.Error()
+			return record, nil
+		}
+	}
 	if exifDate, exifErr := extractEXIFCaptureDate(path); exifErr == nil {
 		record.EXIFCaptureDate = exifDate
 	}
-	if dimensions, decodeErr := decodeDimensions(path); decodeErr == nil {
+	if dimensions, decodeErr := decodeDimensions(path); decodeErr == nil && record.MediaKind == MediaStill {
 		record.Width = dimensions.width
 		record.Height = dimensions.height
 	} else if !isMetadataOnlyFormat(path) {
@@ -237,6 +254,34 @@ func decodeDimensions(path string) (dimensions struct{ width, height int }, err 
 		return dimensions, err
 	}
 	return struct{ width, height int }{config.Width, config.Height}, nil
+}
+
+func decodeDimensionsBytes(data []byte) (dimensions struct{ width, height int }, err error) {
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return dimensions, err
+	}
+	return struct{ width, height int }{config.Width, config.Height}, nil
+}
+
+// referenceStillBytes extracts the JPEG reference image before any appended
+// motion container bytes. Pillow/InsightFace can decode the same segment, but
+// doing this during scanning validates the reference still and records a
+// deterministic extraction boundary without creating a second asset/path.
+func referenceStillBytes(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
+		return nil, fmt.Errorf("reference still is not a JPEG")
+	}
+	for index := 2; index+1 < len(data); index++ {
+		if data[index] == 0xff && data[index+1] == 0xd9 {
+			return data[:index+2], nil
+		}
+	}
+	return nil, fmt.Errorf("JPEG end marker not found")
 }
 
 func selectCaptureDate(record FileRecord) CaptureDate {
@@ -381,4 +426,24 @@ func motionCompanion(path string) (string, MediaKind) {
 		}
 	}
 	return "", MediaStill
+}
+
+func embeddedMotionMetadata(path string) (MediaKind, string) {
+	if strings.ToLower(filepath.Ext(path)) != ".jpg" && strings.ToLower(filepath.Ext(path)) != ".jpeg" {
+		return MediaStill, ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return MediaStill, ""
+	}
+	still, err := referenceStillBytes(path)
+	if err != nil || len(still) == len(data) || len(data) < len(still)+8 {
+		return MediaStill, ""
+	}
+	trailing := data[len(still):]
+	if bytes.Contains(trailing, []byte("ftyp")) {
+		metadata, _ := json.Marshal(map[string]string{"still_source": "embedded-reference-still", "extraction_method": "jpeg-reference-segment-v2"})
+		return MediaMotionPhoto, string(metadata)
+	}
+	return MediaStill, ""
 }
