@@ -43,11 +43,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("GET /api/photos", s.photos)
 	mux.HandleFunc("GET /api/photos/{pathID}", s.photo)
+	mux.HandleFunc("GET /static/person.js", s.personScript)
 	mux.HandleFunc("POST /api/faces/{faceID}/assignment", s.assignFace)
 	mux.HandleFunc("POST /api/faces/{faceID}/reference", s.referenceFace)
 	mux.HandleFunc("GET /", s.dashboard)
 	mux.HandleFunc("GET /review/photos", s.reviewPhotos)
 	mux.HandleFunc("GET /review/people", s.reviewPeople)
+	mux.HandleFunc("GET /review/people/{personID}", s.reviewPerson)
 	mux.HandleFunc("GET /review/clusters", s.reviewClusters)
 	mux.HandleFunc("GET /review/clusters/{clusterID}", s.reviewCluster)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/review", s.reviewClusterAPI)
@@ -180,7 +182,11 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
-	peopleQuery := `SELECT id, COALESCE(name, ''), is_provisional, dont_track FROM people p`
+	peopleQuery := `SELECT p.id, COALESCE(p.name, ''), p.is_provisional, p.dont_track,
+		(SELECT COUNT(DISTINCT ca.face_id) FROM current_face_assignments ca
+		 JOIN faces f ON f.id = ca.face_id JOIN analyses a ON a.id = f.analysis_id
+		 JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths ppc ON ppc.asset_id = pa.id
+		 WHERE ca.person_id = p.id AND ppc.missing_at IS NULL)`
 	var args []any
 	if allowed != nil {
 		if len(allowed) == 0 {
@@ -193,6 +199,10 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
+		peopleQuery = strings.Replace(peopleQuery, `WHERE ca.person_id = p.id AND ppc.missing_at IS NULL)`, `WHERE ca.person_id = p.id AND ppc.missing_at IS NULL AND ppc.collection_id IN (`+strings.Join(placeholders, ",")+`))`, 1)
+		for _, id := range allowed {
+			args = append(args, id)
+		}
 		peopleQuery += ` WHERE EXISTS (SELECT 1 FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN current_face_assignments ca ON ca.face_id = f.id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE ca.person_id = p.id AND pp.collection_id IN (` + strings.Join(placeholders, ",") + `)`
 	}
 	peopleQuery += ` ORDER BY name, id`
@@ -203,18 +213,144 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	var body strings.Builder
-	body.WriteString(`<h1>People</h1><table><tr><th>Name</th><th>Provisional</th><th>Don't track</th></tr>`)
+	body.WriteString(`<h1>People</h1><table><tr><th>Name</th><th>Faces</th><th>Provisional</th><th>Don't track</th></tr>`)
 	for rows.Next() {
 		var id, name string
 		var provisional, dontTrack int
-		if err := rows.Scan(&id, &name, &provisional, &dontTrack); err != nil {
+		var faceCount int
+		if err := rows.Scan(&id, &name, &provisional, &dontTrack, &faceCount); err != nil {
 			http.Error(w, "people lookup failed", http.StatusInternalServerError)
 			return
 		}
-		body.WriteString(`<tr><td>` + template.HTMLEscapeString(name) + `</td><td>` + fmt.Sprint(provisional == 1) + `</td><td>` + fmt.Sprint(dontTrack == 1) + `</td></tr>`)
+		body.WriteString(`<tr><td><a href="/review/people/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(name) + `</a></td><td>` + fmt.Sprint(faceCount) + `</td><td>` + fmt.Sprint(provisional == 1) + `</td><td>` + fmt.Sprint(dontTrack == 1) + `</td></tr>`)
 	}
 	body.WriteString(`</table>`)
 	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	personID := r.PathValue("personID")
+	var personName string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT COALESCE(name, '') FROM people WHERE id = ?`, personID).Scan(&personName); err == sql.ErrNoRows {
+		http.NotFound(w, r)
+		return
+	} else if err != nil {
+		http.Error(w, "person lookup failed", http.StatusInternalServerError)
+		return
+	}
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if allowed != nil && len(allowed) == 0 {
+		s.render(w, map[string]any{"Title": personName, "Account": account, "Body": template.HTML(`<h1>` + template.HTMLEscapeString(personName) + `</h1><p>No collections are assigned to this account.</p>`)})
+		return
+	}
+	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0),
+		f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(cfr.reference, 0)
+		FROM faces f JOIN analyses a ON a.id = f.analysis_id
+		JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
+		JOIN current_face_assignments ca ON ca.face_id = f.id
+		LEFT JOIN current_face_references cfr ON cfr.face_id = f.id AND cfr.person_id = ?
+		WHERE ca.person_id = ? AND pp.missing_at IS NULL`
+	args := []any{personID, personID}
+	if allowed != nil {
+		query += ` AND pp.collection_id IN (` + strings.TrimRight(strings.Repeat("?,", len(allowed)), ",") + `)`
+		for _, collectionID := range allowed {
+			args = append(args, collectionID)
+		}
+	}
+	query += ` ORDER BY pp.relative_path, f.face_index, f.id`
+	rows, err := s.db.QueryContext(r.Context(), query, args...)
+	if err != nil {
+		http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	type personFace struct {
+		FaceID, PathID, RelativePath string
+		Width, Height                int
+		Left, Top, Right, Bottom     float64
+		Reference                    bool
+	}
+	var faces []personFace
+	referenceCount := 0
+	for rows.Next() {
+		var face personFace
+		var reference int
+		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &reference); err != nil {
+			http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
+			return
+		}
+		face.Reference = reference == 1
+		if face.Reference {
+			referenceCount++
+		}
+		faces = append(faces, face)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
+		return
+	}
+
+	body := strings.Builder{}
+	body.WriteString(`<style>.person-header{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.person-grid{display:flex;flex-wrap:wrap;gap:18px}.person-card{width:min(420px,45vw);border:1px solid #ccc;padding:10px}.person-viewer{position:relative;display:inline-block;max-width:100%}.person-viewer img{display:block;max-width:100%;max-height:55vh}.person-box{position:absolute;border:2px solid #d00;background:rgba(204,0,0,.15);pointer-events:none}.person-box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.person-path{margin-top:8px;overflow-wrap:anywhere}.person-actions{display:flex;justify-content:space-between;gap:8px;margin-top:8px}.person-actions button{padding:.4rem}.person-empty{margin-top:1rem}</style>`)
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><h1>` + template.HTMLEscapeString(personName) + ` (` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references)</h1></div>`)
+	body.WriteString(`<div class="person-grid">`)
+	canModify := account.Role != auth.Viewer
+	for _, face := range faces {
+		boxClass := "person-box"
+		if face.Reference {
+			boxClass += " reference"
+		}
+		body.WriteString(`<article class="person-card" id="face-` + template.HTMLEscapeString(face.FaceID) + `"><div class="person-viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(face.FaceID) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="person-path">` + template.HTMLEscapeString(face.RelativePath) + `</div>`)
+		if canModify {
+			body.WriteString(`<div class="person-actions"><button type="button" data-action="remove" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Remove assignment</button><button type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-reference="` + fmt.Sprint(face.Reference) + `">Make ` + map[bool]string{true: "evaluation", false: "reference"}[face.Reference] + `</button></div>`)
+		}
+		body.WriteString(`</article>`)
+	}
+	if len(faces) == 0 {
+		body.WriteString(`<p class="person-empty">No faces are assigned to this person.</p>`)
+	}
+	body.WriteString(`</div>`)
+	if canModify {
+		body.WriteString(`<script src="/static/person.js" defer></script>`)
+	}
+	s.render(w, map[string]any{"Title": personName, "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write([]byte(`(function () {
+  const page = document.getElementById('person-page');
+  if (!page) return;
+  const token = page.dataset.csrf || '';
+  async function send(faceID, url, payload) {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) { alert(await response.text()); return; }
+    location.reload();
+  }
+  document.querySelectorAll('[data-action="remove"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId,
+      '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment',
+      {person_id: '', state: 'unassigned'});
+  });
+  document.querySelectorAll('[data-action="role"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId,
+      '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/reference',
+      {person_id: page.dataset.personId, reference: button.dataset.reference !== 'true'});
+  });
+})();
+`))
 }
 
 func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
