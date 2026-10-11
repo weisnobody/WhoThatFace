@@ -39,3 +39,11 @@ face-me-bro worker --pipeline-id <pipeline-id>
 ```
 
 An optional Docker worker configuration is documented in `docker/README.md`.
+
+## Configuration selection
+
+The application accepts strict JSON and JSONC configuration files. Select a
+file or directory with `--config PATH`, or set `FACE_ME_PRO_CONFIG`. A
+directory uses `config.json`. Supplying both is allowed only when both values
+resolve to the same file; conflicting values are rejected before the database
+is opened.

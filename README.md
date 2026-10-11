@@ -30,8 +30,10 @@ offline validation, and the optional Docker worker.
 [`config.example.jsonc`](config.example.jsonc) lists every configuration
 parameter, its purpose, and its default value. It uses JSONC comments for
 documentation; the application configuration file itself must be strict JSON.
-Copy the uncommented settings you need into `config.json`, or use the
-`--config PATH` option with an alternate file or directory.
+Copy the uncommented settings you need into `config.json`, use the
+`--config PATH` option, or set `FACE_ME_PRO_CONFIG` to an alternate JSON or
+JSONC file (or a directory containing `config.json`). If both the environment
+variable and `--config` are supplied, they must resolve to the same file.
 
 ### Go Application
 

@@ -75,6 +75,69 @@ func TestLoadAcceptsConfigurationDirectory(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsJSONCConfiguration(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "settings.jsonc")
+	content := []byte(`{
+  // comments and trailing commas are valid JSONC
+  "runtime_data_root": "runtime",
+  "database_path": "catalog.sqlite3",
+}`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.RuntimeDataRoot != filepath.Join(filepath.Dir(configPath), "runtime") {
+		t.Fatalf("RuntimeDataRoot = %q", got.RuntimeDataRoot)
+	}
+	if got.DatabasePath != filepath.Join(got.RuntimeDataRoot, "catalog.sqlite3") {
+		t.Fatalf("DatabasePath = %q", got.DatabasePath)
+	}
+}
+
+func TestLoadUsesEnvironmentConfiguration(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "environment.json")
+	if err := os.WriteFile(configPath, []byte(`{"runtime_data_root":"runtime"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(configEnvironment, configPath)
+	got, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.ConfigFile != configPath {
+		t.Fatalf("ConfigFile = %q, want %q", got.ConfigFile, configPath)
+	}
+}
+
+func TestLoadRejectsConflictingCLIAndEnvironmentConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	cliPath := filepath.Join(dir, "cli.json")
+	environmentPath := filepath.Join(dir, "environment.json")
+	for _, path := range []string{cliPath, environmentPath} {
+		if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(configEnvironment, environmentPath)
+	if _, err := Load(cliPath); err == nil {
+		t.Fatal("expected conflicting configuration paths to fail")
+	}
+}
+
+func TestLoadAllowsSameCLIAndEnvironmentConfiguration(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "same.json")
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(configEnvironment, configPath)
+	if _, err := Load(configPath); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
 func TestDefaultRuntimeDataRootUsesPlatformConvention(t *testing.T) {
 	root, err := defaultRuntimeDataRoot()
 	if err != nil {

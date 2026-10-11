@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/pjg/face_me_bro/internal/clustering"
 	"github.com/pjg/face_me_bro/internal/recognition"
@@ -15,6 +16,7 @@ import (
 
 const (
 	defaultConfigFile   = "config.json"
+	configEnvironment   = "FACE_ME_PRO_CONFIG"
 	defaultDatabase     = "face_me_bro.sqlite3"
 	defaultSearchMethod = "exact"
 )
@@ -78,6 +80,23 @@ func DefaultConfigFile() (string, error) {
 // Load reads configPath, or applies defaults when configPath is empty. A path
 // naming a directory refers to config.json inside that directory.
 func Load(configPath string) (Resolved, error) {
+	environmentPath := strings.TrimSpace(os.Getenv(configEnvironment))
+	if configPath != "" && environmentPath != "" {
+		cliFile, err := configFilePath(configPath)
+		if err != nil {
+			return Resolved{}, fmt.Errorf("resolve CLI configuration path: %w", err)
+		}
+		environmentFile, err := configFilePath(environmentPath)
+		if err != nil {
+			return Resolved{}, fmt.Errorf("resolve %s: %w", configEnvironment, err)
+		}
+		if cliFile != environmentFile {
+			return Resolved{}, fmt.Errorf("configuration specified by --config (%q) conflicts with %s (%q); specify only one configuration file", cliFile, configEnvironment, environmentFile)
+		}
+	}
+	if configPath == "" && environmentPath != "" {
+		configPath = environmentPath
+	}
 	defaultFile, err := DefaultConfigFile()
 	if err != nil {
 		return Resolved{}, err
@@ -86,18 +105,19 @@ func Load(configPath string) (Resolved, error) {
 	if configPath == "" {
 		configPath = defaultFile
 	} else {
-		configPath, err = filepath.Abs(configPath)
+		configPath, err = configFilePath(configPath)
 		if err != nil {
 			return Resolved{}, fmt.Errorf("resolve config path: %w", err)
-		}
-		if info, statErr := os.Stat(configPath); statErr == nil && info.IsDir() {
-			configPath = filepath.Join(configPath, defaultConfigFile)
 		}
 	}
 
 	settings := File{}
 	data, readErr := os.ReadFile(configPath)
 	if readErr == nil {
+		data, err = parseJSONC(data)
+		if err != nil {
+			return Resolved{}, fmt.Errorf("parse configuration %q: %w", configPath, err)
+		}
 		if err := json.Unmarshal(data, &settings); err != nil {
 			return Resolved{}, fmt.Errorf("parse configuration %q: %w", configPath, err)
 		}
@@ -187,6 +207,109 @@ func Load(configPath string) (Resolved, error) {
 		RecognitionThresholds: thresholds,
 		ClusteringConfig:      clusteringConfig,
 	}, nil
+}
+
+func configFilePath(value string) (string, error) {
+	path, err := filepath.Abs(value)
+	if err != nil {
+		return "", err
+	}
+	if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+		path = filepath.Join(path, defaultConfigFile)
+	}
+	return filepath.Clean(path), nil
+}
+
+// parseJSONC accepts JSON plus // and /* */ comments and trailing commas.
+// Comment markers inside quoted strings are preserved.
+func parseJSONC(data []byte) ([]byte, error) {
+	withoutComments := make([]byte, 0, len(data))
+	inString, escaped, lineComment, blockComment := false, false, false, false
+	for index := 0; index < len(data); index++ {
+		current := data[index]
+		if lineComment {
+			if current == '\n' {
+				lineComment = false
+				withoutComments = append(withoutComments, current)
+			}
+			continue
+		}
+		if blockComment {
+			if current == '*' && index+1 < len(data) && data[index+1] == '/' {
+				blockComment = false
+				index++
+				withoutComments = append(withoutComments, ' ')
+			} else if current == '\n' {
+				withoutComments = append(withoutComments, current)
+			}
+			continue
+		}
+		if inString {
+			withoutComments = append(withoutComments, current)
+			if escaped {
+				escaped = false
+			} else if current == '\\' {
+				escaped = true
+			} else if current == '"' {
+				inString = false
+			}
+			continue
+		}
+		if current == '"' {
+			inString = true
+			withoutComments = append(withoutComments, current)
+			continue
+		}
+		if current == '/' && index+1 < len(data) && data[index+1] == '/' {
+			lineComment = true
+			index++
+			continue
+		}
+		if current == '/' && index+1 < len(data) && data[index+1] == '*' {
+			blockComment = true
+			index++
+			continue
+		}
+		withoutComments = append(withoutComments, current)
+	}
+	if blockComment {
+		return nil, errors.New("unterminated block comment")
+	}
+	if inString {
+		return nil, errors.New("unterminated string")
+	}
+	result := make([]byte, 0, len(withoutComments))
+	inString, escaped = false, false
+	for index := 0; index < len(withoutComments); index++ {
+		current := withoutComments[index]
+		if inString {
+			result = append(result, current)
+			if escaped {
+				escaped = false
+			} else if current == '\\' {
+				escaped = true
+			} else if current == '"' {
+				inString = false
+			}
+			continue
+		}
+		if current == '"' {
+			inString = true
+			result = append(result, current)
+			continue
+		}
+		if current == ',' {
+			lookahead := index + 1
+			for lookahead < len(withoutComments) && (withoutComments[lookahead] == ' ' || withoutComments[lookahead] == '\t' || withoutComments[lookahead] == '\r' || withoutComments[lookahead] == '\n') {
+				lookahead++
+			}
+			if lookahead < len(withoutComments) && (withoutComments[lookahead] == '}' || withoutComments[lookahead] == ']') {
+				continue
+			}
+		}
+		result = append(result, current)
+	}
+	return result, nil
 }
 
 func searchMethod(value string) string {
