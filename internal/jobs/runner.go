@@ -105,7 +105,7 @@ func (r Runner) RunOnce(ctx context.Context) (bool, error) {
 	finalStatus := Completed
 	if items, itemsErr := r.Store.Items(ctx, job.ID); itemsErr == nil {
 		for _, item := range items {
-			if item.Status == "failed" {
+			if item.Status == "failed" || item.Status == "pending" || item.Status == "running" {
 				finalStatus = CompletedWithError
 				break
 			}

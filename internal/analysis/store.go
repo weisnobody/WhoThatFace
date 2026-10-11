@@ -104,6 +104,9 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 	if response.Model != nil && response.Model.PipelineID != "" && response.Model.PipelineID != pipelineID {
 		return "", fmt.Errorf("worker pipeline %q does not match requested pipeline %q", response.Model.PipelineID, pipelineID)
 	}
+	if response.Image != nil && (response.Image.Width <= 0 || response.Image.Height <= 0 || response.Image.InferenceWidth <= 0 || response.Image.InferenceHeight <= 0) {
+		return "", fmt.Errorf("worker returned invalid image dimensions")
+	}
 	var analysisID string
 	if err := s.db.QueryRowContext(ctx, `SELECT id FROM analyses WHERE asset_id = ? AND pipeline_id = ?`, assetID, pipelineID).Scan(&analysisID); err == sql.ErrNoRows {
 		analysisID, err = id.NewUUIDv7()
@@ -138,9 +141,18 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 	if err != nil {
 		return "", fmt.Errorf("persist analysis: %w", err)
 	}
-	for _, face := range response.Faces {
+	for expectedIndex, face := range response.Faces {
+		if face.FaceIndex != expectedIndex {
+			return "", fmt.Errorf("face ordering is not deterministic at index %d", expectedIndex)
+		}
+		if !finiteRange(float64(face.DetectionConfidence), 0, 1) || !finiteRange(float64(face.Quality), 0, 1) {
+			return "", fmt.Errorf("face %d has invalid confidence or quality", face.FaceIndex)
+		}
 		if face.Box.Right < face.Box.Left || face.Box.Bottom < face.Box.Top {
 			return "", fmt.Errorf("face %d has an invalid bounding box", face.FaceIndex)
+		}
+		if response.Image != nil && (face.Box.Left < 0 || face.Box.Top < 0 || face.Box.Right > float32(response.Image.Width) || face.Box.Bottom > float32(response.Image.Height)) {
+			return "", fmt.Errorf("face %d bounding box is outside image dimensions", face.FaceIndex)
 		}
 		embedding, err := encodeEmbedding(face)
 		if err != nil {
@@ -167,6 +179,10 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 		return "", err
 	}
 	return analysisID, nil
+}
+
+func finiteRange(value, minimum, maximum float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= minimum && value <= maximum
 }
 
 func embeddingDimension(face worker.FaceResult) int {

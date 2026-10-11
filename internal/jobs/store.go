@@ -201,7 +201,7 @@ func (s Store) Retry(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE job_items SET status = 'pending', attempts = 0, error_code = NULL, error_message = NULL, updated_at = ? WHERE job_id = ? AND status IN ('failed', 'running')`, time.Now().UTC().Format(time.RFC3339Nano), jobID)
+	_, err = s.db.ExecContext(ctx, `UPDATE job_items SET status = 'pending', attempts = 0, error_code = NULL, error_message = NULL, updated_at = ? WHERE job_id = ? AND status IN ('failed', 'running', 'pending')`, time.Now().UTC().Format(time.RFC3339Nano), jobID)
 	return err
 }
 
@@ -236,11 +236,7 @@ func (s Store) CompleteItem(ctx context.Context, jobID, key string) error {
 }
 
 func (s Store) FailItem(ctx context.Context, jobID, key, code, message string, permanent bool) error {
-	status := "pending"
-	if permanent {
-		status = "failed"
-	}
-	_, err := s.db.ExecContext(ctx, `UPDATE job_items SET status = ?, error_code = ?, error_message = ?, updated_at = ? WHERE job_id = ? AND item_key = ?`, status, code, message, time.Now().UTC().Format(time.RFC3339Nano), jobID, key)
+	_, err := s.db.ExecContext(ctx, `UPDATE job_items SET status = CASE WHEN ? OR attempts >= 3 THEN 'failed' ELSE 'pending' END, error_code = ?, error_message = ?, updated_at = ? WHERE job_id = ? AND item_key = ?`, permanent, code, message, time.Now().UTC().Format(time.RFC3339Nano), jobID, key)
 	return err
 }
 

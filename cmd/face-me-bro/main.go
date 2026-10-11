@@ -1772,13 +1772,16 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if err := jobStore.EnsureItems(jobContext, job.ID, assetIDs); err != nil {
 				return err
 			}
-			if err := processor.ProcessCollectionWithProgress(jobContext, payload.CollectionID, func(assetID string) error {
+			if err := processor.ProcessCollectionWithItemProgress(jobContext, payload.CollectionID, func(assetID string, itemErr error) error {
 				claimed, claimErr := jobStore.ClaimItem(jobContext, job.ID, assetID)
 				if claimErr != nil {
 					return claimErr
 				}
 				if !claimed {
-					return jobStore.CompleteItem(jobContext, job.ID, assetID)
+					return nil
+				}
+				if itemErr != nil {
+					return jobStore.FailItem(jobContext, job.ID, assetID, "analysis_failed", itemErr.Error(), false)
 				}
 				return jobStore.CompleteItem(jobContext, job.ID, assetID)
 			}); err != nil {

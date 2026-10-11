@@ -3,7 +3,6 @@ package analysis
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"path/filepath"
 
 	"github.com/pjg/face_me_bro/internal/review"
@@ -12,6 +11,10 @@ import (
 
 type Analyzer interface {
 	Analyze(context.Context, string, string, int64) (worker.Message, error)
+}
+
+type IdentityAnalyzer interface {
+	AnalyzeWithIdentity(context.Context, string, string, int64, string, int64) (worker.Message, error)
 }
 
 type Processor struct {
@@ -37,10 +40,19 @@ func (p Processor) ProcessCollection(ctx context.Context, collectionID string) e
 // storage so a later retry can skip it. The callback is called once after an
 // asset has been persisted successfully.
 func (p Processor) ProcessCollectionWithProgress(ctx context.Context, collectionID string, progress func(string) error) error {
+	return p.processCollection(ctx, collectionID, func(assetID string, err error) error {
+		if err != nil {
+			return err
+		}
+		return progress(assetID)
+	})
+}
+
+func (p Processor) ProcessCollectionWithItemProgress(ctx context.Context, collectionID string, progress func(string, error) error) error {
 	return p.processCollection(ctx, collectionID, progress)
 }
 
-func (p Processor) processCollection(ctx context.Context, collectionID string, progress func(string) error) error {
+func (p Processor) processCollection(ctx context.Context, collectionID string, progress func(string, error) error) error {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT c.root_path, pp.relative_path, pa.id
 		FROM photo_paths pp JOIN collections c ON c.id = pp.collection_id
@@ -72,11 +84,15 @@ func (p Processor) processCollection(ctx context.Context, collectionID string, p
 		return err
 	}
 	for _, asset := range assets {
-		var analysisStatus string
-		err := p.db.QueryRowContext(ctx, `SELECT status FROM analyses WHERE asset_id = ? AND pipeline_id = ? LIMIT 1`, asset.assetID, p.pipelineID).Scan(&analysisStatus)
+		var analysisStatus, expectedSHA string
+		var expectedSize int64
+		err := p.db.QueryRowContext(ctx, `SELECT status, content_sha256, byte_size FROM analyses a JOIN photo_assets pa ON pa.id = a.asset_id WHERE a.asset_id = ? AND a.pipeline_id = ? LIMIT 1`, asset.assetID, p.pipelineID).Scan(&analysisStatus, &expectedSHA, &expectedSize)
+		if err == sql.ErrNoRows {
+			err = p.db.QueryRowContext(ctx, `SELECT content_sha256, byte_size FROM photo_assets WHERE id = ?`, asset.assetID).Scan(&expectedSHA, &expectedSize)
+		}
 		if err == nil && analysisStatus == "completed" {
 			if progress != nil {
-				if progressErr := progress(asset.assetID); progressErr != nil {
+				if progressErr := progress(asset.assetID, nil); progressErr != nil {
 					return progressErr
 				}
 			}
@@ -90,14 +106,30 @@ func (p Processor) processCollection(ctx context.Context, collectionID string, p
 		if err := p.store.MarkRunning(ctx, asset.assetID, p.pipelineID); err != nil {
 			return err
 		}
-		response, err := p.analyzer.Analyze(ctx, filepath.Join(asset.root, filepath.FromSlash(asset.relative)), p.pipelineID, p.maxPixels)
+		path := filepath.Join(asset.root, filepath.FromSlash(asset.relative))
+		var response worker.Message
+		if identityAnalyzer, ok := p.analyzer.(IdentityAnalyzer); ok {
+			response, err = identityAnalyzer.AnalyzeWithIdentity(ctx, path, p.pipelineID, p.maxPixels, expectedSHA, expectedSize)
+		} else {
+			response, err = p.analyzer.Analyze(ctx, path, p.pipelineID, p.maxPixels)
+		}
 		if err != nil {
 			_ = p.store.RecordFailure(ctx, asset.assetID, p.pipelineID, "analysis_failed", err.Error())
-			return fmt.Errorf("analyze %s: %w", asset.relative, err)
+			if progress != nil {
+				if progressErr := progress(asset.assetID, err); progressErr != nil {
+					return progressErr
+				}
+			}
+			continue
 		}
 		analysisID, err := p.store.Persist(ctx, asset.assetID, p.pipelineID, response)
 		if err != nil {
-			return err
+			if progress != nil {
+				if progressErr := progress(asset.assetID, err); progressErr != nil {
+					return progressErr
+				}
+			}
+			continue
 		}
 		faceRows, err := p.db.QueryContext(ctx, "SELECT id FROM faces WHERE analysis_id = ?", analysisID)
 		if err != nil {
@@ -117,11 +149,16 @@ func (p Processor) processCollection(ctx context.Context, collectionID string, p
 		}
 		for _, faceID := range faceIDs {
 			if err := p.review.InitializeFace(ctx, faceID, review.Actor{Type: "system"}); err != nil {
-				return err
+				if progress != nil {
+					if progressErr := progress(asset.assetID, err); progressErr != nil {
+						return progressErr
+					}
+				}
+				continue
 			}
 		}
 		if progress != nil {
-			if err := progress(asset.assetID); err != nil {
+			if err := progress(asset.assetID, nil); err != nil {
 				return err
 			}
 		}

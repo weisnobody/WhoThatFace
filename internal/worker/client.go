@@ -173,6 +173,17 @@ func (c *Client) Capabilities() Capabilities {
 
 // Analyze sends one image request and returns the worker response.
 func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxPixels int64) (Message, error) {
+	identity, err := inspectFileIdentity(imagePath)
+	if err != nil {
+		return Message{}, err
+	}
+	return c.AnalyzeWithIdentity(ctx, imagePath, pipelineID, maxPixels, identity.sha256, identity.size)
+}
+
+// AnalyzeWithIdentity binds the request to the identity captured by the
+// scanner. The worker still rechecks the path immediately before inference,
+// while this method rejects a path that no longer matches the persisted asset.
+func (c *Client) AnalyzeWithIdentity(ctx context.Context, imagePath, pipelineID string, maxPixels int64, expectedSHA256 string, expectedSize int64) (Message, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.process == nil {
@@ -186,7 +197,16 @@ func (c *Client) Analyze(ctx context.Context, imagePath, pipelineID string, maxP
 	if err != nil {
 		return Message{}, err
 	}
-	if err := c.sendLocked(Message{ProtocolVersion: ProtocolMajor, Command: "analyze", ID: requestID, Path: imagePath, ExpectedSHA256: identity.sha256, ExpectedSize: identity.size, Model: &ModelInfo{PipelineID: pipelineID}, MaxPixels: maxPixels}); err != nil {
+	if expectedSHA256 != "" && (identity.sha256 != expectedSHA256 || (expectedSize > 0 && identity.size != expectedSize)) {
+		return Message{}, fmt.Errorf("file identity does not match scanned asset")
+	}
+	if expectedSHA256 == "" {
+		expectedSHA256 = identity.sha256
+	}
+	if expectedSize == 0 {
+		expectedSize = identity.size
+	}
+	if err := c.sendLocked(Message{ProtocolVersion: ProtocolMajor, Command: "analyze", ID: requestID, Path: imagePath, ExpectedSHA256: expectedSHA256, ExpectedSize: expectedSize, Model: &ModelInfo{PipelineID: pipelineID}, MaxPixels: maxPixels}); err != nil {
 		_ = c.restartLocked()
 		return Message{}, err
 	}
