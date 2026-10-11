@@ -85,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /review/photos", s.reviewPhotos)
 	mux.HandleFunc("GET /review/people", s.reviewPeople)
 	mux.HandleFunc("GET /review/people/{personID}", s.reviewPerson)
+	mux.HandleFunc("GET /review/people/{personID}/references", s.reviewPersonReferences)
 	mux.HandleFunc("POST /api/people", s.createPerson)
 	mux.HandleFunc("POST /api/people/{personID}", s.renamePerson)
 	mux.HandleFunc("GET /api/people/{personID}/references", s.personReferences)
@@ -196,6 +197,10 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
+	if pathID := query.Get("path_id"); pathID != "" {
+		s.reviewPhotoDetail(w, r, pathID)
+		return
+	}
 	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
 	if err != nil {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
@@ -209,9 +214,57 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 	var body strings.Builder
 	body.WriteString(`<h1>Photos</h1><p>Review faces and use the face API to assign people or select references.</p>`)
 	for _, photo := range result {
-		body.WriteString(`<figure><a href="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" style="max-width:20rem;max-height:15rem" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `"></a><figcaption>` + template.HTMLEscapeString(photo.RelativePath) + ` (` + fmt.Sprint(photo.FaceCount) + ` faces)</figcaption></figure>`)
+		body.WriteString(`<figure><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" style="max-width:20rem;max-height:15rem" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `"></a><figcaption>` + template.HTMLEscapeString(photo.RelativePath) + ` (` + fmt.Sprint(photo.FaceCount) + ` faces)</figcaption></figure>`)
 	}
 	s.render(w, map[string]any{"Title": "Photos", "Account": account, "Body": template.HTML(body.String())})
+}
+
+func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathID string) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	var collectionID, relative string
+	var width, height int
+	if err := s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0) FROM photo_paths pp JOIN photo_assets pa ON pa.id = pp.asset_id WHERE pp.id = ? AND pp.missing_at IS NULL`, pathID).Scan(&collectionID, &relative, &width, &height); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, false, false)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT f.id, f.face_index, f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(ca.state, 'unassigned'), COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ''), COALESCE(rc.similarity, 0), COALESCE(rc.margin, 0) FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_assignments ca ON ca.face_id = f.id LEFT JOIN people p ON p.id = ca.person_id LEFT JOIN recognition_candidates rc ON rc.id = (SELECT id FROM recognition_candidates WHERE face_id = f.id ORDER BY created_at DESC, rank LIMIT 1) WHERE pp.id = ? ORDER BY f.face_index`, pathID)
+	if err != nil {
+		http.Error(w, "face lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	body := strings.Builder{}
+	body.WriteString(`<style>.photo-detail{position:relative;display:inline-block}.photo-detail img{max-width:90vw;max-height:70vh}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15)}.photo-face{border:1px solid #ccc;padding:8px;margin:8px 0}</style><h1>Photo review</h1><p>` + template.HTMLEscapeString(relative) + `</p><div class="photo-detail"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `">`)
+	type face struct {
+		ID                       string
+		Index                    int
+		Left, Top, Right, Bottom float64
+		State, Person            string
+		Similarity, Margin       float64
+	}
+	var faces []face
+	for rows.Next() {
+		var value face
+		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.Person, &value.Similarity, &value.Margin); err != nil {
+			return
+		}
+		body.WriteString(fmt.Sprintf(`<span class="photo-box" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span>`, percent(value.Left, width), percent(value.Top, height), percent(value.Right-value.Left, width), percent(value.Bottom-value.Top, height)))
+		faces = append(faces, value)
+	}
+	body.WriteString(`</div><div>`)
+	for _, value := range faces {
+		body.WriteString(`<article class="photo-face"><strong>Face ` + fmt.Sprint(value.Index+1) + `</strong>: ` + template.HTMLEscapeString(value.State) + ` · ` + template.HTMLEscapeString(value.Person) + ` · confidence ` + formatScore(value.Similarity) + `%, margin ` + formatScore(value.Margin) + `%</article>`)
+	}
+	body.WriteString(`</div>`)
+	s.render(w, map[string]any{"Title": "Photo review", "Account": account, "Body": template.HTML(body.String())})
 }
 
 func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
@@ -713,6 +766,46 @@ func (s *Server) personReferences(w http.ResponseWriter, r *http.Request) {
 		result = append(result, value)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"person_id": personID, "recommendations": result, "account_id": account.ID})
+}
+
+func (s *Server) reviewPersonReferences(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	personID := r.PathValue("personID")
+	var name string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people WHERE id = ?`, personID).Scan(&name); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT rr.face_id, rr.is_current, COALESCE(rr.recommendation_score, 0), pp.id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0), f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(cfr.reference, 0) FROM reference_recommendations rr JOIN faces f ON f.id = rr.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_references cfr ON cfr.face_id = rr.face_id AND cfr.person_id = rr.person_id WHERE rr.person_id = ? ORDER BY rr.is_current DESC, rr.recommendation_score DESC LIMIT 20`, personID)
+	if err != nil {
+		http.Error(w, "reference lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	body := strings.Builder{}
+	body.WriteString(`<h1>References for ` + template.HTMLEscapeString(name) + `</h1><p>Current approved references and the latest recommendations are shown below.</p><div class="grid">`)
+	for rows.Next() {
+		var faceID, pathID, relative string
+		var current, reference int
+		var score float64
+		var width, height int
+		var left, top, right, bottom float64
+		if err := rows.Scan(&faceID, &current, &score, &pathID, &relative, &width, &height, &left, &top, &right, &bottom, &reference); err != nil {
+			http.Error(w, "reference lookup failed", http.StatusInternalServerError)
+			return
+		}
+		class := "box"
+		if reference == 1 {
+			class += " reference"
+		}
+		label := map[bool]string{true: "Approved reference", false: "Recommendation"}[reference == 1]
+		body.WriteString(fmt.Sprintf(`<article class="card"><div class="viewer"><img loading="lazy" src="/api/photos/%s"><span class="%s" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span></div><div class="path">%s</div><div>%s · score %s%%</div></article>`, template.HTMLEscapeString(pathID), class, percent(left, width), percent(top, height), percent(right-left, width), percent(bottom-top, height), template.HTMLEscapeString(relative), label, formatScore(score)))
+	}
+	body.WriteString(`</div>`)
+	s.render(w, map[string]any{"Title": "Person references", "Account": account, "Body": template.HTML(body.String())})
 }
 
 func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {

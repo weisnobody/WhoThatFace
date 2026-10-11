@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/pjg/face_me_bro/internal/id"
@@ -26,14 +27,31 @@ func NewProcessor(database *sql.DB, config Config) Processor {
 // Run groups faces with embeddings. Scope is all, unresolved-only, or subset;
 // subset is reserved for callers that provide a prefiltered face set.
 func (p Processor) Run(ctx context.Context, scope string) (string, error) {
+	return p.run(ctx, scope, nil)
+}
+
+func (p Processor) RunFaces(ctx context.Context, faceIDs []string) (string, error) {
+	return p.run(ctx, "subset", faceIDs)
+}
+
+func (p Processor) run(ctx context.Context, scope string, faceIDs []string) (string, error) {
 	if scope == "" {
 		scope = "all"
 	}
 	query := `SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(ca.person_id, '') FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.embedding IS NOT NULL AND COALESCE(ca.state, 'unassigned') <> 'assigned-user'`
+	queryArgs := []any{}
+	if len(faceIDs) > 0 {
+		placeholders := make([]string, len(faceIDs))
+		for index, faceID := range faceIDs {
+			placeholders[index] = "?"
+			queryArgs = append(queryArgs, faceID)
+		}
+		query += ` AND f.id IN (` + strings.Join(placeholders, ",") + `)`
+	}
 	if scope == "unresolved-only" {
 		query += ` AND COALESCE(ca.state, 'unassigned') NOT IN ('assigned-system', 'assigned-user')`
 	}
-	rows, err := p.db.QueryContext(ctx, query)
+	rows, err := p.db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return "", err
 	}
@@ -55,11 +73,11 @@ func (p Processor) Run(ctx context.Context, scope string) (string, error) {
 	if err := rows.Err(); err != nil {
 		return "", err
 	}
-	faceIDs := make([]string, 0, len(faces))
+	inputFaceIDs := make([]string, 0, len(faces))
 	for _, face := range faces {
-		faceIDs = append(faceIDs, face.ID)
+		inputFaceIDs = append(inputFaceIDs, face.ID)
 	}
-	runID, err := p.store.CreateRun(ctx, p.config, scope, faceIDs)
+	runID, err := p.store.CreateRun(ctx, p.config, scope, inputFaceIDs)
 	if err != nil {
 		return "", err
 	}

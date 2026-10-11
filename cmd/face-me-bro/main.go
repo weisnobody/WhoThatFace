@@ -1905,9 +1905,32 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if err := recognitionProcessor.ProcessPerson(jobContext, payload.PersonID); err != nil {
 				return err
 			}
-			clusteringConfig := application.Config.ClusteringConfig
-			if _, err := clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, "all"); err != nil {
+			rows, err := application.DB.QueryContext(jobContext, `SELECT DISTINCT face_id FROM (
+				SELECT ca.face_id FROM current_face_assignments ca WHERE ca.person_id = ?
+				UNION SELECT fr.face_id FROM current_face_references fr WHERE fr.person_id = ?
+				UNION SELECT rc.face_id FROM recognition_candidates rc WHERE rc.person_id = ?
+				UNION SELECT cm.face_id FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id WHERE c.proposed_person_id = ?
+			) ORDER BY face_id`, payload.PersonID, payload.PersonID, payload.PersonID, payload.PersonID)
+			if err != nil {
 				return err
+			}
+			var affectedFaces []string
+			for rows.Next() {
+				var faceID string
+				if err := rows.Scan(&faceID); err != nil {
+					rows.Close()
+					return err
+				}
+				affectedFaces = append(affectedFaces, faceID)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			clusteringConfig := application.Config.ClusteringConfig
+			if len(affectedFaces) > 0 {
+				if _, err := clustering.NewProcessor(application.DB, clusteringConfig).RunFaces(jobContext, affectedFaces); err != nil {
+					return err
+				}
 			}
 			return recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID)
 		},

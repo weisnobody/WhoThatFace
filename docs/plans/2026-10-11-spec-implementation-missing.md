@@ -22,17 +22,17 @@ are complete.
   metadata, but the analysis job passes the original path directly to the
   worker. It does not identify/extract and persist the reference still,
   extraction method/version, or reliably reject unsupported paired formats.
-- [ ] **P1** Recheck file identity after hashing. The scanner checks size and
+- [x] **P1** Recheck file identity after hashing. The scanner checks size and
   modification time before hashing, but does not verify that the file did not
   change during hashing or persist a retry outcome for that case.
-- [ ] **P1** Persist canonical embedded metadata. `exif_metadata_json` is
+- [x] **P1** Persist canonical embedded metadata. `exif_metadata_json` is
   currently never populated, and EXIF capture-date extraction only handles a
   narrow JPEG `DateTimeOriginal` path rather than the supported format stack.
-- [ ] **P1** Make changed or failed analyses explicit. The analysis processor
+- [x] **P1** Make changed or failed analyses explicit. The analysis processor
   only persists successful analyses; it does not create/update `queued`,
   `running`, `failed`, or `completed_with_errors` analysis records with
   categorized errors.
-- [ ] **P1** Validate collection-root rules before accepting a collection.
+- [x] **P1** Validate collection-root rules before accepting a collection.
   Overlapping roots are not rejected/reported, and collection lifecycle
   behavior does not expose a complete enabled/disabled/prune workflow.
 
@@ -48,15 +48,15 @@ are complete.
   pipeline's model root, provider, detector settings, or checksums into the
   worker environment/configuration. The worker primarily reads environment
   variables and defaults.
-- [ ] **P1** Validate the analyzed file against the persisted asset identity.
+- [x] **P1** Validate the analyzed file against the persisted asset identity.
   The worker hashes the path at request time, but the analysis processor does
   not pass the asset's stored SHA-256 to the client or reject a result whose
   content differs from the scanned asset.
-- [ ] **P1** Add complete protocol validation for finite numeric values,
+- [x] **P1** Add complete protocol validation for finite numeric values,
   coordinate bounds, source dimensions, deterministic face ordering, and
   normalized embedding state. Current validation checks embedding length and
   basic box ordering but not all requirements in Section 6.4.
-- [ ] **P1** Implement per-item failure persistence and bounded item retries.
+- [x] **P1** Implement per-item failure persistence and bounded item retries.
   A worker/analysis error currently aborts the handler; the affected
   `job_item` is not reliably marked failed with its categorized error and the
   remaining assets are not guaranteed to continue.
@@ -74,26 +74,26 @@ are complete.
   similarity threshold, candidate scope, and exact/ANN selection. The worker
   always queues clustering with `scope: all`, and `clustering.DefaultConfig()`
   supplies fixed values.
-- [ ] **P1** Make the configured grouping policy effective in the production
+- [x] **P1** Make the configured grouping policy effective in the production
   worker path. CLI `cluster run` accepts settings indirectly, but the normal
   scan → analysis → recognition → clustering job chain does not expose or
   persist per-run configuration from application settings.
-- [ ] **P1** Restrict recognition references to compatible pipelines and record
+- [x] **P1** Restrict recognition references to compatible pipelines and record
   the reference pipeline compatibility decision. `loadReferences` reads all
   current references without joining through compatible analysis pipelines.
-- [ ] **P1** Implement targeted reference-change reprocessing. The current
+- [x] **P1** Implement targeted reference-change reprocessing. The current
   `reference-reprocess` handler reruns recognition and clustering globally,
   rather than limiting work to faces considering the affected person and
   clusters affected by those faces.
-- [ ] **P1** Preserve complete evidence for reprocessing and recommendations.
+- [x] **P1** Preserve complete evidence for reprocessing and recommendations.
   Recognition candidates are persisted, but clustering-created assignments and
   recommendation refreshes do not consistently preserve the complete current
   candidate/run snapshot needed to distinguish old and new results.
-- [ ] **P1** Implement a durable recommendation decision workflow. The schema
+- [x] **P1** Implement a durable recommendation decision workflow. The schema
   stores recommendation rows, but `SetReference` does not link a selection to
   a recommendation ID, and there is no explicit approval/rejection/promotion
   state and timestamp for each recommendation as required by Section 10.6.
-- [ ] **P1** Add person-state mutation support for `dont_track`. The database
+- [x] **P1** Add person-state mutation support for `dont_track`. The database
   has `person_state_events` and a `people.dont_track` field, but there is no
   corresponding service/CLI/web operation to set or clear a person's state.
 
@@ -114,11 +114,11 @@ are complete.
 - [ ] **P1** Add reference/recommendation views to the web flow, including up
   to 20 recommendations per person, approval/rejection, current references,
   and the evidence used for each recommendation.
-- [ ] **P1** Implement singleton virtual review groups and their explicit
+- [x] **P1** Implement singleton virtual review groups and their explicit
   confirmation requirement in the web UI. The data model can represent
   singleton clusters, but no corresponding virtual review experience is
   present.
-- [ ] **P1** Make cluster review authorization and historical-run behavior
+- [x] **P1** Make cluster review authorization and historical-run behavior
   complete in the UI. Old-run warnings exist, but the page still exposes raw
   IDs and does not provide the full read-only/exception-save semantics in the
   specification.
@@ -133,18 +133,18 @@ are complete.
   does not enable provisional results by default. It also does not implement
   the specified default exclusion of assigned-system and assigned-user results
   in review mode.
-- [ ] **P1** Add explicit assignment-state filters to CLI and web search,
+- [x] **P1** Add explicit assignment-state filters to CLI and web search,
   including assigned-system, assigned-user, unassigned, provisional,
   unknown, ambiguous, confirmed-only, and not-confirmed-only behavior.
 - [ ] **P1** Scope all person/candidate choices and metadata to accessible
   collections. The person detail page loads the global people list and
   candidate names, which can reveal people outside the account's permitted
   collections.
-- [ ] **P1** Complete web account and collection administration. The current
+- [x] **P1** Complete web account and collection administration. The current
   admin pages are read-only and direct users to the CLI; the specification
   requires in-scope account authorization, collection access management, and
   collection-manager account creation with restricted permissions.
-- [ ] **P1** Add web operations for account creation, password reset,
+- [x] **P1** Add web operations for account creation, password reset,
   disable/enable, collection permissions, and audit retention, with role and
   CSRF enforcement.
 
@@ -154,21 +154,21 @@ are complete.
   recognition/clustering progress reporting. Recognition and clustering jobs
   are enqueued, but their per-item work is not represented in `job_items`, so
   job status cannot accurately report their progress or current item.
-- [ ] **P1** Make cancellation effective for all handlers. The runner cancels
+- [x] **P1** Make cancellation effective for all handlers. The runner cancels
   the context, but grouping and some database loops are not context-aware and
   may continue until completion before the runner returns.
-- [ ] **P1** Add worker lifecycle controls. The CLI starts a worker in the
+- [x] **P1** Add worker lifecycle controls. The CLI starts a worker in the
   foreground but has no persistent worker stop/status or process-management
   operation, despite the worker lifecycle and recovery requirements.
-- [ ] **P1** Complete metadata export. `export metadata` omits analyses, faces,
+- [x] **P1** Complete metadata export. `export metadata` omits analyses, faces,
   embeddings, pipelines, assignment/reference/recommendation histories,
   scan/job history, accounts/permissions, audit events, and other records
   needed for a complete derived-data export.
-- [ ] **P1** Make derived-data purge auditable and complete. Purge deletes
+- [x] **P1** Make derived-data purge auditable and complete. Purge deletes
   assignment and review history as well as derived projections, without an
   export/backup confirmation record or an explicit choice between current
   projections and immutable history.
-- [ ] **P1** Add restore safety checks: refuse restore while another process is
+- [x] **P1** Add restore safety checks: refuse restore while another process is
   using the database, validate the backup schema/version, use an atomic
   replacement strategy, and verify the restored database before success.
 - [ ] **P2** Ensure all mutating CLI operations consistently record actor
