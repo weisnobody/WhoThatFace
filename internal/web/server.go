@@ -186,7 +186,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		(SELECT COUNT(DISTINCT ca.face_id) FROM current_face_assignments ca
 		 JOIN faces f ON f.id = ca.face_id JOIN analyses a ON a.id = f.analysis_id
 		 JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths ppc ON ppc.asset_id = pa.id
-		 WHERE ca.person_id = p.id AND ppc.missing_at IS NULL)`
+		 WHERE ca.person_id = p.id AND ppc.missing_at IS NULL) FROM people p`
 	var args []any
 	if allowed != nil {
 		if len(allowed) == 0 {
@@ -203,7 +203,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		for _, id := range allowed {
 			args = append(args, id)
 		}
-		peopleQuery += ` WHERE EXISTS (SELECT 1 FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN current_face_assignments ca ON ca.face_id = f.id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE ca.person_id = p.id AND pp.collection_id IN (` + strings.Join(placeholders, ",") + `)`
+		peopleQuery += ` WHERE EXISTS (SELECT 1 FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN current_face_assignments ca ON ca.face_id = f.id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE ca.person_id = p.id AND pp.collection_id IN (` + strings.Join(placeholders, ",") + `))`
 	}
 	peopleQuery += ` ORDER BY name, id`
 	rows, err := s.db.QueryContext(r.Context(), peopleQuery, args...)
