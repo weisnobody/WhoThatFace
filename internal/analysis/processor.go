@@ -72,9 +72,9 @@ func (p Processor) processCollection(ctx context.Context, collectionID string, p
 		return err
 	}
 	for _, asset := range assets {
-		var analysisExists int
-		err := p.db.QueryRowContext(ctx, `SELECT 1 FROM analyses WHERE asset_id = ? AND pipeline_id = ? LIMIT 1`, asset.assetID, p.pipelineID).Scan(&analysisExists)
-		if err == nil {
+		var analysisStatus string
+		err := p.db.QueryRowContext(ctx, `SELECT status FROM analyses WHERE asset_id = ? AND pipeline_id = ? LIMIT 1`, asset.assetID, p.pipelineID).Scan(&analysisStatus)
+		if err == nil && analysisStatus == "completed" {
 			if progress != nil {
 				if progressErr := progress(asset.assetID); progressErr != nil {
 					return progressErr
@@ -83,10 +83,16 @@ func (p Processor) processCollection(ctx context.Context, collectionID string, p
 			continue
 		}
 		if err != sql.ErrNoRows {
+			if err != nil && analysisStatus == "" {
+				return err
+			}
+		}
+		if err := p.store.MarkRunning(ctx, asset.assetID, p.pipelineID); err != nil {
 			return err
 		}
 		response, err := p.analyzer.Analyze(ctx, filepath.Join(asset.root, filepath.FromSlash(asset.relative)), p.pipelineID, p.maxPixels)
 		if err != nil {
+			_ = p.store.RecordFailure(ctx, asset.assetID, p.pipelineID, "analysis_failed", err.Error())
 			return fmt.Errorf("analyze %s: %w", asset.relative, err)
 		}
 		analysisID, err := p.store.Persist(ctx, asset.assetID, p.pipelineID, response)

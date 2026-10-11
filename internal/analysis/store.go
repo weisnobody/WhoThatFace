@@ -33,6 +33,37 @@ type Store struct{ db *sql.DB }
 
 func NewStore(database *sql.DB) Store { return Store{db: database} }
 
+// MarkRunning creates or updates the durable analysis state before work is
+// sent to the worker. A later retry reuses this row rather than creating a
+// second analysis for the same asset and pipeline.
+func (s Store) MarkRunning(ctx context.Context, assetID, pipelineID string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	analysisID, err := id.NewUUIDv7()
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO analyses (id, asset_id, pipeline_id, status, started_at, created_at)
+		VALUES (?, ?, ?, 'running', ?, ?)
+		ON CONFLICT(asset_id, pipeline_id) DO UPDATE SET status = 'running', error_code = NULL, error_message = NULL, started_at = excluded.started_at, completed_at = NULL`,
+		analysisID, assetID, pipelineID, now, now)
+	return err
+}
+
+func (s Store) RecordFailure(ctx context.Context, assetID, pipelineID, code, message string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	analysisID, err := id.NewUUIDv7()
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO analyses (id, asset_id, pipeline_id, status, error_code, error_message, completed_at, created_at)
+		VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)
+		ON CONFLICT(asset_id, pipeline_id) DO UPDATE SET status = 'failed', error_code = excluded.error_code, error_message = excluded.error_message, completed_at = excluded.completed_at`,
+		analysisID, assetID, pipelineID, code, message, now, now)
+	return err
+}
+
 // RegisterPipeline returns a deterministic ID derived from the complete
 // serialized pipeline configuration.
 func (s Store) RegisterPipeline(ctx context.Context, pipeline Pipeline) (string, error) {
@@ -73,8 +104,13 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 	if response.Model != nil && response.Model.PipelineID != "" && response.Model.PipelineID != pipelineID {
 		return "", fmt.Errorf("worker pipeline %q does not match requested pipeline %q", response.Model.PipelineID, pipelineID)
 	}
-	analysisID, err := id.NewUUIDv7()
-	if err != nil {
+	var analysisID string
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM analyses WHERE asset_id = ? AND pipeline_id = ?`, assetID, pipelineID).Scan(&analysisID); err == sql.ErrNoRows {
+		analysisID, err = id.NewUUIDv7()
+		if err != nil {
+			return "", err
+		}
+	} else if err != nil {
 		return "", err
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -88,11 +124,16 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 		width, height = response.Image.Width, response.Image.Height
 		inferenceWidth, inferenceHeight = response.Image.InferenceWidth, response.Image.InferenceHeight
 	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM faces WHERE analysis_id = ?`, analysisID)
+	if err != nil {
+		return "", err
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO analyses (
 			id, asset_id, pipeline_id, status, source_width, source_height,
 			inference_width, inference_height, completed_at, created_at
-		) VALUES (?, ?, ?, 'completed', NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, 0), ?, ?)`,
+		) VALUES (?, ?, ?, 'completed', NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, 0), NULLIF(?, 0), ?, ?)
+		ON CONFLICT(asset_id, pipeline_id) DO UPDATE SET status = 'completed', source_width = excluded.source_width, source_height = excluded.source_height, inference_width = excluded.inference_width, inference_height = excluded.inference_height, error_code = NULL, error_message = NULL, completed_at = excluded.completed_at`,
 		analysisID, assetID, pipelineID, width, height, inferenceWidth, inferenceHeight, now, now)
 	if err != nil {
 		return "", fmt.Errorf("persist analysis: %w", err)

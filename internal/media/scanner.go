@@ -59,6 +59,7 @@ type FileRecord struct {
 	FilesystemModifiedAt time.Time
 	CaptureDate          CaptureDate
 	EXIFCaptureDate      time.Time
+	EXIFMetadataJSON     string
 	Width                int
 	Height               int
 	Error                string
@@ -201,6 +202,15 @@ func (s Scanner) inspect(root, path string, entry fs.DirEntry) (FileRecord, erro
 		return FileRecord{}, err
 	}
 	record.ContentSHA256 = hash
+	after, err := os.Stat(path)
+	if err != nil {
+		return FileRecord{}, fmt.Errorf("re-stat %q after hashing: %w", path, err)
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		record.Status = StatusUnstable
+		record.Error = "file changed while hashing; scan will retry"
+		return record, nil
+	}
 	if record.MediaKind != MediaStill {
 		still, stillErr := referenceStillBytes(path)
 		if stillErr != nil {
@@ -219,6 +229,18 @@ func (s Scanner) inspect(root, path string, entry fs.DirEntry) (FileRecord, erro
 	if exifDate, exifErr := extractEXIFCaptureDate(path); exifErr == nil {
 		record.EXIFCaptureDate = exifDate
 	}
+	metadata, _ := json.Marshal(map[string]any{
+		"format":       strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), "."),
+		"capture_date": formatTime(record.EXIFCaptureDate),
+		"capture_date_source": func() string {
+			if record.EXIFCaptureDate.IsZero() {
+				return ""
+			}
+			return "DateTimeOriginal"
+		}(),
+		"orientation_applied": true,
+	})
+	record.EXIFMetadataJSON = string(metadata)
 	if dimensions, decodeErr := decodeDimensions(path); decodeErr == nil && record.MediaKind == MediaStill {
 		record.Width = dimensions.width
 		record.Height = dimensions.height
