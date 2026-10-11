@@ -28,7 +28,13 @@ type Server struct {
 func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
 	page := template.Must(template.New("page").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>{{.Title}}</title>
-<style>body{font-family:system-ui,sans-serif;max-width:70rem;margin:2rem auto;padding:0 1rem}nav{display:flex;justify-content:space-between}table{border-collapse:collapse}td,th{padding:.4rem;border:1px solid #ccc}input,button{padding:.4rem;margin:.2rem 0}.error{color:#a00}</style>{{with .PageStyle}}<style>{{.}}</style>{{end}}</head>
+<style>
+ body{font-family:system-ui,sans-serif;
+ max-width:70rem;margin:2rem auto;
+ padding:0 1rem}nav{display:flex;
+ justify-content:space-between}table{border-collapse:collapse}td,th{padding:.4rem;
+ border:1px solid #ccc}input,button{padding:.4rem;
+ margin:.2rem 0}.error{color:#a00}</style>{{with .PageStyle}}<style>{{.}}</style>{{end}}</head>
 <body><nav><a href="/">Face-Me-Bro</a>{{if .Account}}<span>{{.Account.Username}} ({{.Account.Role}}) <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
 	return &Server{auth: authStore, db: database, templates: page}, nil
 }
@@ -352,7 +358,56 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body := strings.Builder{}
-	pageStyle := `.person-header{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.grid{display:flex;flex-wrap:wrap;gap:18px}.card{width:min(420px,45vw);border:1px solid #ccc;padding:10px}.viewer{position:relative;display:inline-block;max-width:100%}.viewer img{max-width:100%;max-height:55vh}.box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15);pointer-events:none}.box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.path{margin-top:8px;overflow-wrap:anywhere}.actions{display:flex;justify-content:space-between;margin-top:8px}.person-status{margin-top:8px;padding:6px;background:#f6f6f6;border-radius:3px}.person-status strong{font-weight:600}.person-scores{margin-top:8px;font-size:.9rem}.person-scores table{width:100%;border-collapse:collapse}.person-scores th,.person-scores td{padding:3px 4px;text-align:left;border-bottom:1px solid #eee}.person-scores .current{font-weight:600;background:#fff8d6}.person-assignment{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.person-assignment select{min-width:0;flex:1}.person-empty{margin-top:1rem}`
+	pageStyle := template.CSS(`.person-header{
+  position:sticky;
+  top:0;z-index:10;
+  background:#fff;
+  padding:10px 0;
+  border-bottom:1px solid #ccc}
+.grid{
+  display:flex;
+  flex-wrap:wrap;
+  gap:18px}
+.card{
+  width:min(420px,45vw);
+  border:1px solid #ccc;
+  padding:10px}
+.viewer{
+  position:relative;
+  display:inline-block;
+  max-width:100%}
+.viewer img{
+  max-width:100%;
+  max-height:55vh}
+.box{
+  position:absolute;
+  border:2px solid #f00;
+  background:rgba(204,0,0,.15);
+  pointer-events:none}
+.box.reference{
+  border-color:#0a2;
+  background:rgba(0,170,34,.15)}
+.path{
+  margin-top:8px;
+  overflow-wrap:anywhere}
+.actions{
+  display:flex;
+  justify-content:
+  space-between;
+  margin-top:8px}
+.person-status{
+  margin-top:8px;
+  padding:6px;
+  background:#f6f6f6;
+  border-radius:3px}
+.person-status strong{font-weight:600}
+.person-scores{margin-top:8px;font-size:.9rem}
+.person-scores table{width:100%;border-collapse:collapse}
+.person-scores th,.person-scores td{padding:3px 4px;text-align:left;border-bottom:1px solid #eee}
+.person-scores .current{font-weight:600;background:#fff8d6}
+.person-assignment{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.person-assignment select{min-width:0;flex:1}
+.person-empty{margin-top:1rem}`)
 	peopleRows, peopleErr := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8), id) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8), id)), id`)
 	if peopleErr != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)

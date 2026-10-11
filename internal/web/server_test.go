@@ -137,4 +137,9 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())
 		}
 	}
+	headEnd := strings.Index(response.Body.String(), "</head>")
+	gridStyle := strings.Index(response.Body.String(), ".grid{")
+	if headEnd < 0 || gridStyle < 0 || gridStyle > headEnd {
+		t.Fatalf("person photo styles were not rendered in the document head: %s", response.Body.String())
+	}
 }
