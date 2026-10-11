@@ -32,14 +32,14 @@ func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
 <html lang="en"><head><meta charset="utf-8"><title>{{.Title}}</title>
 <style>
  body { font: 14px system-ui; margin: 20px; color: #222 }
- .page-header { position: sticky; top: 0; z-index: 10; background: #fff; padding: 10px 0; border-bottom: 1px solid #ccc }
+ .page-header { position: sticky; top: 0; z-index: 10; background: #fff; padding: 2px 0}
  nav{display:flex;justify-content:space-between}
  table{border-collapse:collapse}
  td,th{padding:.4rem;border:1px solid #ccc}
  input,button{padding:.4rem;margin:.2rem 0}
  .error{color:#a00}
 </style>{{with .PageStyle}}<style>{{.}}</style>{{end}}</head>
-<body><nav><a href="/">Face-Me-Bro</a>{{if .Account}}<span>{{.Account.Username}} ({{.Account.Role}}) <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
+<body><nav><a href="/">Face-Me-Bro</a>{{if .Account}}<span>{{.Account.Username}} <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
 	return &Server{auth: authStore, db: database, templates: page}, nil
 }
 
@@ -288,13 +288,20 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		Similarity, Margin       float64
 		Support                  int
 	}
+	type personCluster struct {
+		ID, PersonName     string
+		Quality, Detection float64
+	}
 	type personFace struct {
 		FaceID, PathID, RelativePath string
 		Width, Height                int
 		Left, Top, Right, Bottom     float64
 		Quality, Detection           float64
+		Confidence                   float64
 		State, PersonID              string
 		Reference                    bool
+		Recommended                  bool
+		Cluster                      *personCluster
 		Candidates                   []personCandidate
 	}
 	var faces []personFace
@@ -351,6 +358,31 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				face.Candidates = append([]personCandidate{candidate}, face.Candidates[:min(4, len(face.Candidates))]...)
 			}
 		}
+		for _, candidate := range face.Candidates {
+			if candidate.PersonID == face.PersonID {
+				face.Confidence = candidate.Similarity
+				break
+			}
+		}
+		var recommendation int
+		if err := s.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM reference_recommendations WHERE face_id = ? AND person_id = ? AND is_current = 1)`, face.FaceID, personID).Scan(&recommendation); err == nil {
+			face.Recommended = recommendation == 1
+		}
+		var cluster personCluster
+		if err := s.db.QueryRowContext(r.Context(), `
+			SELECT c.id, COALESCE(NULLIF(p.name, ''), CASE WHEN c.proposed_person_id IS NULL THEN 'Unknown' ELSE substr(c.proposed_person_id, -8) END),
+			       COALESCE(AVG(f2.quality), 0), COALESCE(AVG(f2.detection_confidence), 0)
+			FROM cluster_memberships cm
+			JOIN clusters c ON c.id = cm.cluster_id
+			JOIN clustering_runs cr ON cr.id = c.clustering_run_id AND cr.status = 'active'
+			LEFT JOIN people p ON p.id = c.proposed_person_id
+			JOIN cluster_memberships cm2 ON cm2.cluster_id = c.id
+			JOIN faces f2 ON f2.id = cm2.face_id
+			WHERE cm.face_id = ?
+			GROUP BY c.id, p.name, c.proposed_person_id
+			ORDER BY c.id LIMIT 1`, face.FaceID).Scan(&cluster.ID, &cluster.PersonName, &cluster.Quality, &cluster.Detection); err == nil {
+			face.Cluster = &cluster
+		}
 		if face.Reference {
 			referenceCount++
 		}
@@ -359,6 +391,39 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	if err := rows.Err(); err != nil {
 		http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 		return
+	}
+	maxConfidence, minConfidence := 0.0, 1.0
+	hasConfidence := false
+	clusterSummary := make(map[string][]string)
+	clusterSummaryOrder := make([]string, 0)
+	for _, face := range faces {
+		if face.Confidence > 0 {
+			if !hasConfidence || face.Confidence > maxConfidence {
+				maxConfidence = face.Confidence
+			}
+			if !hasConfidence || face.Confidence < minConfidence {
+				minConfidence = face.Confidence
+			}
+			hasConfidence = true
+		}
+		if face.Cluster != nil {
+			if _, exists := clusterSummary[face.Cluster.PersonName]; !exists {
+				clusterSummaryOrder = append(clusterSummaryOrder, face.Cluster.PersonName)
+			}
+			seen := false
+			for _, clusterID := range clusterSummary[face.Cluster.PersonName] {
+				if clusterID == face.Cluster.ID {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				clusterSummary[face.Cluster.PersonName] = append(clusterSummary[face.Cluster.PersonName], face.Cluster.ID)
+			}
+		}
+	}
+	if !hasConfidence {
+		minConfidence = 0
 	}
 
 	body := strings.Builder{}
@@ -411,7 +476,14 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 .person-scores .current{font-weight:600;background:#fff8d6}
 .person-assignment{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .person-assignment select{min-width:0;flex:1}
-.person-empty{margin-top:1rem}`)
+.person-empty{margin-top:1rem}
+.person-summary{font-size:.8em;font-weight:normal}
+.person-metadata{font-size:13.3333px;line-height:1.35}
+.person-candidates{font-size:13.3333px;line-height:1.35}
+.person-actions{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
+.person-dispositions{display:flex;gap:20px}
+.person-assignment{display:flex;justify-content:flex-end;gap:6px;margin-top:8px}
+.person-assignment select{min-width:12rem}`)
 	peopleRows, peopleErr := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8), id) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8), id)), id`)
 	if peopleErr != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
@@ -430,7 +502,25 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	peopleRows.Close()
 
-	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><h1>` + template.HTMLEscapeString(personName) + ` (` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references)</h1></div>`)
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Max: ` + formatScore(maxConfidence) + `%, Min: ` + formatScore(minConfidence) + `%)</span></h1>`)
+	if len(clusterSummaryOrder) > 0 {
+		body.WriteString(`<div>Clusters: `)
+		for index, clusterPerson := range clusterSummaryOrder {
+			if index > 0 {
+				body.WriteString(`, `)
+			}
+			body.WriteString(template.HTMLEscapeString(clusterPerson) + ` (`)
+			for clusterIndex, clusterID := range clusterSummary[clusterPerson] {
+				if clusterIndex > 0 {
+					body.WriteString(`, `)
+				}
+				body.WriteString(template.HTMLEscapeString(idSuffix(clusterID)))
+			}
+			body.WriteString(`)`)
+		}
+		body.WriteString(`</div>`)
+	}
+	body.WriteString(`</div>`)
 	body.WriteString(`<div id="photos" class="grid">`)
 	canModify := account.Role != auth.Viewer
 	for _, face := range faces {
@@ -438,28 +528,41 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		if face.Reference {
 			boxClass += " reference"
 		}
-		body.WriteString(`<article class="card" id="face-` + template.HTMLEscapeString(face.FaceID) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(face.FaceID) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path">` + template.HTMLEscapeString(face.RelativePath) + `</div>`)
-		if canModify {
-			body.WriteString(`<div class="actions"><button type="button" data-action="remove" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Remove assignment</button>`)
-			if face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser) {
-				body.WriteString(`<button type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-reference="` + fmt.Sprint(face.Reference) + `">Make ` + map[bool]string{true: "evaluation", false: "reference"}[face.Reference] + `</button>`)
+		body.WriteString(`<article class="card" id="face-` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path">` + template.HTMLEscapeString(face.RelativePath) + `</div>`)
+		body.WriteString(`<div class="person-metadata"><strong>Assignment:</strong> ` + template.HTMLEscapeString(face.State) + `; <strong>Confidence:</strong> ` + formatScore(face.Confidence) + `%; <strong>Face quality:</strong> ` + formatScore(face.Quality) + `%; <strong>Detection:</strong> ` + formatScore(face.Detection) + `%`)
+		if face.Recommended {
+			body.WriteString(`; <strong>Ref Rec</strong>`)
+		}
+		body.WriteString(`</div>`)
+		otherCandidates := make([]personCandidate, 0, len(face.Candidates))
+		for _, candidate := range face.Candidates {
+			if candidate.PersonID != face.PersonID && candidate.Similarity > 0.15 {
+				otherCandidates = append(otherCandidates, candidate)
+			}
+		}
+		if len(otherCandidates) > 1 {
+			body.WriteString(`<div class="person-candidates">Other candidates: `)
+			for index, candidate := range otherCandidates {
+				if index > 0 {
+					body.WriteString(`, `)
+				}
+				body.WriteString(template.HTMLEscapeString(candidate.Name) + ` (` + formatScore(candidate.Similarity) + `%)`)
 			}
 			body.WriteString(`</div>`)
 		}
-		body.WriteString(`<div class="person-status"><strong>Assignment:</strong> ` + template.HTMLEscapeString(face.State) + `; <strong>Face quality:</strong> ` + fmt.Sprintf("%.3f", face.Quality) + `; <strong>Detection:</strong> ` + fmt.Sprintf("%.3f", face.Detection) + `</div>`)
-		if len(face.Candidates) > 0 {
-			body.WriteString(`<div class="person-scores"><strong>Model candidates</strong><table><tr><th>Person</th><th>Similarity</th><th>Margin</th><th>Support</th><th>Evidence</th></tr>`)
-			for _, candidate := range face.Candidates {
-				class := ""
-				if candidate.PersonID == face.PersonID {
-					class = ` class="current"`
-				}
-				body.WriteString(`<tr` + class + `><td>` + template.HTMLEscapeString(candidate.Name) + `</td><td>` + fmt.Sprintf("%.3f", candidate.Similarity) + `</td><td>` + fmt.Sprintf("%.3f", candidate.Margin) + `</td><td>` + fmt.Sprint(candidate.Support) + `</td><td>` + template.HTMLEscapeString(candidate.Evidence) + `</td></tr>`)
-			}
-			body.WriteString(`</table></div>`)
+		if face.Cluster != nil {
+			body.WriteString(`<div class="person-metadata">Cluster: ` + template.HTMLEscapeString(idSuffix(face.Cluster.ID)) + `: ` + template.HTMLEscapeString(face.Cluster.PersonName) + ` (Quality: ` + formatScore(face.Cluster.Quality) + `%, Detection: ` + formatScore(face.Cluster.Detection) + `%)</div>`)
 		}
 		if canModify {
-			body.WriteString(`<div class="person-assignment"><select data-assignment-person="` + template.HTMLEscapeString(face.FaceID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+			body.WriteString(`<div class="actions"><div class="person-dispositions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Ambiguous</button></div>`)
+			if face.Reference || (face.Recommended && (face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser))) {
+				label := "Reference"
+				if face.Reference {
+					label = "Evaluation"
+				}
+				body.WriteString(`<button type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-reference="` + fmt.Sprint(face.Reference) + `">` + label + `</button>`)
+			}
+			body.WriteString(`</div><div class="person-assignment"><select data-assignment-person="` + template.HTMLEscapeString(face.FaceID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
 			for _, option := range people {
 				selected := ""
 				if option.ID == face.PersonID {
@@ -467,7 +570,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				}
 				body.WriteString(`<option value="` + template.HTMLEscapeString(option.ID) + `"` + selected + `>` + template.HTMLEscapeString(option.Name) + `</option>`)
 			}
-			body.WriteString(`</select><select data-assignment-state="` + template.HTMLEscapeString(face.FaceID) + `"><option value="assigned-user"` + selectedAttr(face.State, string(review.AssignedUser)) + `>Assigned user</option><option value="assigned-system"` + selectedAttr(face.State, string(review.AssignedSystem)) + `>Assigned system</option><option value="provisional"` + selectedAttr(face.State, string(review.Provisional)) + `>Provisional</option><option value="unknown"` + selectedAttr(face.State, string(review.Unknown)) + `>Unknown</option><option value="ambiguous"` + selectedAttr(face.State, string(review.Ambiguous)) + `>Ambiguous</option></select><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Save assignment</button></div>`)
+			body.WriteString(`</select><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Save</button></div>`)
 		}
 		body.WriteString(`</article>`)
 	}
@@ -496,21 +599,18 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
     if (!response.ok) { alert(await response.text()); return; }
     location.reload();
   }
-  document.querySelectorAll('[data-action="remove"]').forEach((button) => {
+  document.querySelectorAll('[data-action="unknown"], [data-action="ambiguous"]').forEach((button) => {
     button.onclick = () => send(button.dataset.faceId,
       '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment',
-      {person_id: '', state: 'unassigned'});
+      {person_id: '', state: button.dataset.action});
   });
   document.querySelectorAll('[data-action="assign"]').forEach((button) => {
     button.onclick = () => {
       const faceID = button.dataset.faceId;
       const person = document.querySelector('[data-assignment-person="' + CSS.escape(faceID) + '"]').value;
-      let state = document.querySelector('[data-assignment-state="' + CSS.escape(faceID) + '"]').value;
-      const payload = {person_id: person, state: state};
+      const payload = {person_id: person, state: 'assigned-user'};
       if (person === '__ambiguous__') { payload.person_id = ''; payload.state = 'ambiguous'; }
-      if (!person && (state === 'assigned-user' || state === 'assigned-system' || state === 'provisional')) {
-        state = 'unknown'; payload.state = state;
-      }
+      if (!person) { payload.state = 'unknown'; }
       send(faceID, '/api/faces/' + encodeURIComponent(faceID) + '/assignment', payload);
     };
   });
@@ -677,6 +777,23 @@ func selectedAttr(value, expected string) string {
 		return ` selected`
 	}
 	return ""
+}
+
+func formatScore(value float64) string {
+	if value >= 1 {
+		return "100"
+	}
+	if value <= 0 {
+		return "0.0"
+	}
+	return fmt.Sprintf("%.1f", value*100)
+}
+
+func idSuffix(value string) string {
+	if len(value) <= 8 {
+		return value
+	}
+	return value[len(value)-8:]
 }
 
 func min(a, b int) int {
