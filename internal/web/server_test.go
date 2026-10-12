@@ -383,7 +383,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("CSP does not allow the page styles: %s", policy)
 	}
-	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card\"", "class=\"grid\"", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:"} {
+	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card\"", "class=\"grid\"", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:", "All non-assigned", "id=\"page-assignment-state\"", `value="person-1" selected`} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())
 		}
@@ -395,6 +395,37 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	gridStyle := strings.Index(response.Body.String(), ".grid{")
 	if headEnd < 0 || gridStyle < 0 || gridStyle > headEnd {
 		t.Fatalf("person photo styles were not rendered in the document head: %s", response.Body.String())
+	}
+	renameRequest := httptest.NewRequest(http.MethodPost, "/api/people/person-1", strings.NewReader(`{"name":"Renamed Person"}`))
+	renameRequest.Header.Set("Content-Type", "application/json")
+	renameRequest.Header.Set("X-CSRF-Token", "csrf-token")
+	renameRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	renameRequest.AddCookie(&http.Cookie{Name: "csrf", Value: "csrf-token"})
+	renameResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(renameResponse, renameRequest)
+	if renameResponse.Code != http.StatusOK {
+		t.Fatalf("rename status = %d, body = %s", renameResponse.Code, renameResponse.Body.String())
+	}
+	var renamed string
+	if err := database.QueryRowContext(ctx, `SELECT name FROM people WHERE id = 'person-1'`).Scan(&renamed); err != nil || renamed != "Renamed Person" {
+		t.Fatalf("renamed person = %q, err = %v", renamed, err)
+	}
+	var renameAuditCount int
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_events WHERE action = 'person-rename' AND entity_id = 'person-1'`).Scan(&renameAuditCount); err != nil || renameAuditCount != 1 {
+		t.Fatalf("rename audit count = %d, err = %v", renameAuditCount, err)
+	}
+	recommendRequest := httptest.NewRequest(http.MethodPost, "/api/people/person-1/reference-reprocess", nil)
+	recommendRequest.Header.Set("X-CSRF-Token", "csrf-token")
+	recommendRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	recommendRequest.AddCookie(&http.Cookie{Name: "csrf", Value: "csrf-token"})
+	recommendResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recommendResponse, recommendRequest)
+	if recommendResponse.Code != http.StatusAccepted {
+		t.Fatalf("recommendation status = %d, body = %s", recommendResponse.Code, recommendResponse.Body.String())
+	}
+	var recommendationKind, recommendationPayload string
+	if err := database.QueryRowContext(ctx, `SELECT kind, payload_json FROM jobs WHERE kind = 'reference-reprocess' ORDER BY created_at DESC LIMIT 1`).Scan(&recommendationKind, &recommendationPayload); err != nil || recommendationKind != "reference-reprocess" || !strings.Contains(recommendationPayload, "person-1") {
+		t.Fatalf("recommendation job = %q %q, err = %v", recommendationKind, recommendationPayload, err)
 	}
 	photoRequest := httptest.NewRequest(http.MethodGet, "/review/photos?path_id=path-1", nil)
 	photoRequest.AddCookie(&http.Cookie{Name: "session", Value: token})

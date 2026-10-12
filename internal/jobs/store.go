@@ -33,6 +33,7 @@ type Job struct {
 	Progress    json.RawMessage `json:"progress,omitempty"`
 	ErrorCode   string          `json:"error_code,omitempty"`
 	Error       string          `json:"error,omitempty"`
+	Summary     json.RawMessage `json:"summary,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
@@ -76,13 +77,13 @@ func (s Store) Enqueue(ctx context.Context, kind string, priority int, payload a
 
 func (s Store) Get(ctx context.Context, jobID string) (Job, error) {
 	var job Job
-	var payload, progress, errorCode, errorMessage, started, completed sql.NullString
+	var payload, progress, summary, errorCode, errorMessage, started, completed sql.NullString
 	var created string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, kind, priority, status, payload_json, progress_json,
+		SELECT id, kind, priority, status, payload_json, progress_json, summary_json,
 		       error_code, error_message, attempts, max_attempts, created_at, started_at, completed_at
 		FROM jobs WHERE id = ?`, jobID).Scan(
-		&job.ID, &job.Kind, &job.Priority, &job.Status, &payload, &progress,
+		&job.ID, &job.Kind, &job.Priority, &job.Status, &payload, &progress, &summary,
 		&errorCode, &errorMessage, &job.Attempts, &job.MaxAttempts, &created, &started, &completed)
 	if err != nil {
 		return Job{}, err
@@ -93,6 +94,9 @@ func (s Store) Get(ctx context.Context, jobID string) (Job, error) {
 	if progress.Valid {
 		job.Progress = json.RawMessage(progress.String)
 	}
+	if summary.Valid {
+		job.Summary = json.RawMessage(summary.String)
+	}
 	if job.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
 		return Job{}, fmt.Errorf("parse job created_at: %w", err)
 	}
@@ -102,6 +106,107 @@ func (s Store) Get(ctx context.Context, jobID string) (Job, error) {
 	}
 	job.CompletedAt, err = parseNullableTime(completed)
 	return job, err
+}
+
+// SetSummary persists the completed (or partial, on failure) operational
+// summary for a job. Summaries are versioned by the job status output rather
+// than being interpreted by the worker protocol.
+func (s Store) SetSummary(ctx context.Context, jobID string, summary any) error {
+	data, err := json.Marshal(summary)
+	if err != nil {
+		return fmt.Errorf("marshal job summary: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE jobs SET summary_json = ? WHERE id = ?`, data, jobID)
+	return err
+}
+
+type Metrics struct {
+	Faces                    int `json:"faces"`
+	People                   int `json:"people"`
+	Clusters                 int `json:"clusters"`
+	ClusterMemberships       int `json:"cluster_memberships"`
+	RecognitionCandidates    int `json:"recognition_candidates"`
+	Assignments              int `json:"assignments"`
+	ReferenceRecommendations int `json:"reference_recommendations"`
+}
+
+// CaptureActivity summarizes audit and child-job activity attributable to a
+// job since its start time. It complements catalog-count deltas, which cannot
+// show updates to rows such as current assignments.
+func (s Store) CaptureActivity(ctx context.Context, jobID string, since time.Time) (map[string]any, error) {
+	start := since.UTC().Format(time.RFC3339Nano)
+	activity := map[string]any{}
+	queries := []struct {
+		name   string
+		query  string
+		result *int
+	}{
+		{"faces_changed", `SELECT COUNT(DISTINCT entity_id) FROM audit_events WHERE action = 'assignment' AND entity_type = 'face' AND created_at >= ?`, new(int)},
+		{"assignment_changes", `SELECT COUNT(*) FROM audit_events WHERE action = 'assignment' AND entity_type = 'face' AND created_at >= ?`, new(int)},
+		{"reference_selections", `SELECT COUNT(*) FROM audit_events WHERE action = 'reference-selection' AND entity_type = 'face' AND created_at >= ?`, new(int)},
+		{"child_jobs_created", `SELECT COUNT(*) FROM jobs WHERE id <> ? AND created_at >= ?`, new(int)},
+		{"people_affected", `SELECT COUNT(DISTINCT json_extract(new_json, '$.person_id')) FROM audit_events WHERE action = 'assignment' AND entity_type = 'face' AND created_at >= ? AND json_extract(new_json, '$.person_id') IS NOT NULL AND json_extract(new_json, '$.person_id') <> ''`, new(int)},
+	}
+	for _, item := range queries {
+		var err error
+		if item.name == "child_jobs_created" {
+			err = s.db.QueryRowContext(ctx, item.query, jobID, start).Scan(item.result)
+		} else {
+			err = s.db.QueryRowContext(ctx, item.query, start).Scan(item.result)
+		}
+		if err != nil {
+			return nil, err
+		}
+		activity[item.name] = *item.result
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT COALESCE(json_extract(new_json, '$.state'), ''), COUNT(*)
+		FROM audit_events
+		WHERE action = 'assignment' AND entity_type = 'face' AND created_at >= ?
+		GROUP BY json_extract(new_json, '$.state')`, start)
+	if err != nil {
+		return nil, err
+	}
+	byState := map[string]int{}
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		byState[state] = count
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	activity["assignment_changes_by_state"] = byState
+	return activity, nil
+}
+
+// CaptureMetrics returns inexpensive catalog counts used in job summaries.
+// It deliberately reports counts rather than exposing model-specific details
+// so every job kind receives a consistent summary.
+func (s Store) CaptureMetrics(ctx context.Context) (Metrics, error) {
+	var metrics Metrics
+	queries := []struct {
+		target *int
+		query  string
+	}{
+		{&metrics.Faces, `SELECT COUNT(*) FROM faces`},
+		{&metrics.People, `SELECT COUNT(*) FROM people`},
+		{&metrics.Clusters, `SELECT COUNT(*) FROM clusters`},
+		{&metrics.ClusterMemberships, `SELECT COUNT(*) FROM cluster_memberships`},
+		{&metrics.RecognitionCandidates, `SELECT COUNT(*) FROM recognition_candidates`},
+		{&metrics.Assignments, `SELECT COUNT(*) FROM current_face_assignments`},
+		{&metrics.ReferenceRecommendations, `SELECT COUNT(*) FROM reference_recommendations`},
+	}
+	for _, item := range queries {
+		if err := s.db.QueryRowContext(ctx, item.query).Scan(item.target); err != nil {
+			return Metrics{}, err
+		}
+	}
+	return metrics, nil
 }
 
 // RecordFailure persists one handler failure and either requeues the job or

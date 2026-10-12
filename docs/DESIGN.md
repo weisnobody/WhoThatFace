@@ -422,6 +422,43 @@ the face-to-face threshold applies when constructing grouping graph edges.
 Grouping uses a k-nearest-neighbor graph with mutual-nearest-neighbor edges in
 the initial implementation. Connected components form the provisional groups.
 
+### Subset clustering and active-run invalidation
+
+The MVP currently permits only complete clustering runs over the full eligible
+face set. The CLI, worker, and reference-reprocessing paths must use
+`candidate_scope = all`; subset and unresolved-only runs are rejected until
+the partial-run design is implemented.
+
+Full runs include user-confirmed and reference faces as fixed identity anchors.
+Their assignments are never changed by clustering, but their person IDs are
+available when proposing identities for neighboring unconfirmed faces.
+
+This restriction is intentional. The earlier implementation allowed a
+reference change to run clustering on only the affected faces and then mark
+that subset run as active. Activating a subset run superseded the previous
+full run, making clusters for unrelated people appear to disappear from the
+active review pages. It also excluded user-confirmed faces from the subset,
+so the remaining faces lost the confirmed faces that should have served as
+identity anchors. Recognition could still suggest the original person while
+the subset clustering run created a new provisional person, producing a
+false recognition/grouping disagreement.
+
+A future subset implementation must:
+
+- include the affected faces, their prior cluster neighbors, and fixed
+  `assigned-user`/reference anchors in the graph;
+- include `assigned-system` faces as labeled evidence while preserving their
+  assignment rules;
+- leave user-confirmed assignments immutable while allowing them to influence
+  proposed cluster identity;
+- invalidate or replace only clusters whose input neighborhood changed;
+- retain unaffected clusters from the active run;
+- record the replaced cluster/run relationships and review-version changes;
+- activate the resulting combined view atomically only after all affected
+  clusters are complete.
+
+Until those rules exist, a reference change queues a full clustering run.
+
 ## Assignment and membership states
 
 The system records the evidence and user disposition separately, while
@@ -469,6 +506,12 @@ Each clustering execution is an immutable, inspectable run. It records:
 New runs do not overwrite prior results. A current-run relationship allows the
 application to use the latest accepted run while retaining reproducibility and
 review history.
+
+Run supersession is a run-level operation (`clustering_runs.status` and
+`superseded_by`), not a cluster-level flag. This is sufficient for complete
+runs, but is not sufficient for a partial run. Partial clustering must not
+mark the entire previous run superseded until the unaffected clusters have
+been carried forward into a combined active view.
 
 Low-signal thresholds for quality, detection, signal, and related metrics are
 used for report filters and review-priority flags. They do not silently change
@@ -541,6 +584,11 @@ Jobs support, where meaningful:
 - completed
 - completed with errors
 - failed
+
+Every job stores operational progress and a versioned completion summary. The
+summary includes the job kind, item counts, catalog counts before and after
+the job, count deltas, and any handler-specific progress. Job status output
+must expose both the live progress and the completed summary.
 
 The application must be able to resume work after process interruption. A
 worker failure affects the current item/job attempt, not the integrity of the

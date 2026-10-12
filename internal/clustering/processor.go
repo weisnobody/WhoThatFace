@@ -24,21 +24,29 @@ func NewProcessor(database *sql.DB, config Config) Processor {
 	return Processor{db: database, store: NewRunStore(database), config: config}
 }
 
-// Run groups faces with embeddings. Scope is all, unresolved-only, or subset;
-// subset is reserved for callers that provide a prefiltered face set.
+// Run groups all faces with embeddings. Partial clustering is intentionally
+// unavailable until active-run invalidation and fixed-anchor semantics are
+// implemented.
 func (p Processor) Run(ctx context.Context, scope string) (string, error) {
-	return p.run(ctx, scope, nil)
+	if scope != "" && scope != "all" {
+		return "", fmt.Errorf("clustering only supports scope all until subset invalidation is implemented")
+	}
+	return p.run(ctx, "all", nil)
 }
 
 func (p Processor) RunFaces(ctx context.Context, faceIDs []string) (string, error) {
-	return p.run(ctx, "subset", faceIDs)
+	return "", fmt.Errorf("subset clustering is not available until active-run invalidation is implemented")
 }
 
 func (p Processor) run(ctx context.Context, scope string, faceIDs []string) (string, error) {
 	if scope == "" {
 		scope = "all"
 	}
-	query := `SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(ca.person_id, '') FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.embedding IS NOT NULL AND COALESCE(ca.state, 'unassigned') <> 'assigned-user'`
+	// User-confirmed faces participate as fixed identity anchors. They are
+	// skipped later when assignments are applied, so clustering cannot change
+	// them, but excluding them here would make newly reviewed faces lose the
+	// person identity that should anchor their surrounding group.
+	query := `SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(ca.person_id, '') FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.embedding IS NOT NULL`
 	queryArgs := []any{}
 	if len(faceIDs) > 0 {
 		placeholders := make([]string, len(faceIDs))

@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -43,6 +44,7 @@ func (r Runner) RunOnce(ctx context.Context) (bool, error) {
 	if job == nil {
 		return false, nil
 	}
+	metricsBefore, _ := r.Store.CaptureMetrics(ctx)
 	handler, ok := r.Handlers[job.Kind]
 	if !ok {
 		_ = r.Store.SetStatus(ctx, job.ID, Failed, "unknown_job_kind", fmt.Sprintf("no handler registered for %s", job.Kind))
@@ -91,6 +93,7 @@ func (r Runner) RunOnce(ctx context.Context) (bool, error) {
 		return true, handlerErr
 	}
 	if handlerErr != nil {
+		_ = r.persistSummary(context.Background(), *job, metricsBefore, "failed")
 		status := Failed
 		if ctx.Err() != nil {
 			status = Cancelled
@@ -114,7 +117,73 @@ func (r Runner) RunOnce(ctx context.Context) (bool, error) {
 	if err := r.Store.SetStatus(ctx, job.ID, finalStatus, "", ""); err != nil {
 		return true, err
 	}
+	_ = r.persistSummary(context.Background(), *job, metricsBefore, string(finalStatus))
 	return true, nil
+}
+
+func (r Runner) persistSummary(ctx context.Context, job Job, before Metrics, status string) error {
+	if current, err := r.Store.Get(ctx, job.ID); err == nil {
+		job = current
+	}
+	after, err := r.Store.CaptureMetrics(ctx)
+	if err != nil {
+		return err
+	}
+	items, err := r.Store.Items(ctx, job.ID)
+	if err != nil {
+		return err
+	}
+	completed, failed, skipped, running := 0, 0, 0, 0
+	for _, item := range items {
+		switch item.Status {
+		case "completed":
+			completed++
+		case "failed":
+			failed++
+		case "skipped":
+			skipped++
+		case "running":
+			running++
+		}
+	}
+	var progress any
+	if len(job.Progress) > 0 && json.Unmarshal(job.Progress, &progress) != nil {
+		progress = string(job.Progress)
+	}
+	summary := map[string]any{
+		"version":  "1",
+		"job_kind": job.Kind,
+		"status":   status,
+		"items": map[string]int{
+			"total":     len(items),
+			"completed": completed,
+			"failed":    failed,
+			"skipped":   skipped,
+			"running":   running,
+		},
+		"metrics_before": before,
+		"metrics_after":  after,
+		"metrics_delta": map[string]int{
+			"faces":                     after.Faces - before.Faces,
+			"people":                    after.People - before.People,
+			"clusters":                  after.Clusters - before.Clusters,
+			"cluster_memberships":       after.ClusterMemberships - before.ClusterMemberships,
+			"recognition_candidates":    after.RecognitionCandidates - before.RecognitionCandidates,
+			"assignments":               after.Assignments - before.Assignments,
+			"reference_recommendations": after.ReferenceRecommendations - before.ReferenceRecommendations,
+		},
+	}
+	if progress != nil {
+		summary["last_progress"] = progress
+	}
+	started := job.CreatedAt
+	if job.StartedAt != nil {
+		started = *job.StartedAt
+	}
+	if activity, err := r.Store.CaptureActivity(ctx, job.ID, started); err == nil {
+		summary["activity"] = activity
+	}
+	return r.Store.SetSummary(ctx, job.ID, summary)
 }
 
 func (r Runner) Run(ctx context.Context) error {

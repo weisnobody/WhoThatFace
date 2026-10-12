@@ -20,6 +20,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/representative"
 	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
@@ -103,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /review/people/{personID}/references", s.reviewPersonReferences)
 	mux.HandleFunc("POST /api/people", s.createPerson)
 	mux.HandleFunc("POST /api/people/{personID}", s.renamePerson)
+	mux.HandleFunc("POST /api/people/{personID}/reference-reprocess", s.referenceReprocess)
 	mux.HandleFunc("GET /api/people/{personID}/references", s.personReferences)
 	mux.HandleFunc("GET /api/people/{personID}/representative", s.personRepresentative)
 	mux.HandleFunc("POST /api/people/{personID}/representative", s.setPersonRepresentative)
@@ -856,7 +858,12 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	peopleRows.Close()
 
-	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><div class="person-identity"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><div><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Similarity Max: ` + maxConfidenceText + `, Min: ` + minConfidenceText + `, Cluster Min: ` + minConsistencyText + `, Max: ` + maxConsistencyText + `)</span></h1><form id="rename-person" class="person-name-form"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button></form></div></div>`)
+	canModify := account.Role != auth.Viewer
+	recommendButton := ""
+	if canModify {
+		recommendButton = `<button type="button" data-action="recommend-references">Recommend References</button>`
+	}
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><div class="person-identity"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><div><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Similarity Max: ` + maxConfidenceText + `, Min: ` + minConfidenceText + `, Cluster Min: ` + minConsistencyText + `, Max: ` + maxConsistencyText + `)</span></h1><form id="rename-person" class="person-name-form"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button>` + recommendButton + `</form></div></div>`)
 	body.WriteString(`<form method="get" class="person-page-controls"><label>Filter <select name="state"><option value="">All faces</option>`)
 	for _, state := range []string{"provisional", "assigned-user", "assigned-system", "unknown", "ambiguous", "unassigned"} {
 		body.WriteString(`<option value="` + state + `"` + selectedAttr(state, faceFilter) + `>` + state + `</option>`)
@@ -890,7 +897,6 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</div>`)
 	body.WriteString(`<div id="photos" class="grid">`)
-	canModify := account.Role != auth.Viewer
 	for _, face := range faces {
 		boxClass := "box"
 		if face.Reference {
@@ -902,7 +908,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		} else if face.State != string(review.AssignedUser) && face.State != string(review.AssignedSystem) {
 			cardClass += " needs-attention"
 		}
-		body.WriteString(`<article class="` + cardClass + `" id="face-` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(face.PathID) + `">` + template.HTMLEscapeString(face.RelativePath) + `</a></div>`)
+		body.WriteString(`<article class="` + cardClass + `" id="face-` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-face-state="` + template.HTMLEscapeString(face.State) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(face.PathID) + `">` + template.HTMLEscapeString(face.RelativePath) + `</a></div>`)
 		confidence := formatScoreUnavailable(face.Confidence, face.ConfidenceAvailable)
 		body.WriteString(`<div class="person-metadata"><strong>` + template.HTMLEscapeString(assignmentLabel(face.State)) + `:</strong> C: ` + confidence + ` Q: ` + formatScore(face.Quality) + `% D: ` + formatScore(face.Detection) + `%`)
 		if face.Recommended {
@@ -966,22 +972,25 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		body.WriteString(`<p class="person-empty">No faces are assigned to this person.</p>`)
 	}
 	if canModify && len(faces) > 0 {
-		body.WriteString(`<div class="person-page-actions"><div><label>Face <select id="page-face">`)
+		visibleStates := make(map[string]bool)
 		for _, face := range faces {
-			body.WriteString(`<option value="` + template.HTMLEscapeString(face.FaceID) + `">` + template.HTMLEscapeString(idSuffix(face.FaceID)) + ` — ` + template.HTMLEscapeString(face.RelativePath) + `</option>`)
+			visibleStates[face.State] = true
 		}
-		body.WriteString(`</select></label> <button type="button" data-action="page-unknown">Unknown</button><button type="button" data-action="page-ambiguous">Ambiguous</button></div><div><select id="page-assignment-person"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+		body.WriteString(`<div class="person-page-actions"><div><label>Assignment <select id="page-assignment-state"><option value="__all_non_assigned__">All non-assigned</option>`)
+		for _, state := range []string{"provisional", "assigned-system", "assigned-user", "unassigned", "unknown", "ambiguous"} {
+			if visibleStates[state] {
+				body.WriteString(`<option value="` + state + `">` + state + `</option>`)
+			}
+		}
+		body.WriteString(`</select></label> <button type="button" data-action="page-unknown">Unknown</button><button type="button" data-action="page-ambiguous">Ambiguous</button></div><div><select id="page-assignment-person">`)
 		for _, option := range people {
-			body.WriteString(`<option value="` + template.HTMLEscapeString(option.ID) + `">` + template.HTMLEscapeString(option.Name) + `</option>`)
+			body.WriteString(`<option value="` + template.HTMLEscapeString(option.ID) + `"` + selectedAttr(option.ID, personID) + `>` + template.HTMLEscapeString(option.Name) + `</option>`)
 		}
 		body.WriteString(`</select><button type="button" data-action="page-assign">Save</button></div></div>`)
 	}
 	body.WriteString(`</div>`)
 	if canModify {
 		body.WriteString(`<script src="/static/person.js" defer></script>`)
-	}
-	if canModify {
-		body.WriteString(`<script>(function(){const form=document.getElementById('rename-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people/` + template.JSEscapeString(personID) + `',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
 	}
 	s.render(w, map[string]any{"Title": personName, "Account": account, "PageStyle": pageStyle, "Body": template.HTML(body.String())})
 }
@@ -1042,8 +1051,38 @@ func (s *Server) renamePerson(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	_ = audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, Action: "person-rename", EntityType: "person", EntityID: r.PathValue("personID"), New: map[string]any{"name": input.Name}})
+	if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, Action: "person-rename", EntityType: "person", EntityID: r.PathValue("personID"), New: map[string]any{"name": strings.TrimSpace(input.Name)}}); err != nil {
+		http.Error(w, "record rename audit event: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": r.PathValue("personID"), "name": strings.TrimSpace(input.Name)})
+}
+
+func (s *Server) referenceReprocess(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if !validCSRFApi(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	personID := r.PathValue("personID")
+	allowed, err := s.personPermission(r, account, personID, true)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	job, err := jobs.NewStore(s.db).Enqueue(r.Context(), "reference-reprocess", 1, map[string]string{"person_id": personID})
+	if err != nil {
+		http.Error(w, "queue reference recommendations: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, Action: "reference-reprocess-request", EntityType: "person", EntityID: personID, New: map[string]any{"job_id": job.ID}}); err != nil {
+		http.Error(w, "record reference recommendation audit event: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"person_id": personID, "job_id": job.ID, "status": job.Status})
 }
 
 func (s *Server) personReferences(w http.ResponseWriter, r *http.Request) {
@@ -1170,6 +1209,26 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
   const page = document.getElementById('person-page');
   if (!page) return;
   const token = page.dataset.csrf || '';
+  const renameForm = document.getElementById('rename-person');
+  if (renameForm) renameForm.onsubmit = async (event) => {
+    event.preventDefault();
+    const response = await fetch('/api/people/' + encodeURIComponent(page.dataset.personId), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
+      body: JSON.stringify({name: renameForm.name.value})
+    });
+    if (!response.ok) { alert(await response.text()); return; }
+    location.reload();
+  };
+  const recommendButton = document.querySelector('[data-action="recommend-references"]');
+  if (recommendButton) recommendButton.onclick = async () => {
+    const response = await fetch('/api/people/' + encodeURIComponent(page.dataset.personId) + '/reference-reprocess', {
+      method: 'POST', headers: {'X-CSRF-Token': token}
+    });
+    if (!response.ok) { alert(await response.text()); return; }
+    const result = await response.json();
+    alert('Reference recommendation job queued: ' + result.job_id);
+  };
   async function send(faceID, url, payload) {
     const response = await fetch(url, {
       method: 'POST',
@@ -1204,16 +1263,35 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
       '/api/people/' + encodeURIComponent(page.dataset.personId) + '/representative',
       {face_id: button.dataset.faceId});
   });
-  function pageFace() { const selector = document.getElementById('page-face'); return selector ? selector.value : ''; }
+  function bulkFaces() {
+    const selected = document.getElementById('page-assignment-state').value;
+    return Array.from(document.querySelectorAll('#photos [data-face-state]')).filter((card) => {
+      const state = card.dataset.faceState;
+      return selected === '__all_non_assigned__'
+        ? state !== 'assigned-user' && state !== 'assigned-system'
+        : state === selected;
+    }).map((card) => card.dataset.faceId);
+  }
+  async function sendBulk(state, personID) {
+    const faceIDs = bulkFaces();
+    if (!faceIDs.length) { alert('No visible faces match the selected assignment.'); return; }
+    for (const faceID of faceIDs) {
+      const response = await fetch('/api/faces/' + encodeURIComponent(faceID) + '/assignment', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
+        body: JSON.stringify({person_id: personID || '', state: state})
+      });
+      if (!response.ok) { alert(await response.text()); return; }
+    }
+    location.reload();
+  }
   document.querySelectorAll('[data-action="page-unknown"], [data-action="page-ambiguous"]').forEach((button) => {
-    button.onclick = () => send(pageFace(), '/api/faces/' + encodeURIComponent(pageFace()) + '/assignment',
-      {person_id: '', state: button.dataset.action === 'page-unknown' ? 'unknown' : 'ambiguous'});
+    button.onclick = () => sendBulk(button.dataset.action === 'page-unknown' ? 'unknown' : 'ambiguous', '');
   });
   document.querySelectorAll('[data-action="page-assign"]').forEach((button) => {
     button.onclick = () => {
       const person = document.getElementById('page-assignment-person').value;
-      send(pageFace(), '/api/faces/' + encodeURIComponent(pageFace()) + '/assignment',
-        {person_id: person === '__ambiguous__' ? '' : person, state: person === '__ambiguous__' ? 'ambiguous' : (person ? 'assigned-user' : 'unknown')});
+      sendBulk('assigned-user', person);
     };
   });
 })();
@@ -1735,7 +1813,7 @@ func (s *Server) personRepresentative(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", image.MIMEType)
-	w.Header().Set("Cache-Control", "private, max-age=60")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
 	_, _ = w.Write(image.Data)
 }
 

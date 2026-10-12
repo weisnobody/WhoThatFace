@@ -38,6 +38,50 @@ import (
 
 const outputSchemaVersion = "1"
 
+func hasApprovedReferences(ctx context.Context, database *sql.DB, personID string) (bool, error) {
+	var count int
+	if err := database.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM current_face_references
+		WHERE person_id = ? AND reference = 1`, personID).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func lastReferenceDiscovery(ctx context.Context, database *sql.DB) (*time.Time, error) {
+	rows, err := database.QueryContext(ctx, `
+		SELECT created_at, COALESCE(new_json, '')
+		FROM audit_events
+		WHERE action = 'reference-discovery' AND entity_type = 'job'
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var createdAt, newJSON string
+		if err := rows.Scan(&createdAt, &newJSON); err != nil {
+			return nil, err
+		}
+		var details struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(newJSON), &details); err != nil || details.Status != "completed" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse reference discovery audit time: %w", err)
+		}
+		return &parsed, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "face-me-bro: %v\n", err)
@@ -206,7 +250,7 @@ var commandHelp = map[string]helpTopic{
 	"status":     {Usage: "face-me-bro [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
 	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
 	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
-	"job":        {Usage: "face-me-bro job <list|get|status|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; controls use JOB_ID"},
+	"job":        {Usage: "face-me-bro job <list|get|status|reference-reprocess|reference-discovery|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; controls use JOB_ID"},
 	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
 	"setup":      {Usage: "face-me-bro setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
 	"serve":      {Usage: "face-me-bro serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
@@ -215,7 +259,7 @@ var commandHelp = map[string]helpTopic{
 	"worker":     {Usage: "face-me-bro worker", Description: "Run the background worker loop for queued analysis and recognition jobs."},
 	"people":     {Usage: "face-me-bro people <get|list|create|representative> [options]", Description: "Inspect, list, or create people records and representative images.", Options: "get: --person-id; list: --limit N --page N; create: --name NAME [--provisional]; representative: --person-id ID [--face-id ID|--clear] --yes"},
 	"face":       {Usage: "face-me-bro face <get|list|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, dispositions, and reference status; list faces with their current state.", Options: "get: --face-id; list: --limit N --page N; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
-	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID] [--scope all|unresolved-only|subset]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
+	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
 	"search":     {Usage: "face-me-bro search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
 	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
 	"backup":     {Usage: "face-me-bro backup create", Description: "Create a database backup in the configured backup directory."},
@@ -736,7 +780,7 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 
 func jobCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("job requires list, get, status, pause, resume, cancel, or retry")
+		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, pause, resume, cancel, or retry")
 	}
 	store := jobs.NewStore(application.DB)
 	if args[0] == "throttle" {
@@ -750,6 +794,52 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "job throttle", map[string]string{"mode": *mode})
+	}
+	if args[0] == "reference-reprocess" {
+		flags := flag.NewFlagSet("job reference-reprocess", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "person ID to reprocess")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *personID == "" {
+			return fmt.Errorf("job reference-reprocess requires --person-id")
+		}
+		job, err := store.Enqueue(ctx, "reference-reprocess", 1, map[string]string{"person_id": *personID})
+		if err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "job reference-reprocess", map[string]any{"id": job.ID, "kind": job.Kind, "person_id": *personID, "status": job.Status})
+	}
+	if args[0] == "reference-discovery" {
+		flags := flag.NewFlagSet("job reference-discovery", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "limit discovery to this person's approved references")
+		since := flags.String("since", "", "only evaluate faces created after this RFC3339 timestamp")
+		sinceLast := flags.Bool("since-last", false, "use the most recent completed reference-discovery audit time")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *since != "" && *sinceLast {
+			return fmt.Errorf("job reference-discovery cannot combine --since and --since-last")
+		}
+		if *since != "" {
+			if _, err := time.Parse(time.RFC3339Nano, *since); err != nil {
+				return fmt.Errorf("invalid --since timestamp: %w", err)
+			}
+		}
+		payload := map[string]any{"person_id": *personID}
+		if *since != "" {
+			payload["since"] = *since
+		}
+		if *sinceLast {
+			payload["since_last"] = true
+		}
+		job, err := store.Enqueue(ctx, "reference-discovery", 1, payload)
+		if err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "job reference-discovery", map[string]any{"id": job.ID, "kind": job.Kind, "person_id": *personID, "status": job.Status, "since": *since, "since_last": *sinceLast})
 	}
 	if args[0] == "status" {
 		flags := flag.NewFlagSet("job status", flag.ContinueOnError)
@@ -780,7 +870,15 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		if report.StartedAt != nil {
 			started = report.StartedAt.Format(time.RFC3339Nano)
 		}
-		fmt.Fprintf(stdout, "Job:                         %s\nStatus:                      %s\nItems completed:             %d\nItems remaining:             %d\nCurrent item:                %s\nPercentage complete:         %.1f%%\nTime started:                %s\nTime running:                %s\nEstimated time remaining:    %s\nFailed item count:           %d\n", report.JobID, report.Status, report.ItemsCompleted, report.ItemsRemaining, current, report.PercentageComplete, started, report.TimeRunning, eta, report.FailedItems)
+		progress := "-"
+		if len(report.Progress) > 0 {
+			progress = string(report.Progress)
+		}
+		summary := "-"
+		if len(report.Summary) > 0 {
+			summary = string(report.Summary)
+		}
+		fmt.Fprintf(stdout, "Job:                         %s\nJob kind:                   %s\nStatus:                     %s\nItems completed:            %d\nItems remaining:             %d\nCurrent item:                %s\nPercentage complete:         %.1f%%\nTime started:                %s\nTime running:               %s\nEstimated time remaining:   %s\nFailed item count:           %d\nOperational progress:        %s\nCompleted summary:           %s\n", report.JobID, report.JobKind, report.Status, report.ItemsCompleted, report.ItemsRemaining, current, report.PercentageComplete, started, report.TimeRunning, eta, report.FailedItems, progress, summary)
 		return nil
 	}
 	if args[0] == "get" {
@@ -819,7 +917,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		return nil
 	}
 	if len(args) == 0 || args[0] != "list" {
-		return fmt.Errorf("job requires list, get, status, pause, resume, cancel, or retry")
+		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, pause, resume, cancel, or retry")
 	}
 	flags := flag.NewFlagSet("job list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -864,19 +962,22 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 }
 
 type jobStatusReport struct {
-	JobID                         string      `json:"job_id"`
-	Status                        jobs.Status `json:"status"`
-	ItemsCompleted                int         `json:"items_completed"`
-	ItemsProcessed                int         `json:"items_processed"`
-	ItemsRemaining                int         `json:"items_remaining"`
-	CurrentItem                   *string     `json:"current_item"`
-	PercentageComplete            float64     `json:"percentage_complete"`
-	StartedAt                     *time.Time  `json:"started_at,omitempty"`
-	TimeRunning                   string      `json:"time_running"`
-	TimeRunningSeconds            float64     `json:"time_running_seconds"`
-	EstimatedTimeRemaining        *string     `json:"estimated_time_remaining,omitempty"`
-	EstimatedTimeRemainingSeconds *float64    `json:"estimated_time_remaining_seconds,omitempty"`
-	FailedItems                   int         `json:"failed_items"`
+	JobID                         string          `json:"job_id"`
+	JobKind                       string          `json:"job_kind"`
+	Status                        jobs.Status     `json:"status"`
+	Progress                      json.RawMessage `json:"progress,omitempty"`
+	Summary                       json.RawMessage `json:"summary,omitempty"`
+	ItemsCompleted                int             `json:"items_completed"`
+	ItemsProcessed                int             `json:"items_processed"`
+	ItemsRemaining                int             `json:"items_remaining"`
+	CurrentItem                   *string         `json:"current_item"`
+	PercentageComplete            float64         `json:"percentage_complete"`
+	StartedAt                     *time.Time      `json:"started_at,omitempty"`
+	TimeRunning                   string          `json:"time_running"`
+	TimeRunningSeconds            float64         `json:"time_running_seconds"`
+	EstimatedTimeRemaining        *string         `json:"estimated_time_remaining,omitempty"`
+	EstimatedTimeRemainingSeconds *float64        `json:"estimated_time_remaining_seconds,omitempty"`
+	FailedItems                   int             `json:"failed_items"`
 }
 
 func currentJobStatus(ctx context.Context, store jobs.Store, jobID string) (jobStatusReport, error) {
@@ -913,6 +1014,8 @@ func currentJobStatus(ctx context.Context, store jobs.Store, jobID string) (jobS
 	percentage := 0.0
 	if len(items) > 0 {
 		percentage = float64(processed) * 100 / float64(len(items))
+	} else if job.Status == jobs.Completed {
+		percentage = 100
 	}
 	end := time.Now().UTC()
 	if job.CompletedAt != nil {
@@ -922,7 +1025,7 @@ func currentJobStatus(ctx context.Context, store jobs.Store, jobID string) (jobS
 	if job.StartedAt != nil && end.After(job.StartedAt.UTC()) {
 		running = end.Sub(job.StartedAt.UTC())
 	}
-	report := jobStatusReport{JobID: job.ID, Status: job.Status, ItemsCompleted: completed, ItemsProcessed: processed, ItemsRemaining: remaining, PercentageComplete: percentage, StartedAt: job.StartedAt, TimeRunning: running.String(), TimeRunningSeconds: running.Seconds(), FailedItems: failed}
+	report := jobStatusReport{JobID: job.ID, JobKind: job.Kind, Status: job.Status, Progress: job.Progress, Summary: job.Summary, ItemsCompleted: completed, ItemsProcessed: processed, ItemsRemaining: remaining, PercentageComplete: percentage, StartedAt: job.StartedAt, TimeRunning: running.String(), TimeRunningSeconds: running.Seconds(), FailedItems: failed}
 	if current != nil {
 		value := current.Key
 		report.CurrentItem = &value
@@ -1415,7 +1518,7 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 		flags := flag.NewFlagSet("cluster run", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		collectionID := flags.String("collection-id", "", "collection ID used for the per-collection search method")
-		scope := flags.String("scope", application.Config.ClusteringConfig.CandidateScope, "all, unresolved-only, or subset")
+		scope := flags.String("scope", "all", "clustering scope; only all is currently supported")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -1425,7 +1528,10 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 				return err
 			}
 		}
-		runID, err := clustering.NewProcessor(application.DB, settings).Run(ctx, *scope)
+		if *scope != "all" {
+			return fmt.Errorf("cluster run only supports --scope all until subset invalidation is implemented")
+		}
+		runID, err := clustering.NewProcessor(application.DB, settings).Run(ctx, "all")
 		if err != nil {
 			return err
 		}
@@ -1984,7 +2090,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 				return err
 			}
 			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "recognition", "items": len(faceIDs), "completed": len(faceIDs)})
-			_, err = jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": application.Config.ClusteringConfig.CandidateScope})
+			_, err = jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"})
 			return err
 		},
 		"reference-reprocess": func(jobContext context.Context, job jobs.Job) error {
@@ -1998,6 +2104,18 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 				return fmt.Errorf("reference reprocess job has no person_id")
 			}
 			recognitionProcessor := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds, *pipelineID)
+			hasReferences, err := hasApprovedReferences(jobContext, application.DB, payload.PersonID)
+			if err != nil {
+				return err
+			}
+			// A person-level recommendation refresh is also used before the user
+			// has selected any references. In that state there is no recognition
+			// gallery to reprocess. Running recognition anyway would clear the
+			// existing provisional assignments, and clustering could then create a
+			// new provisional person for the same faces.
+			if !hasReferences {
+				return recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID)
+			}
 			if err := recognitionProcessor.ProcessPerson(jobContext, payload.PersonID); err != nil {
 				return err
 			}
@@ -2024,11 +2142,81 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			}
 			clusteringConfig := application.Config.ClusteringConfig
 			if len(affectedFaces) > 0 {
-				if _, err := clustering.NewProcessor(application.DB, clusteringConfig).RunFaces(jobContext, affectedFaces); err != nil {
+				// Subset runs currently supersede the active full run. Until the
+				// clustering invalidation/anchor model is implemented, re-run the
+				// complete clustering input instead.
+				if _, err := clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, "all"); err != nil {
 					return err
 				}
 			}
 			return recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID)
+		},
+		"reference-discovery": func(jobContext context.Context, job jobs.Job) error {
+			var payload struct {
+				PersonID  string `json:"person_id"`
+				Since     string `json:"since"`
+				SinceLast bool   `json:"since_last"`
+			}
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.Since != "" && payload.SinceLast {
+				return fmt.Errorf("reference discovery cannot combine since and since_last")
+			}
+			var since *time.Time
+			if payload.SinceLast {
+				var err error
+				since, err = lastReferenceDiscovery(jobContext, application.DB)
+				if err != nil {
+					return err
+				}
+			} else if payload.Since != "" {
+				parsed, err := time.Parse(time.RFC3339Nano, payload.Since)
+				if err != nil {
+					return fmt.Errorf("parse reference discovery since: %w", err)
+				}
+				since = &parsed
+			}
+
+			hasReferences := false
+			var err error
+			if payload.PersonID != "" {
+				hasReferences, err = hasApprovedReferences(jobContext, application.DB, payload.PersonID)
+			} else {
+				var count int
+				err = application.DB.QueryRowContext(jobContext, `SELECT COUNT(*) FROM current_face_references WHERE reference = 1`).Scan(&count)
+				hasReferences = count > 0
+			}
+			if err != nil {
+				return err
+			}
+			details := map[string]any{
+				"status":     "completed",
+				"person_id":  payload.PersonID,
+				"since_last": payload.SinceLast,
+			}
+			if since != nil {
+				details["since"] = since.UTC().Format(time.RFC3339Nano)
+			}
+			if !hasReferences {
+				details["skipped"] = "no-approved-references"
+				if err := audit.NewStore(application.DB).Record(jobContext, audit.Event{Action: "reference-discovery", EntityType: "job", EntityID: job.ID, New: details}); err != nil {
+					return err
+				}
+				return nil
+			}
+
+			processor := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds, *pipelineID)
+			if err := processor.ProcessDiscovery(jobContext, payload.PersonID, since); err != nil {
+				return err
+			}
+			if _, err := jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"}); err != nil {
+				return err
+			}
+			if err := audit.NewStore(application.DB).Record(jobContext, audit.Event{Action: "reference-discovery", EntityType: "job", EntityID: job.ID, New: details}); err != nil {
+				return err
+			}
+			return nil
 		},
 		"clustering": func(jobContext context.Context, job jobs.Job) error {
 			var payload struct {
@@ -2037,8 +2225,8 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if err := json.Unmarshal(job.Payload, &payload); err != nil {
 				return err
 			}
-			if payload.Scope == "" {
-				payload.Scope = "all"
+			if payload.Scope != "" && payload.Scope != "all" {
+				return fmt.Errorf("clustering jobs only support scope all")
 			}
 			clusteringConfig := application.Config.ClusteringConfig
 			faceIDs, err := jobFaceIDs(jobContext, application.DB)
@@ -2049,7 +2237,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 				return err
 			}
 			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "clustering", "items": len(faceIDs), "completed": 0})
-			_, err = clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, payload.Scope)
+			_, err = clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, "all")
 			if err != nil {
 				return err
 			}

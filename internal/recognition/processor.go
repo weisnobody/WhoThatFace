@@ -18,6 +18,10 @@ type Processor struct {
 	thresholds Thresholds
 	pipelineID string
 	personID   string
+	// referencePersonID limits the gallery for discovery without limiting the
+	// faces being evaluated. personID is used by the older narrow reprocess.
+	referencePersonID string
+	discovery         bool
 }
 
 func NewProcessor(database *sql.DB, thresholds Thresholds, pipelineIDs ...string) Processor {
@@ -31,12 +35,25 @@ func NewProcessor(database *sql.DB, thresholds Thresholds, pipelineIDs ...string
 // ProcessAll evaluates every face with the current approved reference gallery.
 // User-confirmed assignments are never automatically changed.
 func (p Processor) ProcessAll(ctx context.Context) error {
+	return p.processAll(ctx, nil)
+}
+
+// ProcessDiscovery evaluates a broad face set against either one person's
+// approved references or all approved reference galleries. Unlike
+// ProcessPerson, it does not require an existing relationship to the person.
+func (p Processor) ProcessDiscovery(ctx context.Context, personID string, since *time.Time) error {
+	p.referencePersonID = personID
+	p.discovery = true
+	return p.processAll(ctx, since)
+}
+
+func (p Processor) processAll(ctx context.Context, since *time.Time) error {
 	references, err := p.loadReferences(ctx)
 	if err != nil {
 		return err
 	}
 	query := `
-		SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
+		SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0), COALESCE(ca.state, 'unassigned')
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
 		WHERE COALESCE(ca.state, 'unassigned') <> 'assigned-user'`
@@ -44,6 +61,10 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 	if p.personID != "" {
 		query += ` AND (ca.person_id = ? OR EXISTS (SELECT 1 FROM current_face_references fr WHERE fr.face_id = f.id AND fr.person_id = ?) OR EXISTS (SELECT 1 FROM recognition_candidates rc WHERE rc.face_id = f.id AND rc.person_id = ?))`
 		args = append(args, p.personID, p.personID, p.personID)
+	}
+	if since != nil {
+		query += ` AND f.created_at > ?`
+		args = append(args, since.UTC().Format(time.RFC3339Nano))
 	}
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -55,7 +76,8 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 		var blob []byte
 		var dimension int
 		var quality, detection float64
-		if err := rows.Scan(&faceID, &blob, &dimension, &quality, &detection); err != nil {
+		var assignmentState string
+		if err := rows.Scan(&faceID, &blob, &dimension, &quality, &detection, &assignmentState); err != nil {
 			return err
 		}
 		embedding, err := decodeEmbedding(blob, dimension)
@@ -70,6 +92,9 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 			return err
 		}
 		if len(candidates) == 0 {
+			if p.discovery && assignmentState != string(review.Unassigned) {
+				continue
+			}
 			if _, err := p.review.Assign(ctx, faceID, "", review.Unknown, review.Actor{Type: "system"}, review.Evidence{}, "no-reference-candidate"); err != nil {
 				return err
 			}
@@ -85,6 +110,9 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 		} else if level == EvidenceMedium {
 			state = review.Provisional
 			personID = candidate.PersonID
+		}
+		if p.discovery && level != EvidenceHigh && level != EvidenceMedium && assignmentState != string(review.Unassigned) {
+			continue
 		}
 		similarity, margin := candidate.Similarity, candidate.Margin
 		support, candidateQuality, candidateDetection := candidate.Support, candidate.Quality, candidate.Detection
@@ -187,7 +215,9 @@ func (p Processor) loadReferences(ctx context.Context) (map[string][][]float32, 
 		SELECT r.person_id, f.embedding, f.embedding_dimension
 		FROM current_face_references r JOIN faces f ON f.id = r.face_id
 		JOIN analyses a ON a.id = f.analysis_id
-		WHERE r.reference = 1 AND f.embedding IS NOT NULL AND (? = '' OR a.pipeline_id = ?)`, p.pipelineID, p.pipelineID)
+		WHERE r.reference = 1 AND f.embedding IS NOT NULL
+		  AND (? = '' OR a.pipeline_id = ?)
+		  AND (? = '' OR r.person_id = ?)`, p.pipelineID, p.pipelineID, p.referencePersonID, p.referencePersonID)
 	if err != nil {
 		return nil, err
 	}

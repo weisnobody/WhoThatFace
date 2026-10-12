@@ -7,7 +7,9 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/pjg/face_me_bro/internal/db"
 	"github.com/pjg/face_me_bro/internal/review"
@@ -95,5 +97,27 @@ func TestEnsureUsesReferencePriorityAndCreatesBoundedSquare(t *testing.T) {
 	}
 	if selected.FaceID != "user" || selected.SelectionMode != "explicit" {
 		t.Fatalf("explicit representative = %#v", selected)
+	}
+	if _, err := database.Exec(`DELETE FROM person_representatives`); err != nil {
+		t.Fatal(err)
+	}
+	concurrentContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errors := make(chan error, 8)
+	var waitGroup sync.WaitGroup
+	for range make([]struct{}, 8) {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			_, err := NewStore(database).Ensure(concurrentContext, "person")
+			errors <- err
+		}()
+	}
+	waitGroup.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("concurrent representative request failed: %v", err)
+		}
 	}
 }

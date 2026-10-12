@@ -29,6 +29,9 @@ func TestRunnerRunsAndCompletesHandler(t *testing.T) {
 	if err != nil || finished.Status != Completed {
 		t.Fatalf("finished=%+v error=%v", finished, err)
 	}
+	if len(finished.Summary) == 0 {
+		t.Fatal("completed job has no summary")
+	}
 }
 
 func TestRunnerRetriesThenPersistsPermanentFailure(t *testing.T) {

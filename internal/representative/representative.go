@@ -153,19 +153,26 @@ func (s Store) bestCandidate(ctx context.Context, personID string) (candidate, e
 	if err != nil {
 		return candidate{}, err
 	}
-	defer rows.Close()
+	var candidates []candidate
 	for rows.Next() {
 		var value candidate
 		if err := rows.Scan(&value.FaceID, &value.Quality, &value.DetectionConfidence, &value.Left, &value.Top, &value.Right, &value.Bottom); err != nil {
 			return candidate{}, err
 		}
+		candidates = append(candidates, value)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return candidate{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return candidate{}, err
+	}
+	for _, value := range candidates {
 		if err := s.populateSource(ctx, &value); err != nil {
 			continue
 		}
 		return value, nil
-	}
-	if err := rows.Err(); err != nil {
-		return candidate{}, err
 	}
 	return candidate{}, fmt.Errorf("%w: %q", ErrNoUsableFace, personID)
 }

@@ -28,6 +28,84 @@ func TestHelpListsCommandsWithoutOpeningDatabase(t *testing.T) {
 	}
 }
 
+func TestHasApprovedReferences(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(ctx, filepath.Join(t.TempDir(), "catalog.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	hasReferences, err := hasApprovedReferences(ctx, database, "person-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasReferences {
+		t.Fatal("person without references reported as having approved references")
+	}
+
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO pipelines (id, model_family, model_version, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension, embedding_dtype, normalization, execution_provider, dependency_versions_json, created_at)
+		VALUES ('pipeline-1', 'test', 'test', '{}', '{}', '{}', 1, 'float32', 'l2', 'cpu', '{}', CURRENT_TIMESTAMP);
+		INSERT INTO photo_assets (id, content_sha256, byte_size, media_kind, created_at, updated_at)
+		VALUES ('asset-1', 'hash-1', 1, 'still', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO analyses (id, asset_id, pipeline_id, status, created_at)
+		VALUES ('analysis-1', 'asset-1', 'pipeline-1', 'completed', CURRENT_TIMESTAMP);
+		INSERT INTO faces (id, analysis_id, face_index, box_left, box_top, box_right, box_bottom, created_at)
+		VALUES ('face-1', 'analysis-1', 0, 0, 0, 1, 1, CURRENT_TIMESTAMP);
+		INSERT INTO people (id, created_at, updated_at) VALUES ('person-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO reference_selection_events (id, face_id, person_id, reference, created_at)
+		VALUES ('event-1', 'face-1', 'person-1', 0, CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO current_face_references (face_id, person_id, reference, event_id, updated_at)
+		VALUES ('face-1', 'person-1', 0, 'event-1', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	hasReferences, err = hasApprovedReferences(ctx, database, "person-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasReferences {
+		t.Fatal("non-reference row reported as an approved reference")
+	}
+
+	if _, err := database.ExecContext(ctx, `UPDATE current_face_references SET reference = 1 WHERE person_id = 'person-1'`); err != nil {
+		t.Fatal(err)
+	}
+	hasReferences, err = hasApprovedReferences(ctx, database, "person-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasReferences {
+		t.Fatal("approved reference was not detected")
+	}
+}
+
+func TestLastReferenceDiscoveryUsesMostRecentCompletedRun(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(ctx, filepath.Join(t.TempDir(), "catalog.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO audit_events (id, action, entity_type, entity_id, new_json, created_at)
+		VALUES ('discovery-failed', 'reference-discovery', 'job', 'job-1', '{"status":"failed"}', '2026-10-12T10:00:00Z');
+		INSERT INTO audit_events (id, action, entity_type, entity_id, new_json, created_at)
+		VALUES ('discovery-complete', 'reference-discovery', 'job', 'job-2', '{"status":"completed"}', '2026-10-12T11:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	last, err := lastReferenceDiscovery(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last == nil || last.UTC().Format(time.RFC3339) != "2026-10-12T11:00:00Z" {
+		t.Fatalf("last discovery = %v, want 2026-10-12T11:00:00Z", last)
+	}
+}
+
 func TestCommandHelpIncludesUsageParametersAndDescription(t *testing.T) {
 	var output bytes.Buffer
 	if err := run(context.Background(), []string{"help", "face"}, &output, &output); err != nil {
