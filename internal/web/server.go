@@ -405,7 +405,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(pa.width, a.source_width, 0), COALESCE(pa.height, a.source_height, 0),
 		f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
-		COALESCE(ae.similarity, 0), COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(cfr.reference, 0)
+		CASE WHEN ae.reason = 'cluster-provisional' AND COALESCE(ae.support_count, 0) = 0 AND COALESCE(ae.quality, 0) = 0 AND COALESCE(ae.detection_confidence, 0) = 0 AND ae.agreement IS NULL THEN NULL ELSE ae.similarity END, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(cfr.reference, 0)
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
 		JOIN current_face_assignments ca ON ca.face_id = f.id
@@ -441,6 +441,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		Left, Top, Right, Bottom     float64
 		Quality, Detection           float64
 		Confidence                   float64
+		ConfidenceAvailable          bool
 		State, PersonID              string
 		Reference                    bool
 		Recommended                  bool
@@ -452,9 +453,13 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var face personFace
 		var reference int
-		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &face.Confidence, &face.State, &face.PersonID, &reference); err != nil {
+		var confidence sql.NullFloat64
+		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &confidence, &face.State, &face.PersonID, &reference); err != nil {
 			http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 			return
+		}
+		if confidence.Valid {
+			face.Confidence, face.ConfidenceAvailable = confidence.Float64, true
 		}
 		face.Reference = reference == 1
 		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `
@@ -504,7 +509,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		if face.Confidence == 0 {
 			for _, candidate := range face.Candidates {
 				if candidate.PersonID == face.PersonID {
-					face.Confidence = candidate.Similarity
+					face.Confidence, face.ConfidenceAvailable = candidate.Similarity, true
 					break
 				}
 			}
@@ -542,7 +547,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	clusterSummary := make(map[string][]string)
 	clusterSummaryOrder := make([]string, 0)
 	for _, face := range faces {
-		if face.Confidence > 0 {
+		if face.ConfidenceAvailable {
 			if !hasConfidence || face.Confidence > maxConfidence {
 				maxConfidence = face.Confidence
 			}
@@ -570,6 +575,8 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	if !hasConfidence {
 		minConfidence = 0
 	}
+	maxConfidenceText := formatScoreUnavailable(maxConfidence, hasConfidence)
+	minConfidenceText := formatScoreUnavailable(minConfidence, hasConfidence)
 
 	body := strings.Builder{}
 	pageStyle := template.CSS(`.person-header{
@@ -657,7 +664,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	peopleRows.Close()
 
-	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Max: ` + formatScore(maxConfidence) + `%, Min: ` + formatScore(minConfidence) + `%)</span></h1><form id="rename-person"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button></form>`)
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Max: ` + maxConfidenceText + `, Min: ` + minConfidenceText + `)</span></h1><form id="rename-person"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button></form>`)
 	if len(clusterSummaryOrder) > 0 {
 		body.WriteString(`<div>Clusters: `)
 		for index, clusterPerson := range clusterSummaryOrder {
@@ -684,7 +691,8 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			boxClass += " reference"
 		}
 		body.WriteString(`<article class="card" id="face-` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path">` + template.HTMLEscapeString(face.RelativePath) + `</div>`)
-		body.WriteString(`<div class="person-metadata"><strong>Assignment:</strong> ` + template.HTMLEscapeString(face.State) + `; <strong>Confidence:</strong> ` + formatScore(face.Confidence) + `%; <strong>Face quality:</strong> ` + formatScore(face.Quality) + `%; <strong>Detection:</strong> ` + formatScore(face.Detection) + `%`)
+		confidence := formatScoreUnavailable(face.Confidence, face.ConfidenceAvailable)
+		body.WriteString(`<div class="person-metadata"><strong>Assignment:</strong> ` + template.HTMLEscapeString(face.State) + `; <strong>Confidence:</strong> ` + confidence + `; <strong>Face quality:</strong> ` + formatScore(face.Quality) + `%; <strong>Detection:</strong> ` + formatScore(face.Detection) + `%`)
 		if face.Recommended {
 			body.WriteString(`; <strong>Ref Rec</strong>`)
 		}
@@ -1264,6 +1272,13 @@ func formatScore(value float64) string {
 		return "0.0"
 	}
 	return fmt.Sprintf("%.1f", value*100)
+}
+
+func formatScoreUnavailable(value float64, available bool) string {
+	if !available {
+		return "—"
+	}
+	return formatScore(value) + "%"
 }
 
 func idSuffix(value string) string {

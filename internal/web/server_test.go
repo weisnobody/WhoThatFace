@@ -383,10 +383,13 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("CSP does not allow the page styles: %s", policy)
 	}
-	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card\"", "class=\"grid\"", "Assignment:", "assigned-user", "Face quality:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Save", "/static/person.js"} {
+	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card\"", "class=\"grid\"", "Assignment:", "assigned-user", "Confidence:", "Face quality:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Save", "/static/person.js"} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())
 		}
+	}
+	if !strings.Contains(response.Body.String(), "Max: 91.0%, Min: 91.0%") {
+		t.Fatalf("person confidence summary was not derived from the candidate: %s", response.Body.String())
 	}
 	headEnd := strings.Index(response.Body.String(), "</head>")
 	gridStyle := strings.Index(response.Body.String(), ".grid{")

@@ -1030,7 +1030,7 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 		if *personID == "" {
 			return fmt.Errorf("people dont-track requires --person-id")
 		}
-		if err := review.NewStore(application.DB).SetPersonDontTrack(ctx, *personID, *value, review.Actor{Type: "cli"}, "cli"); err != nil {
+		if err := review.NewStore(application.DB).SetPersonDontTrack(ctx, *personID, *value, review.Actor{Type: "user"}, "cli"); err != nil {
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "people dont-track", map[string]any{"person_id": *personID, "dont_track": *value})
@@ -1119,7 +1119,7 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 		}
 		store := representative.NewStoreWithPython(application.DB, application.Config.PythonPath)
 		if *clear {
-			if err := store.Clear(ctx, *personID, review.Actor{Type: "cli"}); err != nil {
+			if err := store.Clear(ctx, *personID, review.Actor{Type: "user"}); err != nil {
 				return err
 			}
 			image, err := store.Ensure(ctx, *personID)
@@ -1131,7 +1131,7 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 			}
 			return writeCommandResult(stdout, jsonOutput, "people representative", representativeSummary(image))
 		}
-		image, err := store.Select(ctx, *personID, *faceID, review.Actor{Type: "cli"})
+		image, err := store.Select(ctx, *personID, *faceID, review.Actor{Type: "user"})
 		if err != nil {
 			return err
 		}
@@ -1377,7 +1377,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if *state == "" {
 			return fmt.Errorf("face assign requires --state")
 		}
-		assignment, err := store.Assign(ctx, *faceID, *personID, review.AssignmentState(*state), review.Actor{Type: "cli"}, review.Evidence{}, "cli")
+		assignment, err := store.Assign(ctx, *faceID, *personID, review.AssignmentState(*state), review.Actor{Type: "user"}, review.Evidence{}, "cli")
 		if err != nil {
 			return err
 		}
@@ -1390,7 +1390,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if *disposition == "" {
 			return fmt.Errorf("face disposition requires --disposition")
 		}
-		if err := store.SetDisposition(ctx, *faceID, *disposition, true, review.Actor{Type: "cli"}, "cli"); err != nil {
+		if err := store.SetDisposition(ctx, *faceID, *disposition, true, review.Actor{Type: "user"}, "cli"); err != nil {
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "face disposition", map[string]any{"face_id": *faceID, "disposition": *disposition})
@@ -1398,7 +1398,7 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if *personID == "" {
 			return fmt.Errorf("face reference requires --person-id")
 		}
-		if err := store.SetReference(ctx, *faceID, *personID, *reference, review.Actor{Type: "cli"}, "cli"); err != nil {
+		if err := store.SetReference(ctx, *faceID, *personID, *reference, review.Actor{Type: "user"}, "cli"); err != nil {
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "face reference", map[string]any{"face_id": *faceID, "person_id": *personID, "reference": *reference})
@@ -1535,7 +1535,7 @@ func clusterCommand(ctx context.Context, application *app.App, args []string, js
 	if *faceID != "" {
 		decisions = append(decisions, review.ClusterFaceDecision{FaceID: *faceID, PersonID: *facePersonID, State: review.AssignmentState(*faceState), Disposition: *disposition})
 	}
-	if err := review.NewStore(application.DB).ReviewCluster(ctx, *clusterID, *defaultPersonID, *status, *expectedVersion, decisions, review.Actor{Type: "cli"}, "cli"); err != nil {
+	if err := review.NewStore(application.DB).ReviewCluster(ctx, *clusterID, *defaultPersonID, *status, *expectedVersion, decisions, review.Actor{Type: "user"}, "cli"); err != nil {
 		return err
 	}
 	return writeCommandResult(stdout, jsonOutput, "cluster review", map[string]any{"cluster_id": *clusterID, "status": *status, "expected_version": *expectedVersion + 1})
