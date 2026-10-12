@@ -432,9 +432,10 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		Support                  int
 	}
 	type personCluster struct {
-		ID, PersonName       string
-		Purity, Connectivity float64
-		Quality, Detection   float64
+		ID, PersonName                         string
+		Purity, Connectivity                   float64
+		PurityAvailable, ConnectivityAvailable bool
+		Quality, Detection                     float64
 	}
 	type personFace struct {
 		FaceID, PathID, RelativePath string
@@ -520,9 +521,10 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			face.Recommended = recommendation == 1
 		}
 		var cluster personCluster
+		var purity, connectivity sql.NullFloat64
 		if err := s.db.QueryRowContext(r.Context(), `
 			SELECT c.id, COALESCE(NULLIF(p.name, ''), CASE WHEN c.proposed_person_id IS NULL THEN 'Unknown' ELSE substr(c.proposed_person_id, -8) END),
-			       COALESCE(c.purity, 0), COALESCE(c.connectivity, 0),
+			       c.purity, c.connectivity,
 			       COALESCE(AVG(f2.quality), 0), COALESCE(AVG(f2.detection_confidence), 0)
 			FROM cluster_memberships cm
 			JOIN clusters c ON c.id = cm.cluster_id
@@ -532,7 +534,13 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			JOIN faces f2 ON f2.id = cm2.face_id
 			WHERE cm.face_id = ?
 			GROUP BY c.id, p.name, c.proposed_person_id, c.purity, c.connectivity
-			ORDER BY c.id LIMIT 1`, face.FaceID).Scan(&cluster.ID, &cluster.PersonName, &cluster.Purity, &cluster.Connectivity, &cluster.Quality, &cluster.Detection); err == nil {
+			ORDER BY c.id LIMIT 1`, face.FaceID).Scan(&cluster.ID, &cluster.PersonName, &purity, &connectivity, &cluster.Quality, &cluster.Detection); err == nil {
+			if purity.Valid {
+				cluster.Purity, cluster.PurityAvailable = purity.Float64, true
+			}
+			if connectivity.Valid {
+				cluster.Connectivity, cluster.ConnectivityAvailable = connectivity.Float64, true
+			}
 			face.Cluster = &cluster
 		}
 		if face.Reference {
@@ -716,7 +724,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			body.WriteString(`</div>`)
 		}
 		if face.Cluster != nil {
-			body.WriteString(`<div class="person-metadata">Cluster: ` + template.HTMLEscapeString(idSuffix(face.Cluster.ID)) + `: ` + template.HTMLEscapeString(face.Cluster.PersonName) + ` (P: ` + formatScore(face.Cluster.Purity) + `% C: ` + formatScore(face.Cluster.Connectivity) + `% Q: ` + formatScore(face.Cluster.Quality) + `%, D: ` + formatScore(face.Cluster.Detection) + `%)</div>`)
+			body.WriteString(`<div class="person-metadata">Cluster: ` + template.HTMLEscapeString(idSuffix(face.Cluster.ID)) + `: ` + template.HTMLEscapeString(face.Cluster.PersonName) + ` (P: ` + formatScoreUnavailable(face.Cluster.Purity, face.Cluster.PurityAvailable) + ` C: ` + formatScoreUnavailable(face.Cluster.Connectivity, face.Cluster.ConnectivityAvailable) + ` Q: ` + formatScore(face.Cluster.Quality) + `%, D: ` + formatScore(face.Cluster.Detection) + `%)</div>`)
 		}
 		if canModify {
 			body.WriteString(`<div class="actions"><div class="person-dispositions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Ambiguous</button><button type="button" data-action="representative" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Use as representative</button></div>`)
