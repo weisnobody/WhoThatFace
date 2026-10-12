@@ -10,7 +10,10 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -228,7 +231,7 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 	var body strings.Builder
 	body.WriteString(`<h1>Photos</h1><p>Review faces and use the face API to assign people or select references.</p>`)
 	for _, photo := range result {
-		body.WriteString(`<figure><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" style="max-width:20rem;max-height:15rem" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `"></a><figcaption>` + template.HTMLEscapeString(photo.RelativePath) + ` (` + fmt.Sprint(photo.FaceCount) + ` faces)</figcaption></figure>`)
+		body.WriteString(`<figure><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" style="max-width:20rem;max-height:15rem" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `"></a><figcaption><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `">` + template.HTMLEscapeString(photo.RelativePath) + `</a> (` + fmt.Sprint(photo.FaceCount) + ` faces)</figcaption></figure>`)
 	}
 	s.render(w, map[string]any{"Title": "Photos", "Account": account, "Body": template.HTML(body.String())})
 }
@@ -334,11 +337,18 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
-	peopleQuery := `SELECT p.id, COALESCE(NULLIF(p.name, ''), substr(p.id, -8)), p.is_provisional, p.dont_track,
-		(SELECT COUNT(DISTINCT ca.face_id) FROM current_face_assignments ca
-		 JOIN faces f ON f.id = ca.face_id JOIN analyses a ON a.id = f.analysis_id
-		 JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths ppc ON ppc.asset_id = pa.id
-		 WHERE ca.person_id = p.id AND ppc.missing_at IS NULL) FROM people p`
+	peopleQuery := `SELECT p.id, COALESCE(NULLIF(p.name, ''), substr(p.id, -8)), p.dont_track,
+		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL THEN ca.face_id END),
+		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND ca.state = 'assigned-user' THEN ca.face_id END),
+		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND ca.state = 'assigned-system' THEN ca.face_id END),
+		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND ca.state = 'provisional' THEN ca.face_id END)
+		FROM people p
+		LEFT JOIN current_face_assignments ca ON ca.person_id = p.id
+		LEFT JOIN faces f ON f.id = ca.face_id
+		LEFT JOIN analyses a ON a.id = f.analysis_id
+		LEFT JOIN photo_assets pa ON pa.id = a.asset_id
+		LEFT JOIN photo_paths pp ON pp.asset_id = pa.id
+		WHERE `
 	var args []any
 	if allowed != nil {
 		if len(allowed) == 0 {
@@ -351,32 +361,145 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
-		peopleQuery = strings.Replace(peopleQuery, `WHERE ca.person_id = p.id AND ppc.missing_at IS NULL)`, `WHERE ca.person_id = p.id AND ppc.missing_at IS NULL AND ppc.collection_id IN (`+strings.Join(placeholders, ",")+`))`, 1)
+		peopleQuery += `EXISTS (SELECT 1 FROM faces f2 JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id JOIN current_face_assignments ca2 ON ca2.face_id = f2.id WHERE ca2.person_id = p.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
 		for _, id := range allowed {
 			args = append(args, id)
 		}
-		peopleQuery += ` WHERE EXISTS (SELECT 1 FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN current_face_assignments ca ON ca.face_id = f.id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE ca.person_id = p.id AND pp.collection_id IN (` + strings.Join(placeholders, ",") + `))`
+	} else {
+		peopleQuery += `1=1`
 	}
-	peopleQuery += ` ORDER BY COALESCE(NULLIF(p.name, ''), substr(p.id, -8)), p.id`
+	peopleQuery += ` GROUP BY p.id, p.name, p.dont_track`
 	rows, err := s.db.QueryContext(r.Context(), peopleQuery, args...)
 	if err != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
-	var body strings.Builder
-	body.WriteString(`<h1>People</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><table><tr><th>Representative</th><th>Name</th><th>Faces</th><th>Provisional</th><th>Don't track</th></tr>`)
+	type personRow struct {
+		ID, Name                                    string
+		DontTrack, Faces, User, System, Provisional int
+	}
+	var people []personRow
 	for rows.Next() {
 		var id, name string
-		var provisional, dontTrack int
-		var faceCount int
-		if err := rows.Scan(&id, &name, &provisional, &dontTrack, &faceCount); err != nil {
+		var row personRow
+		if err := rows.Scan(&id, &name, &row.DontTrack, &row.Faces, &row.User, &row.System, &row.Provisional); err != nil {
 			http.Error(w, "people lookup failed", http.StatusInternalServerError)
 			return
 		}
-		body.WriteString(`<tr><td><img loading="lazy" width="96" height="96" alt="" src="/api/people/` + template.HTMLEscapeString(id) + `/representative"></td><td><a href="/review/people/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(name) + `</a></td><td>` + fmt.Sprint(faceCount) + `</td><td>` + fmt.Sprint(provisional == 1) + `</td><td>` + fmt.Sprint(dontTrack == 1) + `</td></tr>`)
+		row.ID, row.Name = id, name
+		people = append(people, row)
 	}
-	body.WriteString(`</table><script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
+	if err := rows.Err(); err != nil {
+		http.Error(w, "people lookup failed", http.StatusInternalServerError)
+		return
+	}
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	track := r.URL.Query().Get("track")
+	filtered := people[:0]
+	for _, person := range people {
+		if q != "" && !strings.Contains(strings.ToLower(person.Name), q) {
+			continue
+		}
+		if track == "tracked" && person.DontTrack != 0 {
+			continue
+		}
+		if track == "dont-track" && person.DontTrack == 0 {
+			continue
+		}
+		filtered = append(filtered, person)
+	}
+	people = filtered
+	sortKey := r.URL.Query().Get("sort")
+	if sortKey == "" {
+		sortKey = "name"
+	}
+	desc := r.URL.Query().Get("direction") == "desc"
+	sort.SliceStable(people, func(i, j int) bool {
+		var left, right string
+		switch sortKey {
+		case "faces":
+			left, right = fmt.Sprintf("%09d", people[i].Faces), fmt.Sprintf("%09d", people[j].Faces)
+		case "user":
+			left, right = fmt.Sprintf("%09d", people[i].User), fmt.Sprintf("%09d", people[j].User)
+		case "system":
+			left, right = fmt.Sprintf("%09d", people[i].System), fmt.Sprintf("%09d", people[j].System)
+		case "provisional":
+			left, right = fmt.Sprintf("%09d", people[i].Provisional), fmt.Sprintf("%09d", people[j].Provisional)
+		default:
+			left, right = strings.ToLower(people[i].Name), strings.ToLower(people[j].Name)
+		}
+		if left == right {
+			left, right = people[i].ID, people[j].ID
+		}
+		if desc {
+			return left > right
+		}
+		return left < right
+	})
+	total := len(people)
+	perPage := 10
+	if value, parseErr := strconv.Atoi(r.URL.Query().Get("per_page")); parseErr == nil && (value == 10 || value == 20 || value == 25 || value == 50 || value == 100) {
+		perPage = value
+	}
+	page := 1
+	if value, parseErr := strconv.Atoi(r.URL.Query().Get("page")); parseErr == nil && value > 0 {
+		page = value
+	}
+	pageCount := (total + perPage - 1) / perPage
+	if pageCount == 0 {
+		pageCount = 1
+	}
+	if page > pageCount {
+		page = pageCount
+	}
+	start := (page - 1) * perPage
+	end := start + perPage
+	if end > total {
+		end = total
+	}
+	pagePeople := people
+	if start < total {
+		pagePeople = people[start:end]
+	} else {
+		pagePeople = nil
+	}
+	pageURL := func(target int) string {
+		values := url.Values{}
+		for key, list := range r.URL.Query() {
+			for _, value := range list {
+				values.Add(key, value)
+			}
+		}
+		values.Set("page", strconv.Itoa(target))
+		values.Set("per_page", strconv.Itoa(perPage))
+		return "/review/people?" + values.Encode()
+	}
+	var body strings.Builder
+	body.WriteString(`<h1>People (` + fmt.Sprint(len(pagePeople)) + `/` + fmt.Sprint(total) + `)</h1><form id="people-controls" method="get"><input name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `" placeholder="Filter name"><select name="track"><option value="">All</option><option value="tracked"` + selectedAttr("tracked", track) + `>Tracked</option><option value="dont-track"` + selectedAttr("dont-track", track) + `>Don't track</option></select><label>Sort <select name="sort">`)
+	for _, option := range []struct{ Value, Label string }{{"name", "Name"}, {"faces", "Faces"}, {"user", "User"}, {"system", "System"}, {"provisional", "Provisional"}} {
+		body.WriteString(`<option value="` + option.Value + `"` + selectedAttr(option.Value, sortKey) + `>` + option.Label + `</option>`)
+	}
+	body.WriteString(`</select><select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select><select name="per_page" onchange="this.form.submit()">`)
+	for _, size := range []int{10, 20, 25, 50, 100} {
+		body.WriteString(`<option value="` + fmt.Sprint(size) + `"` + selectedAttr(fmt.Sprint(size), fmt.Sprint(perPage)) + `>` + fmt.Sprint(size) + `</option>`)
+	}
+	body.WriteString(`</select><button>Filter</button></form><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form>`)
+	renderPager := func() {
+		body.WriteString(`<nav class="pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="track" value="` + template.HTMLEscapeString(track) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
+	}
+	renderPager()
+	body.WriteString(`<table><tr><th>Name</th><th>Representative</th><th>Faces</th><th>User</th><th>System</th><th>Provisional</th><th>Don't track</th></tr>`)
+	for _, person := range pagePeople {
+		dontTrack := ""
+		if person.DontTrack != 0 {
+			dontTrack = "X"
+		}
+		body.WriteString(`<tr><td><a href="/review/people/` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</a></td><td><img loading="lazy" style="max-height:32px;width:auto" alt="" src="/api/people/` + template.HTMLEscapeString(person.ID) + `/representative"></td><td>` + fmt.Sprint(person.Faces) + `</td><td>` + fmt.Sprint(person.User) + `</td><td>` + fmt.Sprint(person.System) + `</td><td>` + fmt.Sprint(person.Provisional) + `</td><td>` + dontTrack + `</td></tr>`)
+	}
+	body.WriteString(`</table>`)
+	renderPager()
+	body.WriteString(`<script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
 	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String())})
 }
 
@@ -432,7 +555,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		Support                  int
 	}
 	type personCluster struct {
-		ID, PersonName                                               string
+		ID, PersonID, PersonName                                     string
 		Purity, Consistency, Connectivity                            float64
 		PurityAvailable, ConsistencyAvailable, ConnectivityAvailable bool
 		Quality, Detection                                           float64
@@ -447,6 +570,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		State, PersonID              string
 		Reference                    bool
 		Recommended                  bool
+		Representative               bool
 		Cluster                      *personCluster
 		Candidates                   []personCandidate
 	}
@@ -454,7 +578,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	referenceCount := 0
 	for rows.Next() {
 		var face personFace
-		var reference int
+		var reference, representativeFace int
 		var confidence sql.NullFloat64
 		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &confidence, &face.State, &face.PersonID, &reference); err != nil {
 			http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
@@ -464,6 +588,8 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			face.Confidence, face.ConfidenceAvailable = confidence.Float64, true
 		}
 		face.Reference = reference == 1
+		_ = s.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM person_representatives WHERE person_id = ? AND face_id = ?)`, personID, face.FaceID).Scan(&representativeFace)
+		face.Representative = representativeFace == 1
 		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `
 			SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id),
 			       rc.similarity, rc.margin, rc.support_count, rc.evidence
@@ -523,7 +649,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		var cluster personCluster
 		var purity, consistency, connectivity sql.NullFloat64
 		if err := s.db.QueryRowContext(r.Context(), `
-			SELECT c.id, COALESCE(NULLIF(p.name, ''), CASE WHEN c.proposed_person_id IS NULL THEN 'Unknown' ELSE substr(c.proposed_person_id, -8) END),
+			SELECT c.id, COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), CASE WHEN c.proposed_person_id IS NULL THEN 'Unknown' ELSE substr(c.proposed_person_id, -8) END),
 			       c.purity, c.consistency, c.connectivity,
 			       COALESCE(AVG(f2.quality), 0), COALESCE(AVG(f2.detection_confidence), 0)
 			FROM cluster_memberships cm
@@ -534,7 +660,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			JOIN faces f2 ON f2.id = cm2.face_id
 			WHERE cm.face_id = ?
 			GROUP BY c.id, p.name, c.proposed_person_id, c.purity, c.consistency, c.connectivity
-			ORDER BY c.id LIMIT 1`, face.FaceID).Scan(&cluster.ID, &cluster.PersonName, &purity, &consistency, &connectivity, &cluster.Quality, &cluster.Detection); err == nil {
+			ORDER BY c.id LIMIT 1`, face.FaceID).Scan(&cluster.ID, &cluster.PersonID, &cluster.PersonName, &purity, &consistency, &connectivity, &cluster.Quality, &cluster.Detection); err == nil {
 			if purity.Valid {
 				cluster.Purity, cluster.PurityAvailable = purity.Float64, true
 			}
@@ -555,9 +681,40 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 		return
 	}
+	faceFilter := r.URL.Query().Get("state")
+	if faceFilter != "" {
+		filtered := faces[:0]
+		for _, face := range faces {
+			if face.State == faceFilter {
+				filtered = append(filtered, face)
+			}
+		}
+		faces = filtered
+	}
+	faceSort := r.URL.Query().Get("sort")
+	sort.SliceStable(faces, func(i, j int) bool {
+		less := false
+		switch faceSort {
+		case "confidence":
+			less = faces[i].Confidence < faces[j].Confidence
+		case "quality":
+			less = faces[i].Quality < faces[j].Quality
+		case "detection":
+			less = faces[i].Detection < faces[j].Detection
+		default:
+			less = faces[i].RelativePath < faces[j].RelativePath
+		}
+		if r.URL.Query().Get("direction") == "desc" {
+			return !less && faces[i].FaceID != faces[j].FaceID
+		}
+		return less
+	})
 	maxConfidence, minConfidence := 0.0, 1.0
 	hasConfidence := false
+	minConsistency, maxConsistency := 0.0, 0.0
+	hasConsistency := false
 	clusterSummary := make(map[string][]string)
+	clusterPersonIDs := make(map[string]string)
 	clusterSummaryOrder := make([]string, 0)
 	for _, face := range faces {
 		if face.ConfidenceAvailable {
@@ -570,6 +727,18 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			hasConfidence = true
 		}
 		if face.Cluster != nil {
+			if face.Cluster.PersonID != "" {
+				clusterPersonIDs[face.Cluster.PersonName] = face.Cluster.PersonID
+			}
+			if face.Cluster.ConsistencyAvailable {
+				if !hasConsistency || face.Cluster.Consistency < minConsistency {
+					minConsistency = face.Cluster.Consistency
+				}
+				if !hasConsistency || face.Cluster.Consistency > maxConsistency {
+					maxConsistency = face.Cluster.Consistency
+				}
+				hasConsistency = true
+			}
 			if _, exists := clusterSummary[face.Cluster.PersonName]; !exists {
 				clusterSummaryOrder = append(clusterSummaryOrder, face.Cluster.PersonName)
 			}
@@ -590,6 +759,8 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	maxConfidenceText := formatScoreUnavailable(maxConfidence, hasConfidence)
 	minConfidenceText := formatScoreUnavailable(minConfidence, hasConfidence)
+	minConsistencyText := formatScoreUnavailable(minConsistency, hasConsistency)
+	maxConsistencyText := formatScoreUnavailable(maxConsistency, hasConsistency)
 
 	body := strings.Builder{}
 	pageStyle := template.CSS(`.person-header{
@@ -605,6 +776,8 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
   width:min(420px,45vw);
   border:1px solid #ccc;
   padding:10px}
+.card.provisional{border:2px solid #d6a800}
+.card.needs-attention{border:2px solid #c62828}
 .viewer{
   position:relative;
   display:inline-block;
@@ -642,12 +815,18 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 .person-assignment select{min-width:0;flex:1}
 .person-empty{margin-top:1rem}
 .person-summary{font-size:.8em;font-weight:normal}
-.person-metadata{font-size:13.3333px;line-height:1.35}
-.person-candidates{font-size:13.3333px;line-height:1.35}
+.person-metadata{font-size:.9em;line-height:1.35}
+.person-candidates{font-size:.9em;line-height:1.35}
+.person-identity{display:flex;gap:12px;align-items:flex-start}
+.person-identity img{flex:0 0 auto}
+.person-name-form{display:flex;flex-direction:column;align-items:flex-start}
+.person-page-controls{margin:8px 0}
+.person-page-actions{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:10px 0;border-top:1px solid #ccc}
+.person-page-actions select{max-width:14rem}
 .person-actions{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
 .person-dispositions{display:flex;gap:20px}
 .person-assignment{display:flex;justify-content:flex-end;gap:6px;margin-top:8px}
-.person-assignment select{min-width:12rem}`)
+.person-assignment select{min-width:10rem}`)
 	peopleQuery := `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8), id) FROM people`
 	peopleArgs := []any{}
 	if allowed != nil {
@@ -677,19 +856,33 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	peopleRows.Close()
 
-	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Max: ` + maxConfidenceText + `, Min: ` + minConfidenceText + `)</span></h1><form id="rename-person"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button></form>`)
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><div class="person-identity"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><div><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Similarity Max: ` + maxConfidenceText + `, Min: ` + minConfidenceText + `, Cluster Min: ` + minConsistencyText + `, Max: ` + maxConsistencyText + `)</span></h1><form id="rename-person" class="person-name-form"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button></form></div></div>`)
+	body.WriteString(`<form method="get" class="person-page-controls"><label>Filter <select name="state"><option value="">All faces</option>`)
+	for _, state := range []string{"provisional", "assigned-user", "assigned-system", "unknown", "ambiguous", "unassigned"} {
+		body.WriteString(`<option value="` + state + `"` + selectedAttr(state, faceFilter) + `>` + state + `</option>`)
+	}
+	body.WriteString(`</select></label> <label>Sort <select name="sort">`)
+	for _, option := range []string{"path", "confidence", "quality", "detection"} {
+		body.WriteString(`<option value="` + option + `"` + selectedAttr(option, faceSort) + `>` + option + `</option>`)
+	}
+	body.WriteString(`</select></label> <select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select> <button>Apply</button></form>`)
 	if len(clusterSummaryOrder) > 0 {
 		body.WriteString(`<div>Clusters: `)
 		for index, clusterPerson := range clusterSummaryOrder {
 			if index > 0 {
 				body.WriteString(`, `)
 			}
-			body.WriteString(template.HTMLEscapeString(clusterPerson) + ` (`)
+			if clusterPersonIDs[clusterPerson] != "" && clusterPersonIDs[clusterPerson] != personID {
+				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(clusterPersonIDs[clusterPerson]) + `">` + template.HTMLEscapeString(clusterPerson) + `</a>`)
+			} else {
+				body.WriteString(template.HTMLEscapeString(clusterPerson))
+			}
+			body.WriteString(` (`)
 			for clusterIndex, clusterID := range clusterSummary[clusterPerson] {
 				if clusterIndex > 0 {
 					body.WriteString(`, `)
 				}
-				body.WriteString(template.HTMLEscapeString(idSuffix(clusterID)))
+				body.WriteString(`<a href="/review/clusters/` + template.HTMLEscapeString(clusterID) + `">` + template.HTMLEscapeString(idSuffix(clusterID)) + `</a>`)
 			}
 			body.WriteString(`)`)
 		}
@@ -703,11 +896,17 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		if face.Reference {
 			boxClass += " reference"
 		}
-		body.WriteString(`<article class="card" id="face-` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path">` + template.HTMLEscapeString(face.RelativePath) + `</div>`)
+		cardClass := "card"
+		if face.State == string(review.Provisional) {
+			cardClass += " provisional"
+		} else if face.State != string(review.AssignedUser) && face.State != string(review.AssignedSystem) {
+			cardClass += " needs-attention"
+		}
+		body.WriteString(`<article class="` + cardClass + `" id="face-` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(face.PathID) + `">` + template.HTMLEscapeString(face.RelativePath) + `</a></div>`)
 		confidence := formatScoreUnavailable(face.Confidence, face.ConfidenceAvailable)
-		body.WriteString(`<div class="person-metadata"><strong>Assignment:</strong> ` + template.HTMLEscapeString(face.State) + `; <strong>Confidence:</strong> ` + confidence + `; <strong>Face quality:</strong> ` + formatScore(face.Quality) + `%; <strong>Detection:</strong> ` + formatScore(face.Detection) + `%`)
+		body.WriteString(`<div class="person-metadata"><strong>` + template.HTMLEscapeString(assignmentLabel(face.State)) + `:</strong> C: ` + confidence + ` Q: ` + formatScore(face.Quality) + `% D: ` + formatScore(face.Detection) + `%`)
 		if face.Recommended {
-			body.WriteString(`; <strong>Ref Rec</strong>`)
+			body.WriteString(` <strong>Ref Rec</strong>`)
 		}
 		body.WriteString(`</div>`)
 		otherCandidates := make([]personCandidate, 0, len(face.Candidates))
@@ -722,16 +921,29 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				if index > 0 {
 					body.WriteString(`, `)
 				}
-				body.WriteString(template.HTMLEscapeString(candidate.Name) + ` (` + formatScore(candidate.Similarity) + `%)`)
+				if candidate.PersonID != personID {
+					body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.Name) + `</a>`)
+				} else {
+					body.WriteString(template.HTMLEscapeString(candidate.Name))
+				}
+				body.WriteString(` (` + formatScore(candidate.Similarity) + `%)`)
 			}
 			body.WriteString(`</div>`)
 		}
 		if face.Cluster != nil {
-			body.WriteString(`<div class="person-metadata">Cluster: ` + template.HTMLEscapeString(idSuffix(face.Cluster.ID)) + `: ` + template.HTMLEscapeString(face.Cluster.PersonName) + ` (Cs: ` + formatScoreUnavailable(face.Cluster.Consistency, face.Cluster.ConsistencyAvailable) + ` Cn: ` + formatScoreUnavailable(face.Cluster.Connectivity, face.Cluster.ConnectivityAvailable) + ` Q: ` + formatScore(face.Cluster.Quality) + `%, D: ` + formatScore(face.Cluster.Detection) + `%)</div>`)
+			clusterPerson := template.HTMLEscapeString(face.Cluster.PersonName)
+			if face.Cluster.PersonID != "" && face.Cluster.PersonID != personID {
+				clusterPerson = `<a href="/review/people/` + template.HTMLEscapeString(face.Cluster.PersonID) + `">` + clusterPerson + `</a>`
+			}
+			body.WriteString(`<div class="person-metadata"><strong>Cluster:</strong> <a href="/review/clusters/` + template.HTMLEscapeString(face.Cluster.ID) + `">` + template.HTMLEscapeString(idSuffix(face.Cluster.ID)) + `</a>: ` + clusterPerson + ` (<strong>Cs:</strong> ` + formatScoreUnavailable(face.Cluster.Consistency, face.Cluster.ConsistencyAvailable) + ` <strong>Cn:</strong> ` + formatScoreUnavailable(face.Cluster.Connectivity, face.Cluster.ConnectivityAvailable) + ` <strong>Q:</strong> ` + formatScore(face.Cluster.Quality) + `%, <strong>D:</strong> ` + formatScore(face.Cluster.Detection) + `%)</div>`)
 		}
 		if canModify {
-			body.WriteString(`<div class="actions"><div class="person-dispositions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Ambiguous</button><button type="button" data-action="representative" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Use as representative</button></div>`)
-			if face.Reference || (face.Recommended && (face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser))) {
+			body.WriteString(`<div class="actions"><div class="person-dispositions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Ambiguous</button>`)
+			if !face.Representative {
+				body.WriteString(`<button type="button" data-action="representative" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Key Photo</button>`)
+			}
+			body.WriteString(`</div>`)
+			if face.Reference || face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser) {
 				label := "Reference"
 				if face.Reference {
 					label = "Evaluation"
@@ -752,6 +964,17 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(faces) == 0 {
 		body.WriteString(`<p class="person-empty">No faces are assigned to this person.</p>`)
+	}
+	if canModify && len(faces) > 0 {
+		body.WriteString(`<div class="person-page-actions"><div><label>Face <select id="page-face">`)
+		for _, face := range faces {
+			body.WriteString(`<option value="` + template.HTMLEscapeString(face.FaceID) + `">` + template.HTMLEscapeString(idSuffix(face.FaceID)) + ` — ` + template.HTMLEscapeString(face.RelativePath) + `</option>`)
+		}
+		body.WriteString(`</select></label> <button type="button" data-action="page-unknown">Unknown</button><button type="button" data-action="page-ambiguous">Ambiguous</button></div><div><select id="page-assignment-person"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+		for _, option := range people {
+			body.WriteString(`<option value="` + template.HTMLEscapeString(option.ID) + `">` + template.HTMLEscapeString(option.Name) + `</option>`)
+		}
+		body.WriteString(`</select><button type="button" data-action="page-assign">Save</button></div></div>`)
 	}
 	body.WriteString(`</div>`)
 	if canModify {
@@ -935,7 +1158,7 @@ func (s *Server) reviewPersonReferences(w http.ResponseWriter, r *http.Request) 
 			class += " reference"
 		}
 		label := map[bool]string{true: "Approved reference", false: "Recommendation"}[reference == 1]
-		body.WriteString(fmt.Sprintf(`<article class="card"><div class="viewer"><img loading="lazy" src="/api/photos/%s"><span class="%s" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span></div><div class="path">%s</div><div>%s · score %s%%</div><div>Quality %s%% · Detection %s%%</div><div class="actions"><button type="button" data-action="role" data-face-id="%s" data-person-id="%s" data-reference="%t">%s</button></div></article>`, template.HTMLEscapeString(pathID), class, percent(left, width), percent(top, height), percent(right-left, width), percent(bottom-top, height), template.HTMLEscapeString(relative), label, formatScore(score), formatScore(quality), formatScore(detection), template.HTMLEscapeString(faceID), template.HTMLEscapeString(personID), reference == 1, map[bool]string{true: "Make evaluation", false: "Approve reference"}[reference == 1]))
+		body.WriteString(fmt.Sprintf(`<article class="card"><div class="viewer"><img loading="lazy" src="/api/photos/%s"><span class="%s" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span></div><div class="path"><a href="/review/photos?path_id=%s">%s</a></div><div>%s · score %s%%</div><div>Quality %s%% · Detection %s%%</div><div class="actions"><button type="button" data-action="role" data-face-id="%s" data-person-id="%s" data-reference="%t">%s</button></div></article>`, template.HTMLEscapeString(pathID), class, percent(left, width), percent(top, height), percent(right-left, width), percent(bottom-top, height), template.HTMLEscapeString(pathID), template.HTMLEscapeString(relative), label, formatScore(score), formatScore(quality), formatScore(detection), template.HTMLEscapeString(faceID), template.HTMLEscapeString(personID), reference == 1, map[bool]string{true: "Make evaluation", false: "Approve reference"}[reference == 1]))
 	}
 	body.WriteString(`</div></div><script src="/static/photo.js" defer></script>`)
 	s.render(w, map[string]any{"Title": "Person references", "Account": account, "Body": template.HTML(body.String())})
@@ -981,6 +1204,18 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
       '/api/people/' + encodeURIComponent(page.dataset.personId) + '/representative',
       {face_id: button.dataset.faceId});
   });
+  function pageFace() { const selector = document.getElementById('page-face'); return selector ? selector.value : ''; }
+  document.querySelectorAll('[data-action="page-unknown"], [data-action="page-ambiguous"]').forEach((button) => {
+    button.onclick = () => send(pageFace(), '/api/faces/' + encodeURIComponent(pageFace()) + '/assignment',
+      {person_id: '', state: button.dataset.action === 'page-unknown' ? 'unknown' : 'ambiguous'});
+  });
+  document.querySelectorAll('[data-action="page-assign"]').forEach((button) => {
+    button.onclick = () => {
+      const person = document.getElementById('page-assignment-person').value;
+      send(pageFace(), '/api/faces/' + encodeURIComponent(pageFace()) + '/assignment',
+        {person_id: person === '__ambiguous__' ? '' : person, state: person === '__ambiguous__' ? 'ambiguous' : (person ? 'assigned-user' : 'unknown')});
+    };
+  });
 })();
 `))
 }
@@ -1025,7 +1260,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status, COUNT(DISTINCT cm.face_id), COUNT(DISTINCT rc.person_id), COALESCE(NULLIF(p.name, ''), substr(c.proposed_person_id, -8), '') FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id LEFT JOIN people p ON p.id = c.proposed_person_id WHERE cr.status = 'active'`
+	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status, COUNT(DISTINCT cm.face_id), COUNT(DISTINCT rc.person_id), COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), substr(c.proposed_person_id, -8), '') FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id LEFT JOIN people p ON p.id = c.proposed_person_id WHERE cr.status = 'active'`
 	var clusterArgs []any
 	if allowed != nil {
 		if len(allowed) == 0 {
@@ -1097,14 +1332,18 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	var body strings.Builder
 	body.WriteString(`<h1>Clusters</h1><form method="get"><label>Mixed <select name="mixed"><option value="">Any</option><option value="true">Mixed</option><option value="false">Pure</option></select></label> <label>Status <input name="status"></label> <label>Rating <select name="rating"><option value="">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label> <label><input type="checkbox" name="include_dont_track" value="true"> Include don't-track</label> <label>Min faces <input name="min_faces" type="number" min="1"></label> <label>Max faces <input name="max_faces" type="number" min="1"></label> <label>Sort <select name="sort"><option value="mixed">Mixed</option><option value="face_count">Face count</option><option value="candidate_count">Candidate count</option><option value="person">Person</option><option value="rating">Rating</option></select></label> <button>Filter</button></form><table><tr><th>Cluster</th><th>Person</th><th>Faces</th><th>Candidates</th><th>Purity</th><th>Connectivity</th><th>Mixed</th><th>Status</th></tr>`)
 	for rows.Next() {
-		var id, key, status, personName string
+		var id, key, status, personID, personName string
 		var purity, connectivity sql.NullFloat64
 		var mixed, faceCount, candidateCount int
-		if err := rows.Scan(&id, &key, &purity, &connectivity, &mixed, &status, &faceCount, &candidateCount, &personName); err != nil {
+		if err := rows.Scan(&id, &key, &purity, &connectivity, &mixed, &status, &faceCount, &candidateCount, &personID, &personName); err != nil {
 			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
-		body.WriteString(`<tr><td><a href="/review/clusters/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(key) + `</a></td><td>` + template.HTMLEscapeString(personName) + `</td><td>` + fmt.Sprint(faceCount) + `</td><td>` + fmt.Sprint(candidateCount) + `</td><td>` + fmt.Sprint(purity.Float64) + `</td><td>` + fmt.Sprint(connectivity.Float64) + `</td><td>` + fmt.Sprint(mixed == 1) + `</td><td>` + template.HTMLEscapeString(status) + `</td></tr>`)
+		personCell := template.HTMLEscapeString(personName)
+		if personID != "" {
+			personCell = `<a href="/review/people/` + template.HTMLEscapeString(personID) + `">` + personCell + `</a>`
+		}
+		body.WriteString(`<tr><td><a href="/review/clusters/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(key) + `</a></td><td>` + personCell + `</td><td>` + fmt.Sprint(faceCount) + `</td><td>` + fmt.Sprint(candidateCount) + `</td><td>` + fmt.Sprint(purity.Float64) + `</td><td>` + fmt.Sprint(connectivity.Float64) + `</td><td>` + fmt.Sprint(mixed == 1) + `</td><td>` + template.HTMLEscapeString(status) + `</td></tr>`)
 	}
 	body.WriteString(`</table>`)
 	s.render(w, map[string]any{"Title": "Clusters", "Account": account, "Body": template.HTML(body.String())})
@@ -1158,7 +1397,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	peopleRows.Close()
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT cm.face_id, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''),
-		       COALESCE(pp.id, ''), COALESCE(pa.width, 0), COALESCE(pa.height, 0),
+		       COALESCE(pp.id, ''), COALESCE(pp.relative_path, ''), COALESCE(pa.width, 0), COALESCE(pa.height, 0),
 		       f.box_left, f.box_top, f.box_right, f.box_bottom,
 		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
 		FROM cluster_memberships cm
@@ -1197,15 +1436,15 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</select></label> <label>Status <select id="cluster-status"><option>in-progress</option><option>partially-reviewed</option><option>reviewed</option><option>needs-review</option></select></label> <label>Note <input id="cluster-note" size="45"></label> <button id="save-cluster" type="button">Save review</button></div><p id="cluster-message"></p><div class="cluster-grid">`)
 	for rows.Next() {
-		var faceID, state, personID, pathID string
+		var faceID, state, personID, pathID, relativePath string
 		var width, height int
 		var left, top, right, bottom, quality, detection float64
-		if err := rows.Scan(&faceID, &state, &personID, &pathID, &width, &height, &left, &top, &right, &bottom, &quality, &detection); err != nil {
+		if err := rows.Scan(&faceID, &state, &personID, &pathID, &relativePath, &width, &height, &left, &top, &right, &bottom, &quality, &detection); err != nil {
 			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
 		color := faceStateColor(state)
-		body.WriteString(`<article class="cluster-face" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-original-state="` + template.HTMLEscapeString(state) + `" data-original-person="` + template.HTMLEscapeString(personID) + `" style="border-color:` + color + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="face ` + template.HTMLEscapeString(idSuffix(faceID)) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div><div>Face ` + template.HTMLEscapeString(idSuffix(faceID)) + ` · ` + template.HTMLEscapeString(state) + ` · Quality ` + formatScore(quality) + `% · Detection ` + formatScore(detection) + `%</div><label>Person <select class="face-person"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+		body.WriteString(`<article class="cluster-face" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-original-state="` + template.HTMLEscapeString(state) + `" data-original-person="` + template.HTMLEscapeString(personID) + `" style="border-color:` + color + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="face ` + template.HTMLEscapeString(idSuffix(faceID)) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(pathID) + `">` + template.HTMLEscapeString(relativePath) + `</a></div><div>Face ` + template.HTMLEscapeString(idSuffix(faceID)) + ` · ` + template.HTMLEscapeString(state) + ` · Quality ` + formatScore(quality) + `% · Detection ` + formatScore(detection) + `%</div><label>Person <select class="face-person"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
 		for _, person := range people {
 			selected := selectedAttr(person.ID, personID)
 			body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selected + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
@@ -1215,14 +1454,14 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 			body.WriteString(`<option value="` + option + `"` + selectedAttr(option, state) + `>` + option + `</option>`)
 		}
 		body.WriteString(`</select></label> <label>Disposition <select class="face-disposition"><option value="">None</option><option value="dont-track">Don't track</option><option value="false-detection">False detection</option><option value="incorrect-assignment">Incorrect assignment</option></select></label><div class="candidate">`)
-		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? ORDER BY rc.created_at DESC, rc.rank LIMIT 5`, faceID)
+		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? ORDER BY rc.created_at DESC, rc.rank LIMIT 5`, faceID)
 		if candidateErr == nil {
 			for candidateRows.Next() {
-				var name string
+				var candidateID, name string
 				var similarity, margin float64
 				var support int
-				if candidateRows.Scan(&name, &similarity, &margin, &support) == nil {
-					body.WriteString(template.HTMLEscapeString(name) + template.HTMLEscapeString(fmt.Sprintf(" %.3f (margin %.3f, support %d)", similarity, margin, support)) + `<br>`)
+				if candidateRows.Scan(&candidateID, &name, &similarity, &margin, &support) == nil {
+					body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidateID) + `">` + template.HTMLEscapeString(name) + `</a>` + template.HTMLEscapeString(fmt.Sprintf(" %.3f (margin %.3f, support %d)", similarity, margin, support)) + `<br>`)
 				}
 			}
 			candidateRows.Close()
@@ -1292,6 +1531,36 @@ func formatScoreUnavailable(value float64, available bool) string {
 		return "—"
 	}
 	return formatScore(value) + "%"
+}
+
+func assignmentLabel(state string) string {
+	switch state {
+	case string(review.AssignedUser):
+		return "User"
+	case string(review.AssignedSystem):
+		return "System"
+	case string(review.Provisional):
+		return "Provisional"
+	case "unknown":
+		return "Unknown"
+	case "ambiguous":
+		return "Ambiguous"
+	default:
+		return state
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func idSuffix(value string) string {
