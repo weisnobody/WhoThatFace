@@ -51,7 +51,7 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	connection, err := database.Conn(ctx)
+	connection, err := migrationConnection(ctx, database)
 	if err != nil {
 		return err
 	}
@@ -95,6 +95,19 @@ func applyMigrations(ctx context.Context, database *sql.DB) error {
 	}
 	committed = true
 	return nil
+}
+
+func migrationConnection(ctx context.Context, database *sql.DB) (*sql.Conn, error) {
+	var connection *sql.Conn
+	err := WithBusyRetry(ctx, 20, func() error {
+		var err error
+		connection, err = database.Conn(ctx)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("open migration connection: %w", err)
+	}
+	return connection, nil
 }
 
 type queryer interface {

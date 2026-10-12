@@ -21,6 +21,9 @@ func TestGroupBuildsMutualKNNComponents(t *testing.T) {
 	if result.Clusters[0].Purity != 1 {
 		t.Errorf("purity = %v", result.Clusters[0].Purity)
 	}
+	if result.Clusters[0].Consistency < 0.99 {
+		t.Errorf("consistency = %v, want at least 0.99", result.Clusters[0].Consistency)
+	}
 }
 
 func TestGroupReportsMixedCluster(t *testing.T) {
@@ -62,5 +65,8 @@ func TestBenchmarkMetricsIgnoreUnknownPurityAndNormalizeConnectivity(t *testing.
 	}
 	if got := CalculateConnectivity(3, 1); got != .5 {
 		t.Fatalf("partial connectivity = %v, want .5", got)
+	}
+	if got := CalculateConsistency([]string{"a", "b"}, []Edge{{LeftID: "a", RightID: "b", Similarity: .8}}); got != .8 {
+		t.Fatalf("consistency = %v, want .8", got)
 	}
 }

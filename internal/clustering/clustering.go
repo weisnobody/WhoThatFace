@@ -46,6 +46,7 @@ type Cluster struct {
 	FaceIDs          []string
 	ProposedPersonID string
 	Purity           float32
+	Consistency      float32
 	Connectivity     float32
 	Mixed            bool
 }
@@ -205,11 +206,42 @@ func GroupContext(ctx context.Context, faces []Face, config Config) (Result, err
 		}
 		cluster.Mixed = len(knownPeople) > 1
 		internalEdges := countInternalEdges(edges, cluster.FaceIDs)
+		cluster.Consistency = CalculateConsistency(cluster.FaceIDs, edges)
 		cluster.Connectivity = CalculateConnectivity(len(cluster.FaceIDs), internalEdges)
 		clusters = append(clusters, cluster)
 	}
 	sort.Slice(clusters, func(left, right int) bool { return clusters[left].Key < clusters[right].Key })
 	return Result{Clusters: clusters, Edges: edges}, nil
+}
+
+// CalculateConsistency is the mean cosine similarity of the retained
+// mutual-nearest-neighbor edges inside a cluster. It measures how similar the
+// linked faces are, independently of whether their person labels are known.
+// A singleton has no internal edge and therefore has no consistency score.
+func CalculateConsistency(faceIDs []string, edges []Edge) float32 {
+	if len(faceIDs) <= 1 {
+		return 0
+	}
+	members := make(map[string]struct{}, len(faceIDs))
+	for _, faceID := range faceIDs {
+		members[faceID] = struct{}{}
+	}
+	var total float32
+	count := 0
+	for _, edge := range edges {
+		if _, ok := members[edge.LeftID]; !ok {
+			continue
+		}
+		if _, ok := members[edge.RightID]; !ok {
+			continue
+		}
+		total += edge.Similarity
+		count++
+	}
+	if count == 0 {
+		return 0
+	}
+	return total / float32(count)
 }
 
 // approximateCandidates is a deterministic, dependency-free ANN prototype.

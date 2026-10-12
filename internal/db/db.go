@@ -253,7 +253,7 @@ func hasPendingMigrations(ctx context.Context, database *sql.DB) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	connection, err := database.Conn(ctx)
+	connection, err := migrationConnection(ctx, database)
 	if err != nil {
 		return false, err
 	}
