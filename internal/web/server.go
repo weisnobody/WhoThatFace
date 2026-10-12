@@ -17,14 +17,16 @@ import (
 	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/pjg/face_me_bro/internal/representative"
 	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
 )
 
 type Server struct {
-	auth      auth.Store
-	db        *sql.DB
-	templates *template.Template
+	auth       auth.Store
+	db         *sql.DB
+	pythonPath string
+	templates  *template.Template
 }
 
 func boolInt(value bool) int {
@@ -50,6 +52,14 @@ func splitCSV(value string) []string {
 }
 
 func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
+	return newServer(authStore, database, "")
+}
+
+func NewServerWithPython(authStore auth.Store, database *sql.DB, pythonPath string) (*Server, error) {
+	return newServer(authStore, database, pythonPath)
+}
+
+func newServer(authStore auth.Store, database *sql.DB, pythonPath string) (*Server, error) {
 	//  body{font-family:system-ui,sans-serif;max-width:70rem;margin:2rem auto;padding:0 1rem}
 
 	page := template.Must(template.New("page").Parse(`<!doctype html>
@@ -64,7 +74,7 @@ func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
  .error{color:#a00}
 </style>{{with .PageStyle}}<style>{{.}}</style>{{end}}</head>
 <body><nav><a href="/">Face-Me-Bro</a>{{if .Account}}<span>{{.Account.Username}} <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
-	return &Server{auth: authStore, db: database, templates: page}, nil
+	return &Server{auth: authStore, db: database, pythonPath: pythonPath, templates: page}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -91,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/people", s.createPerson)
 	mux.HandleFunc("POST /api/people/{personID}", s.renamePerson)
 	mux.HandleFunc("GET /api/people/{personID}/references", s.personReferences)
+	mux.HandleFunc("GET /api/people/{personID}/representative", s.personRepresentative)
+	mux.HandleFunc("POST /api/people/{personID}/representative", s.setPersonRepresentative)
 	mux.HandleFunc("GET /review/clusters", s.reviewClusters)
 	mux.HandleFunc("GET /review/clusters/{clusterID}", s.reviewCluster)
 	mux.HandleFunc("POST /api/clusters/{clusterID}/review", s.reviewClusterAPI)
@@ -353,7 +365,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	var body strings.Builder
-	body.WriteString(`<h1>People</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><table><tr><th>Name</th><th>Faces</th><th>Provisional</th><th>Don't track</th></tr>`)
+	body.WriteString(`<h1>People</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><table><tr><th>Representative</th><th>Name</th><th>Faces</th><th>Provisional</th><th>Don't track</th></tr>`)
 	for rows.Next() {
 		var id, name string
 		var provisional, dontTrack int
@@ -362,7 +374,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "people lookup failed", http.StatusInternalServerError)
 			return
 		}
-		body.WriteString(`<tr><td><a href="/review/people/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(name) + `</a></td><td>` + fmt.Sprint(faceCount) + `</td><td>` + fmt.Sprint(provisional == 1) + `</td><td>` + fmt.Sprint(dontTrack == 1) + `</td></tr>`)
+		body.WriteString(`<tr><td><img loading="lazy" width="96" height="96" alt="" src="/api/people/` + template.HTMLEscapeString(id) + `/representative"></td><td><a href="/review/people/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(name) + `</a></td><td>` + fmt.Sprint(faceCount) + `</td><td>` + fmt.Sprint(provisional == 1) + `</td><td>` + fmt.Sprint(dontTrack == 1) + `</td></tr>`)
 	}
 	body.WriteString(`</table><script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
 	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String())})
@@ -645,7 +657,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	peopleRows.Close()
 
-	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Max: ` + formatScore(maxConfidence) + `%, Min: ` + formatScore(minConfidence) + `%)</span></h1><form id="rename-person"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button></form>`)
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Max: ` + formatScore(maxConfidence) + `%, Min: ` + formatScore(minConfidence) + `%)</span></h1><form id="rename-person"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button></form>`)
 	if len(clusterSummaryOrder) > 0 {
 		body.WriteString(`<div>Clusters: `)
 		for index, clusterPerson := range clusterSummaryOrder {
@@ -697,7 +709,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			body.WriteString(`<div class="person-metadata">Cluster: ` + template.HTMLEscapeString(idSuffix(face.Cluster.ID)) + `: ` + template.HTMLEscapeString(face.Cluster.PersonName) + ` (Quality: ` + formatScore(face.Cluster.Quality) + `%, Detection: ` + formatScore(face.Cluster.Detection) + `%)</div>`)
 		}
 		if canModify {
-			body.WriteString(`<div class="actions"><div class="person-dispositions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Ambiguous</button></div>`)
+			body.WriteString(`<div class="actions"><div class="person-dispositions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Ambiguous</button><button type="button" data-action="representative" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Use as representative</button></div>`)
 			if face.Reference || (face.Recommended && (face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser))) {
 				label := "Reference"
 				if face.Reference {
@@ -943,6 +955,11 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
       '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/reference',
       {person_id: page.dataset.personId, reference: button.dataset.reference !== 'true'});
   });
+  document.querySelectorAll('[data-action="representative"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId,
+      '/api/people/' + encodeURIComponent(page.dataset.personId) + '/representative',
+      {face_id: button.dataset.faceId});
+  });
 })();
 `))
 }
@@ -986,7 +1003,8 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
-	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cr.status = 'active'`
+	query := r.URL.Query()
+	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status, COUNT(DISTINCT cm.face_id), COUNT(DISTINCT rc.person_id), COALESCE(NULLIF(p.name, ''), substr(c.proposed_person_id, -8), '') FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id LEFT JOIN people p ON p.id = c.proposed_person_id WHERE cr.status = 'active'`
 	var clusterArgs []any
 	if allowed != nil {
 		if len(allowed) == 0 {
@@ -1000,7 +1018,55 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 		}
 		clusterQuery += ` AND EXISTS (SELECT 1 FROM cluster_memberships cm2 JOIN faces f2 ON f2.id = cm2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE cm2.cluster_id = c.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `)`
 	}
-	clusterQuery += ` ORDER BY c.is_mixed DESC, c.cluster_key`
+	if query.Get("include_dont_track") != "true" {
+		clusterQuery += ` AND NOT EXISTS (SELECT 1 FROM cluster_memberships cm3 JOIN current_face_dispositions fd3 ON fd3.face_id = cm3.face_id WHERE cm3.cluster_id = c.id AND fd3.disposition = 'dont-track')`
+	}
+	if mixed := query.Get("mixed"); mixed == "true" || mixed == "false" {
+		clusterQuery += ` AND c.is_mixed = ?`
+		if mixed == "true" {
+			clusterArgs = append(clusterArgs, 1)
+		} else {
+			clusterArgs = append(clusterArgs, 0)
+		}
+	}
+	if status := query.Get("status"); status != "" {
+		clusterQuery += ` AND c.review_status = ?`
+		clusterArgs = append(clusterArgs, status)
+	}
+	if personID := query.Get("person_id"); personID != "" {
+		clusterQuery += ` AND c.proposed_person_id = ?`
+		clusterArgs = append(clusterArgs, personID)
+	}
+	switch query.Get("rating") {
+	case "high":
+		clusterQuery += ` AND COALESCE(c.purity, 0) >= 0.8 AND COALESCE(c.connectivity, 0) >= 0.8`
+	case "medium":
+		clusterQuery += ` AND COALESCE(c.purity, 0) >= 0.5 AND COALESCE(c.purity, 0) < 0.8 AND COALESCE(c.connectivity, 0) >= 0.5`
+	case "low":
+		clusterQuery += ` AND (COALESCE(c.purity, 0) < 0.5 OR COALESCE(c.connectivity, 0) < 0.5)`
+	}
+	clusterQuery += ` GROUP BY c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status, p.name, c.proposed_person_id`
+	if minFaces := query.Get("min_faces"); minFaces != "" {
+		clusterQuery += ` HAVING COUNT(DISTINCT cm.face_id) >= ?`
+		clusterArgs = append(clusterArgs, minFaces)
+	}
+	if maxFaces := query.Get("max_faces"); maxFaces != "" {
+		if strings.Contains(clusterQuery, " HAVING ") {
+			clusterQuery += ` AND COUNT(DISTINCT cm.face_id) <= ?`
+		} else {
+			clusterQuery += ` HAVING COUNT(DISTINCT cm.face_id) <= ?`
+		}
+		clusterArgs = append(clusterArgs, maxFaces)
+	}
+	sortColumn := map[string]string{"face_count": "COUNT(DISTINCT cm.face_id)", "candidate_count": "COUNT(DISTINCT rc.person_id)", "person": "LOWER(COALESCE(p.name, c.proposed_person_id))", "mixed": "c.is_mixed", "rating": "COALESCE(c.purity, 0)"}[query.Get("sort")]
+	if sortColumn == "" {
+		sortColumn = "c.is_mixed"
+	}
+	direction := "DESC"
+	if strings.EqualFold(query.Get("direction"), "asc") {
+		direction = "ASC"
+	}
+	clusterQuery += ` ORDER BY ` + sortColumn + ` ` + direction + `, c.cluster_key`
 	rows, err := s.db.QueryContext(r.Context(), clusterQuery, clusterArgs...)
 	if err != nil {
 		http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
@@ -1008,16 +1074,16 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	var body strings.Builder
-	body.WriteString(`<h1>Clusters</h1><table><tr><th>Cluster</th><th>Purity</th><th>Connectivity</th><th>Mixed</th><th>Status</th></tr>`)
+	body.WriteString(`<h1>Clusters</h1><form method="get"><label>Mixed <select name="mixed"><option value="">Any</option><option value="true">Mixed</option><option value="false">Pure</option></select></label> <label>Status <input name="status"></label> <label>Rating <select name="rating"><option value="">Any</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label> <label><input type="checkbox" name="include_dont_track" value="true"> Include don't-track</label> <label>Min faces <input name="min_faces" type="number" min="1"></label> <label>Max faces <input name="max_faces" type="number" min="1"></label> <label>Sort <select name="sort"><option value="mixed">Mixed</option><option value="face_count">Face count</option><option value="candidate_count">Candidate count</option><option value="person">Person</option><option value="rating">Rating</option></select></label> <button>Filter</button></form><table><tr><th>Cluster</th><th>Person</th><th>Faces</th><th>Candidates</th><th>Purity</th><th>Connectivity</th><th>Mixed</th><th>Status</th></tr>`)
 	for rows.Next() {
-		var id, key, status string
+		var id, key, status, personName string
 		var purity, connectivity sql.NullFloat64
-		var mixed int
-		if err := rows.Scan(&id, &key, &purity, &connectivity, &mixed, &status); err != nil {
+		var mixed, faceCount, candidateCount int
+		if err := rows.Scan(&id, &key, &purity, &connectivity, &mixed, &status, &faceCount, &candidateCount, &personName); err != nil {
 			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
-		body.WriteString(`<tr><td><a href="/review/clusters/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(key) + `</a></td><td>` + fmt.Sprint(purity.Float64) + `</td><td>` + fmt.Sprint(connectivity.Float64) + `</td><td>` + fmt.Sprint(mixed == 1) + `</td><td>` + template.HTMLEscapeString(status) + `</td></tr>`)
+		body.WriteString(`<tr><td><a href="/review/clusters/` + template.HTMLEscapeString(id) + `">` + template.HTMLEscapeString(key) + `</a></td><td>` + template.HTMLEscapeString(personName) + `</td><td>` + fmt.Sprint(faceCount) + `</td><td>` + fmt.Sprint(candidateCount) + `</td><td>` + fmt.Sprint(purity.Float64) + `</td><td>` + fmt.Sprint(connectivity.Float64) + `</td><td>` + fmt.Sprint(mixed == 1) + `</td><td>` + template.HTMLEscapeString(status) + `</td></tr>`)
 	}
 	body.WriteString(`</table>`)
 	s.render(w, map[string]any{"Title": "Clusters", "Account": account, "Body": template.HTML(body.String())})
@@ -1030,15 +1096,15 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	clusterID := r.PathValue("clusterID")
 	var runStatus, supersededBy, reviewStatus, collectionID string
-	var reviewVersion int
+	var reviewVersion, mixed int
 	err := s.db.QueryRowContext(r.Context(), `
-		SELECT cr.status, COALESCE(cr.superseded_by, ''), c.review_status, c.review_version,
+		SELECT cr.status, COALESCE(cr.superseded_by, ''), c.review_status, c.review_version, c.is_mixed,
 		       (SELECT pp.collection_id FROM cluster_memberships cm
 				JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id
 				JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
-				WHERE cm.cluster_id = c.id LIMIT 1)
+		WHERE cm.cluster_id = c.id LIMIT 1)
 		FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE c.id = ?`, clusterID).
-		Scan(&runStatus, &supersededBy, &reviewStatus, &reviewVersion, &collectionID)
+		Scan(&runStatus, &supersededBy, &reviewStatus, &reviewVersion, &mixed, &collectionID)
 	if err == sql.ErrNoRows {
 		http.NotFound(w, r)
 		return
@@ -1090,6 +1156,9 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	body.WriteString(`<div id="cluster-page" data-cluster-id="` + template.HTMLEscapeString(clusterID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-version="` + fmt.Sprint(reviewVersion) + `">`)
 	body.WriteString(`<h1>Cluster ` + template.HTMLEscapeString(idSuffix(clusterID)) + `</h1>`)
 	body.WriteString(`<p>Review status: ` + template.HTMLEscapeString(reviewStatus) + `; version ` + fmt.Sprint(reviewVersion) + `; run: ` + template.HTMLEscapeString(runStatus) + `</p>`)
+	if mixed != 0 {
+		body.WriteString(`<p class="error">This cluster is mixed: review each face explicitly. A default person cannot bulk-confirm it.</p>`)
+	}
 	if runStatus == "superseded" {
 		body.WriteString(`<p class="error">This is a historical clustering run. A newer run is active`)
 		if supersededBy != "" {
@@ -1097,7 +1166,11 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		}
 		body.WriteString(`. Review changes are still recorded against this historical cluster.</p>`)
 	}
-	body.WriteString(`<div class="cluster-controls"><label>Default person <select id="default-person"><option value="">No default</option>`)
+	body.WriteString(`<div class="cluster-controls"><label>Default person <select id="default-person"`)
+	if mixed != 0 {
+		body.WriteString(` disabled`)
+	}
+	body.WriteString(`><option value="">No default</option>`)
 	for _, person := range people {
 		body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</option>`)
 	}
@@ -1321,9 +1394,19 @@ func (s *Server) photo(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid collection root", http.StatusInternalServerError)
 		return
 	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		http.Error(w, "invalid collection root", http.StatusForbidden)
+		return
+	}
 	target, err := filepath.Abs(filepath.Join(root, filepath.FromSlash(relative)))
 	if err != nil {
 		http.Error(w, "invalid photo path", http.StatusInternalServerError)
+		return
+	}
+	target, err = filepath.EvalSymlinks(target)
+	if err != nil {
+		http.Error(w, "invalid photo path", http.StatusForbidden)
 		return
 	}
 	within, err := filepath.Rel(root, target)
@@ -1332,6 +1415,124 @@ func (s *Server) photo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, target)
+}
+
+func (s *Server) personRepresentative(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	personID := r.PathValue("personID")
+	allowed, err := s.personPermission(r, account, personID, false)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	image, err := representative.NewStoreWithPython(s.db, s.pythonPath).Ensure(r.Context(), personID)
+	if errors.Is(err, representative.ErrNoUsableFace) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "representative lookup failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", image.MIMEType)
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	_, _ = w.Write(image.Data)
+}
+
+func (s *Server) setPersonRepresentative(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if !validCSRFApi(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	personID := r.PathValue("personID")
+	allowed, err := s.personPermission(r, account, personID, true)
+	if err != nil || !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var input struct {
+		FaceID string `json:"face_id"`
+		Clear  bool   `json:"clear"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil || (input.FaceID == "" && !input.Clear) || (input.FaceID != "" && input.Clear) {
+		http.Error(w, "provide exactly one of face_id or clear", http.StatusBadRequest)
+		return
+	}
+	store := representative.NewStoreWithPython(s.db, s.pythonPath)
+	if input.Clear {
+		if err := store.Clear(r.Context(), personID, review.Actor{Type: "user", AccountID: account.ID}); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		image, err := store.Ensure(r.Context(), personID)
+		if errors.Is(err, representative.ErrNoUsableFace) {
+			writeJSON(w, http.StatusOK, map[string]any{"person_id": personID, "face_id": "", "selection_mode": "automatic"})
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, representativeSummary(image))
+		return
+	}
+	faceAllowed, err := s.facePermission(r, account, input.FaceID, true)
+	if err != nil || !faceAllowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	image, err := store.Select(r.Context(), personID, input.FaceID, review.Actor{Type: "user", AccountID: account.ID})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, representativeSummary(image))
+}
+
+func representativeSummary(image representative.Image) map[string]any {
+	return map[string]any{"person_id": image.PersonID, "face_id": image.FaceID, "selection_mode": image.SelectionMode, "face_quality": image.FaceQuality, "detection_confidence": image.DetectionConfidence, "crop_version": image.CropVersion, "mime_type": image.MIMEType, "width": image.Width, "height": image.Height, "updated_at": image.UpdatedAt}
+}
+
+func (s *Server) personPermission(r *http.Request, account auth.Account, personID string, modify bool) (bool, error) {
+	if modify && account.Role == auth.Viewer {
+		return false, nil
+	}
+	rows, err := s.db.QueryContext(r.Context(), `
+		SELECT DISTINCT pp.collection_id
+		FROM current_face_assignments ca JOIN faces f ON f.id = ca.face_id
+		JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id
+		JOIN photo_paths pp ON pp.asset_id = pa.id
+		WHERE ca.person_id = ?`, personID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var collectionID string
+		if err := rows.Scan(&collectionID); err != nil {
+			return false, err
+		}
+		found = true
+		allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, modify, false)
+		if err != nil {
+			return false, err
+		}
+		if allowed {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, fmt.Errorf("person %q is not in an accessible collection (found=%t)", personID, found)
 }
 
 func (s *Server) assignFace(w http.ResponseWriter, r *http.Request) {

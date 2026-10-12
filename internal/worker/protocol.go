@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"math"
 )
 
 const (
@@ -15,6 +16,8 @@ const (
 
 type Message struct {
 	ProtocolVersion int           `json:"protocol_version,omitempty"`
+	ProtocolMajor   int           `json:"protocol_major,omitempty"`
+	ProtocolMinor   int           `json:"protocol_minor,omitempty"`
 	ID              string        `json:"id,omitempty"`
 	Command         string        `json:"command,omitempty"`
 	Path            string        `json:"path,omitempty"`
@@ -53,11 +56,17 @@ type Capabilities struct {
 	Modules            []string          `json:"modules,omitempty"`
 	Preprocessing      string            `json:"preprocessing,omitempty"`
 	DetectorSize       string            `json:"detector_size,omitempty"`
+	PipelineID         string            `json:"pipeline_id,omitempty"`
+	SupportedCommands  []string          `json:"supported_commands,omitempty"`
+	MaxPixels          int64             `json:"max_pixels,omitempty"`
+	MaxWidth           int               `json:"max_width,omitempty"`
+	MaxHeight          int               `json:"max_height,omitempty"`
 }
 
 // Expectation describes the pipeline contract that a worker must satisfy.
 // Empty optional fields mean that the caller does not constrain that value.
 type Expectation struct {
+	PipelineID         string
 	Model              string
 	Provider           string
 	ModelChecksums     map[string]string
@@ -118,6 +127,9 @@ func (f FaceResult) DecodeEmbedding() ([]float32, error) {
 	values := make([]float32, len(data)/4)
 	for index := range values {
 		values[index] = mathFloat32frombits(binary.LittleEndian.Uint32(data[index*4:]))
+		if math.IsNaN(float64(values[index])) || math.IsInf(float64(values[index]), 0) {
+			return nil, fmt.Errorf("embedding contains non-finite value")
+		}
 	}
 	if f.Embedding.Dimension <= 0 || f.Embedding.Dimension != len(values) {
 		return nil, fmt.Errorf("embedding dimension %d does not match %d values", f.Embedding.Dimension, len(values))

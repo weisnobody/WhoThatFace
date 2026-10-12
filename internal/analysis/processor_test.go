@@ -15,7 +15,7 @@ type fakeAnalyzer struct{ calls int }
 func (fake *fakeAnalyzer) Analyze(context.Context, string, string, int64) (worker.Message, error) {
 	fake.calls++
 	ok := true
-	return worker.Message{Command: "analysis_result", OK: &ok, Faces: []worker.FaceResult{{FaceIndex: 0, Box: worker.BoundingBox{Right: 1, Bottom: 1}, Embedding: &worker.Embedding{Encoding: "base64", DType: "float32", ByteOrder: "little", Normalized: true, Data: base64.StdEncoding.EncodeToString(make([]byte, 8)), Dimension: 2}}}}, nil
+	return worker.Message{Command: "analysis_result", OK: &ok, Model: &worker.ModelInfo{PipelineID: "pipeline"}, Image: &worker.ImageInfo{Width: 100, Height: 100, InferenceWidth: 100, InferenceHeight: 100}, Faces: []worker.FaceResult{{FaceIndex: 0, Box: worker.BoundingBox{Right: 1, Bottom: 1}, DetectionConfidence: 0.9, Quality: 0.9, Embedding: &worker.Embedding{Encoding: "base64", DType: "float32", ByteOrder: "little", Normalized: true, Data: base64.StdEncoding.EncodeToString(make([]byte, 8)), Dimension: 2}}}}, nil
 }
 
 func TestProcessCollectionAnalyzesDuplicateAssetOnce(t *testing.T) {

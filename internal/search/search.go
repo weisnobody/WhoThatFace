@@ -93,7 +93,7 @@ func (s Store) Photos(ctx context.Context, options Options) ([]Photo, error) {
 		query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces df JOIN analyses dan ON dan.id = df.analysis_id JOIN current_face_dispositions d ON d.face_id = df.id WHERE dan.asset_id = pp.asset_id AND d.disposition = 'dont-track')`)
 	}
 	if options.OnlyConfirmed {
-		query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces cf JOIN analyses can ON can.id = cf.analysis_id JOIN current_face_assignments ca ON ca.face_id = cf.id WHERE can.asset_id = pp.asset_id AND ca.state NOT IN ('assigned-user', 'assigned-system'))`)
+		query.WriteString(` AND NOT EXISTS (SELECT 1 FROM faces cf JOIN analyses can ON can.id = cf.analysis_id JOIN current_face_assignments ca ON ca.face_id = cf.id WHERE can.asset_id = pp.asset_id AND ca.state <> 'assigned-user')`)
 	}
 	if options.OnlyUnconfirmed {
 		query.WriteString(` AND EXISTS (SELECT 1 FROM faces uf JOIN analyses uan ON uan.id = uf.analysis_id JOIN current_face_assignments ua ON ua.face_id = uf.id WHERE uan.asset_id = pp.asset_id AND ua.state NOT IN ('assigned-user', 'assigned-system'))`)

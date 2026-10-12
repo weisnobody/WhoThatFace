@@ -47,7 +47,10 @@ class ReviewToolTests(unittest.TestCase):
         self.assertAlmostEqual(review_tool.cosine(np.array([1.0, 0.0]), np.array([0.0, 1.0])), 0.0)
 
     def test_prediction_and_blind_review_gate(self):
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy unavailable")
 
         self.db.execute("INSERT INTO assets(content_sha256,size,created_at) VALUES('asset',1,'now')")
         asset_id = self.db.execute("SELECT id FROM assets").fetchone()[0]
@@ -94,7 +97,10 @@ class ReviewToolTests(unittest.TestCase):
         self.assertEqual(result["comparison"], "known_person_without_reference")
 
     def test_mutual_knn_groups_and_metrics(self):
-        import numpy as np
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy unavailable")
 
         face_ids = [10, 20, 30, 40]
         embeddings = np.array([[1., 0.], [.99, .1], [0., 1.], [0., .99]], dtype="<f4")

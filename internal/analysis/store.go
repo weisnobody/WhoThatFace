@@ -101,10 +101,13 @@ func (s Store) Persist(ctx context.Context, assetID, pipelineID string, response
 	if response.Command != "analysis_result" || response.OK == nil || !*response.OK {
 		return "", fmt.Errorf("worker response command %q is not a successful analysis_result", response.Command)
 	}
-	if response.Model != nil && response.Model.PipelineID != "" && response.Model.PipelineID != pipelineID {
+	if response.Model == nil || response.Model.PipelineID == "" {
+		return "", fmt.Errorf("worker response omitted pipeline provenance")
+	}
+	if response.Model.PipelineID != pipelineID {
 		return "", fmt.Errorf("worker pipeline %q does not match requested pipeline %q", response.Model.PipelineID, pipelineID)
 	}
-	if response.Image != nil && (response.Image.Width <= 0 || response.Image.Height <= 0 || response.Image.InferenceWidth <= 0 || response.Image.InferenceHeight <= 0) {
+	if response.Image == nil || response.Image.Width <= 0 || response.Image.Height <= 0 || response.Image.InferenceWidth <= 0 || response.Image.InferenceHeight <= 0 {
 		return "", fmt.Errorf("worker returned invalid image dimensions")
 	}
 	var analysisID string

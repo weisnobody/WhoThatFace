@@ -148,24 +148,35 @@ func (s Store) PersistScan(ctx context.Context, collectionID string, records []F
 }
 
 func (s Store) PersistScanRun(ctx context.Context, collectionID, runID string, records []FileRecord) error {
+	for _, record := range records {
+		if err := s.PersistScanRecord(ctx, collectionID, runID, record); err != nil {
+			return err
+		}
+	}
+	seen := make([]string, 0, len(records))
+	for _, record := range records {
+		seen = append(seen, record.RelativePath)
+	}
+	return s.FinalizeScan(ctx, collectionID, runID, seen)
+}
+
+// PersistScanRecord durably records one scan item and its supported path. It
+// is safe to call repeatedly for the same run/path during resume.
+func (s Store) PersistScanRecord(ctx context.Context, collectionID, runID string, record FileRecord) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	seen := make(map[string]struct{})
-	for _, record := range records {
-		itemID, err := id.NewUUIDv7()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_items (id, scan_run_id, relative_path, status, content_sha256, error_message, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?) ON CONFLICT(scan_run_id, relative_path) DO UPDATE SET status = excluded.status, content_sha256 = excluded.content_sha256, error_message = excluded.error_message, updated_at = excluded.updated_at`, itemID, runID, record.RelativePath, record.Status, record.ContentSHA256, record.Error, now); err != nil {
-			return err
-		}
-		if record.Status != StatusSupported || record.ContentSHA256 == "" {
-			continue
-		}
+	itemID, err := id.NewUUIDv7()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO scan_items (id, scan_run_id, relative_path, status, content_sha256, error_message, updated_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?) ON CONFLICT(scan_run_id, relative_path) DO UPDATE SET status = excluded.status, content_sha256 = excluded.content_sha256, error_message = excluded.error_message, updated_at = excluded.updated_at`, itemID, runID, record.RelativePath, record.Status, record.ContentSHA256, record.Error, now); err != nil {
+		return err
+	}
+	if record.Status == StatusSupported && record.ContentSHA256 != "" {
 		assetID, err := ensureAsset(ctx, tx, record, now)
 		if err != nil {
 			return err
@@ -174,31 +185,28 @@ func (s Store) PersistScanRun(ctx context.Context, collectionID, runID string, r
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO photo_paths (
-				id, collection_id, asset_id, relative_path, filesystem_created_at,
-				filesystem_modified_at, first_seen_at, last_seen_at, missing_at,
-				file_size, media_kind, motion_metadata_json
-			) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL, ?, ?, NULLIF(?, ''))
-			ON CONFLICT(collection_id, relative_path) DO UPDATE SET
-				asset_id = excluded.asset_id,
-				filesystem_created_at = excluded.filesystem_created_at,
-				filesystem_modified_at = excluded.filesystem_modified_at,
-				last_seen_at = excluded.last_seen_at,
-				missing_at = NULL,
-				file_size = excluded.file_size,
-				media_kind = excluded.media_kind,
-				motion_metadata_json = excluded.motion_metadata_json`,
-			pathID, collectionID, assetID, record.RelativePath,
-			formatTime(record.FilesystemCreatedAt), formatTime(record.FilesystemModifiedAt),
-			now, now, record.ByteSize, record.MediaKind, record.MotionMetadataJSON); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO photo_paths (id, collection_id, asset_id, relative_path, filesystem_created_at, filesystem_modified_at, first_seen_at, last_seen_at, missing_at, file_size, media_kind, motion_metadata_json) VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULL, ?, ?, NULLIF(?, '')) ON CONFLICT(collection_id, relative_path) DO UPDATE SET asset_id = excluded.asset_id, filesystem_created_at = excluded.filesystem_created_at, filesystem_modified_at = excluded.filesystem_modified_at, last_seen_at = excluded.last_seen_at, missing_at = NULL, file_size = excluded.file_size, media_kind = excluded.media_kind, motion_metadata_json = excluded.motion_metadata_json`, pathID, collectionID, assetID, record.RelativePath, formatTime(record.FilesystemCreatedAt), formatTime(record.FilesystemModifiedAt), now, now, record.ByteSize, record.MediaKind, record.MotionMetadataJSON); err != nil {
 			return fmt.Errorf("persist path %q: %w", record.RelativePath, err)
 		}
-		seen[record.RelativePath] = struct{}{}
 	}
+	return tx.Commit()
+}
+
+// FinalizeScan marks paths not seen by the completed enumeration as missing.
+func (s Store) FinalizeScan(ctx context.Context, collectionID, runID string, seen []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	rows, err := tx.QueryContext(ctx, `SELECT relative_path FROM photo_paths WHERE collection_id = ? AND missing_at IS NULL`, collectionID)
 	if err != nil {
 		return err
+	}
+	seenSet := make(map[string]struct{}, len(seen))
+	for _, path := range seen {
+		seenSet[path] = struct{}{}
 	}
 	var existing []string
 	for rows.Next() {
@@ -213,7 +221,7 @@ func (s Store) PersistScanRun(ctx context.Context, collectionID, runID string, r
 		return err
 	}
 	for _, path := range existing {
-		if _, ok := seen[path]; !ok {
+		if _, ok := seenSet[path]; !ok {
 			if _, err := tx.ExecContext(ctx, `UPDATE photo_paths SET missing_at = ? WHERE collection_id = ? AND relative_path = ?`, now, collectionID, path); err != nil {
 				return err
 			}

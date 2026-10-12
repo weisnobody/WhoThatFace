@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -96,6 +97,20 @@ func TestClientRestartsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestClientEnforcesRequestTimeout(t *testing.T) {
+	client, path := integrationClient(t, "sleep")
+	client.RequestTimeout = 20 * time.Millisecond
+	started := time.Now()
+	if _, err := client.Analyze(context.Background(), path, "pipeline-1", 1000); err == nil {
+		t.Fatal("expected request timeout")
+	} else if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("request timeout took %s", elapsed)
+	}
+}
+
 func TestValidateCapabilitiesAgainstPipeline(t *testing.T) {
 	capabilities := &Capabilities{
 		InsightFaceVersion: "2.0.0",
@@ -133,5 +148,12 @@ func TestValidateCapabilitiesRejectsChecksumMismatch(t *testing.T) {
 	}
 	if err := validateCapabilities(capabilities, &Expectation{Model: "buffalo_l", ModelChecksums: map[string]string{"model.onnx": "expected"}}); err == nil {
 		t.Fatal("expected checksum mismatch")
+	}
+}
+
+func TestValidateCapabilitiesRejectsMissingAnalyzeCommand(t *testing.T) {
+	capabilities := &Capabilities{InsightFaceVersion: "2.0.0", Providers: []string{"CPUExecutionProvider"}, Models: []string{"buffalo_l"}, EmbeddingDimension: 512, EmbeddingDType: "float32", EmbeddingMetric: "cosine", Modules: []string{"detection", "recognition"}, Preprocessing: "test", SupportedCommands: []string{"hello"}}
+	if err := validateCapabilities(capabilities, nil); err == nil {
+		t.Fatal("expected missing analyze command error")
 	}
 }

@@ -143,6 +143,23 @@ func (s Store) Current(ctx context.Context, faceID string) (Assignment, error) {
 }
 
 func (s Store) SetReference(ctx context.Context, faceID, personID string, reference bool, actor Actor, reason string) error {
+	var assignedPerson string
+	var state string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(ca.person_id, ''), COALESCE(ca.state, 'unassigned') FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.id = ?`, faceID).Scan(&assignedPerson, &state); err != nil {
+		return err
+	}
+	if reference {
+		if assignedPerson == "" || assignedPerson != personID || (state != string(AssignedUser) && state != string(AssignedSystem)) {
+			return fmt.Errorf("face %q is not assigned to person %q as an eligible assignment", faceID, personID)
+		}
+		var invalidDisposition int
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM current_face_dispositions WHERE face_id = ? AND disposition IN ('incorrect-assignment', 'false-detection'))`, faceID).Scan(&invalidDisposition); err != nil {
+			return err
+		}
+		if invalidDisposition == 1 {
+			return fmt.Errorf("face %q has a disposition that prevents reference selection", faceID)
+		}
+	}
 	eventID, err := id.NewUUIDv7()
 	if err != nil {
 		return err
@@ -278,6 +295,60 @@ func (s Store) setAssignment(ctx context.Context, faceID, personID string, state
 	}
 	parsed, _ := time.Parse(time.RFC3339Nano, now)
 	return Assignment{FaceID: faceID, PersonID: personID, State: state, EventID: eventID, UpdatedAt: parsed}, nil
+}
+
+// setAssignmentInTx applies an assignment projection and event using the
+// caller's transaction. Audit recording is intentionally deferred until the
+// transaction commits so a failed multi-face review cannot expose partial
+// review state.
+func (s Store) setAssignmentInTx(ctx context.Context, tx *sql.Tx, faceID, personID string, state AssignmentState, actor Actor, evidence Evidence, action, reason string) (Assignment, audit.Event, error) {
+	var current Assignment
+	var updated string
+	currentErr := tx.QueryRowContext(ctx, `SELECT face_id, COALESCE(person_id, ''), state, event_id, updated_at FROM current_face_assignments WHERE face_id = ?`, faceID).Scan(&current.FaceID, &current.PersonID, &current.State, &current.EventID, &updated)
+	if currentErr != nil && currentErr != sql.ErrNoRows {
+		return Assignment{}, audit.Event{}, currentErr
+	}
+	if currentErr == nil && current.State == AssignedUser && actor.Type != "user" {
+		return Assignment{}, audit.Event{}, fmt.Errorf("user-confirmed assignment is protected")
+	}
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return Assignment{}, audit.Event{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	previousStateValue := previousState(current, currentErr)
+	previousPersonValue := previousPerson(current, currentErr)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO assignment_events (id, face_id, person_id, previous_state, previous_person_id, new_state, actor_type, account_id, source_pipeline_id, clustering_run_id, cluster_id, similarity, margin, support_count, quality, detection_confidence, purity, connectivity, agreement, action, reason, created_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, eventID, faceID, personID, previousStateValue, previousPersonValue, state, actor.Type, actor.AccountID, evidence.PipelineID, evidence.ClusteringRunID, evidence.ClusterID, evidence.Similarity, evidence.Margin, evidence.Support, evidence.Quality, evidence.Detection, evidence.Purity, evidence.Connectivity, nullableBool(evidence.Agreement), action, reason, now); err != nil {
+		return Assignment{}, audit.Event{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO current_face_assignments (face_id, person_id, state, event_id, updated_at) VALUES (?, NULLIF(?, ''), ?, ?, ?) ON CONFLICT(face_id) DO UPDATE SET person_id = excluded.person_id, state = excluded.state, event_id = excluded.event_id, updated_at = excluded.updated_at`, faceID, personID, state, eventID, now); err != nil {
+		return Assignment{}, audit.Event{}, err
+	}
+	parsed, _ := time.Parse(time.RFC3339Nano, now)
+	return Assignment{FaceID: faceID, PersonID: personID, State: state, EventID: eventID, UpdatedAt: parsed}, audit.Event{AccountID: actor.AccountID, TargetEventID: eventID, Action: action, EntityType: "face", EntityID: faceID, Previous: map[string]any{"state": previousStateValue, "person_id": previousPersonValue}, New: map[string]any{"state": state, "person_id": personID}}, nil
+}
+
+func (s Store) setDispositionInTx(ctx context.Context, tx *sql.Tx, faceID, disposition string, active bool, actor Actor, reason string) (audit.Event, error) {
+	if disposition != "incorrect-assignment" && disposition != "false-detection" && disposition != "dont-track" {
+		return audit.Event{}, fmt.Errorf("invalid disposition %q", disposition)
+	}
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return audit.Event{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO face_disposition_events (id, face_id, disposition, active, account_id, reason, created_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?)`, eventID, faceID, disposition, boolInt(active), actor.AccountID, reason, now); err != nil {
+		return audit.Event{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO current_face_dispositions (face_id, disposition, event_id, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(face_id) DO UPDATE SET disposition = excluded.disposition, event_id = excluded.event_id, updated_at = excluded.updated_at`, faceID, disposition, eventID, now); err != nil {
+		return audit.Event{}, err
+	}
+	if !active {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM current_face_dispositions WHERE face_id = ?`, faceID); err != nil {
+			return audit.Event{}, err
+		}
+	}
+	return audit.Event{AccountID: actor.AccountID, TargetEventID: eventID, Action: "face-disposition", EntityType: "face", EntityID: faceID, New: map[string]any{"disposition": disposition, "active": active}}, nil
 }
 
 func validateAssignment(state AssignmentState, personID string) error {

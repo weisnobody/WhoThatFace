@@ -17,7 +17,7 @@ from pathlib import Path
 
 PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 0
-RUNTIME = {"model": "buffalo_l", "model_root": "", "providers": ["CPUExecutionProvider"], "checksums": {}, "detector_size": (640, 640)}
+RUNTIME = {"model": "buffalo_l", "model_root": "", "providers": ["CPUExecutionProvider"], "checksums": {}, "detector_size": (640, 640), "modules": ["detection", "recognition"], "pipeline_id": "", "max_pixels": 0, "max_width": 0, "max_height": 0}
 
 
 def send(message):
@@ -42,9 +42,14 @@ def capabilities():
         "embedding_dtype": "float32",
         "embedding_metric": "cosine",
         "model_checksums": RUNTIME["checksums"],
-        "modules": ["detection", "recognition"],
+        "modules": RUNTIME["modules"],
         "preprocessing": "pillow-exif-transpose-opencv-bgr-v1",
         "detector_size": detector_size_text(),
+        "pipeline_id": RUNTIME["pipeline_id"],
+        "supported_commands": ["hello", "analyze"],
+        "max_pixels": RUNTIME["max_pixels"],
+        "max_width": RUNTIME["max_width"],
+        "max_height": RUNTIME["max_height"],
     }
 
 
@@ -99,6 +104,8 @@ def handle(message):
             return False
         send({
             "protocol_version": PROTOCOL_MAJOR,
+            "protocol_major": PROTOCOL_MAJOR,
+            "protocol_minor": PROTOCOL_MINOR,
             "command": "hello_ack",
             "id": message_id,
             "ok": True,
@@ -139,7 +146,13 @@ def handle(message):
             if max_pixels and source_width * source_height > max_pixels:
                 error(message_id, "resource_limit", "image exceeds configured pixel limit", False, f"{source_width}x{source_height}")
                 return True
-            detected = MODEL.get(image)
+            if RUNTIME["max_width"] and source_width > RUNTIME["max_width"]:
+                error(message_id, "resource_limit", "image exceeds configured width limit", False, str(source_width))
+                return True
+            if RUNTIME["max_height"] and source_height > RUNTIME["max_height"]:
+                error(message_id, "resource_limit", "image exceeds configured height limit", False, str(source_height))
+                return True
+            detected = ordered_detections(MODEL.get(image))
             faces = []
             for index, face in enumerate(detected):
                 embedding = face.embedding.astype("float32", copy=False)
@@ -151,19 +164,32 @@ def handle(message):
                 quality = quality_score(crop, cv2)
                 faces.append({
                     "face_index": index,
-                    "box": {"left": box[0], "top": box[1], "right": box[2], "bottom": box[3]},
+                    "box": {"left": float(left), "top": float(top), "right": float(right), "bottom": float(bottom)},
                     "detection_confidence": float(face.det_score),
                     "quality": quality,
                     "embedding": {"encoding": "base64", "dtype": "float32", "byte_order": "little",
                                   "dimension": int(embedding.shape[0]), "normalized": True,
                                   "data": base64.b64encode(embedding.tobytes()).decode("ascii")},
                 })
+            if expected_size and os.path.getsize(path) != expected_size:
+                error(message_id, "file_changed", "image changed during analysis", True)
+                return True
+            if expected_sha256:
+                digest = hashlib.sha256()
+                with open(path, "rb") as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != expected_sha256:
+                    error(message_id, "file_changed", "image content changed during analysis", True)
+                    return True
             send({
                 "protocol_version": PROTOCOL_MAJOR,
+                "protocol_major": PROTOCOL_MAJOR,
+                "protocol_minor": PROTOCOL_MINOR,
                 "command": "analysis_result",
                 "id": message_id,
                 "ok": True,
-                "model": message.get("model", {}),
+                "model": {"pipeline_id": RUNTIME["pipeline_id"]},
                 "faces": faces,
                 "image": {"width": source_width, "height": source_height,
                           "inference_width": source_width, "inference_height": source_height},
@@ -185,6 +211,11 @@ def quality_score(crop, cv2):
     return max(0.0, min(1.0, variance / 500.0))
 
 
+def ordered_detections(detected):
+    """Return detections in stable top-to-bottom, left-to-right order."""
+    return sorted(detected, key=lambda face: (float(face.bbox[1]), float(face.bbox[0])))
+
+
 def load_oriented_image(path, cv2):
     """Decode and apply EXIF orientation before inference.
 
@@ -192,6 +223,14 @@ def load_oriented_image(path, cv2):
     the same coordinate system as the stored source dimensions.
     """
     from PIL import Image, ImageOps  # type: ignore
+    try:
+        from pillow_heif import register_heif_opener  # type: ignore
+    except ImportError:
+        # Keep non-HEIF worker environments usable for local development and
+        # optional format plugins; the default setup installs pillow-heif.
+        pass
+    else:
+        register_heif_opener()
     import numpy as np  # type: ignore
 
     with Image.open(path) as source:
@@ -209,7 +248,7 @@ def load_model():
     try:
         from insightface.app import FaceAnalysis  # type: ignore
 
-        model_kwargs = {"name": RUNTIME["model"], "providers": providers()}
+        model_kwargs = {"name": RUNTIME["model"], "providers": providers(), "allowed_modules": RUNTIME["modules"]}
         model_root = RUNTIME["model_root"]
         if model_root:
             model_kwargs["root"] = model_root
@@ -228,10 +267,13 @@ def main():
     parser.add_argument("--detector-config-json", default="{}")
     parser.add_argument("--preprocessing-config-json", default="{}")
     parser.add_argument("--modules", default="detection,recognition")
+    parser.add_argument("--pipeline-id", default="")
     args = parser.parse_args()
     RUNTIME["model"] = args.model
     RUNTIME["model_root"] = args.model_root
     RUNTIME["providers"] = [value for value in args.providers.split(",") if value]
+    RUNTIME["modules"] = [value for value in args.modules.split(",") if value]
+    RUNTIME["pipeline_id"] = args.pipeline_id
     try:
         checksums = json.loads(args.model_checksums_json)
         if isinstance(checksums, dict):
@@ -240,6 +282,10 @@ def main():
         size = detector.get("size") if isinstance(detector, dict) else None
         if isinstance(size, (list, tuple)) and len(size) == 2:
             RUNTIME["detector_size"] = (int(size[0]), int(size[1]))
+        if isinstance(detector, dict):
+            for key in ("max_pixels", "max_width", "max_height"):
+                if detector.get(key) is not None:
+                    RUNTIME[key] = max(0, int(detector[key]))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         parser.error(f"invalid pipeline configuration: {exc}")
     load_model()

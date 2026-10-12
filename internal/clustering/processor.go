@@ -136,7 +136,11 @@ func (p Processor) run(ctx context.Context, scope string, faceIDs []string) (str
 				agreementValue = candidatePerson == cluster.ProposedPersonID
 				agreement = &agreementValue
 				candidate.PersonID, candidate.Purity, candidate.Connectivity, candidate.References, candidate.Agreement = candidatePerson, cluster.Purity, cluster.Connectivity, true, agreementValue
-				level := recognition.Classify(candidate, recognition.DefaultThresholds())
+				thresholds := p.config.RecognitionThresholds
+				if thresholds == (recognition.Thresholds{}) {
+					thresholds = recognition.DefaultThresholds()
+				}
+				level := recognition.Classify(candidate, thresholds)
 				if !agreementValue {
 					state = review.Unknown
 				} else if level == recognition.EvidenceHigh {
@@ -156,6 +160,22 @@ func (p Processor) run(ctx context.Context, scope string, faceIDs []string) (str
 	}
 	if err := p.store.Activate(ctx, runID); err != nil {
 		return "", err
+	}
+	people := make(map[string]struct{})
+	for _, cluster := range result.Clusters {
+		if cluster.ProposedPersonID != "" {
+			people[cluster.ProposedPersonID] = struct{}{}
+		}
+	}
+	thresholds := p.config.RecognitionThresholds
+	if thresholds == (recognition.Thresholds{}) {
+		thresholds = recognition.DefaultThresholds()
+	}
+	recognitionProcessor := recognition.NewProcessor(p.db, thresholds)
+	for personID := range people {
+		if err := recognitionProcessor.RefreshRecommendations(ctx, personID); err != nil {
+			return "", err
+		}
 	}
 	return runID, nil
 }

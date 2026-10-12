@@ -29,6 +29,7 @@ const (
 	StatusUnsupported FileStatus = "unsupported"
 	StatusCorrupt     FileStatus = "corrupt"
 	StatusUnstable    FileStatus = "unstable"
+	StatusFailed      FileStatus = "failed"
 )
 
 // MediaKind identifies the source asset type known to the scanner.
@@ -74,6 +75,9 @@ type Scanner struct {
 	// Control is polled between filesystem entries. It may return running,
 	// paused, or cancelled for a persisted scan run.
 	Control func() (string, error)
+	// OnRecord is called after each filesystem entry is inspected. It allows
+	// callers to persist scan progress incrementally.
+	OnRecord func(FileRecord) error
 }
 
 // Scan returns records sorted by relative path. Hidden files are included;
@@ -111,9 +115,18 @@ func (s Scanner) ScanContext(ctx context.Context, root string) ([]FileRecord, er
 		}
 		record, err := s.inspect(root, path, entry)
 		if err != nil {
-			return err
+			relative, relativeErr := filepath.Rel(root, path)
+			if relativeErr != nil {
+				return err
+			}
+			record = FileRecord{RelativePath: filepath.ToSlash(relative), Status: StatusFailed, Error: err.Error()}
 		}
 		records = append(records, record)
+		if s.OnRecord != nil {
+			if err := s.OnRecord(record); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -241,10 +254,10 @@ func (s Scanner) inspect(root, path string, entry fs.DirEntry) (FileRecord, erro
 		"orientation_applied": true,
 	})
 	record.EXIFMetadataJSON = string(metadata)
-	if dimensions, decodeErr := decodeDimensions(path); decodeErr == nil && record.MediaKind == MediaStill {
+	if dimensions, decodeErr := decodeDimensions(path); decodeErr == nil {
 		record.Width = dimensions.width
 		record.Height = dimensions.height
-	} else if !isMetadataOnlyFormat(path) {
+	} else {
 		record.Status = StatusCorrupt
 		record.Error = decodeErr.Error()
 	}
@@ -272,10 +285,106 @@ func decodeDimensions(path string) (dimensions struct{ width, height int }, err 
 	}
 	defer file.Close()
 	config, _, err := image.DecodeConfig(file)
-	if err != nil {
+	if err == nil {
+		return struct{ width, height int }{config.Width, config.Height}, nil
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
 		return dimensions, err
 	}
-	return struct{ width, height int }{config.Width, config.Height}, nil
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".tif", ".tiff":
+		return decodeTIFFDimensions(data)
+	case ".webp":
+		return decodeWebPDimensions(data)
+	case ".heic", ".heif":
+		return decodeHEIFDimensions(data)
+	default:
+		return dimensions, err
+	}
+}
+
+func decodeTIFFDimensions(data []byte) (dimensions struct{ width, height int }, err error) {
+	if len(data) < 8 {
+		return dimensions, fmt.Errorf("short TIFF header")
+	}
+	order := binary.ByteOrder(binary.BigEndian)
+	if bytes.Equal(data[:2], []byte("II")) {
+		order = binary.LittleEndian
+	} else if !bytes.Equal(data[:2], []byte("MM")) {
+		return dimensions, fmt.Errorf("invalid TIFF byte order")
+	}
+	if order.Uint16(data[2:4]) != 42 {
+		return dimensions, fmt.Errorf("invalid TIFF marker")
+	}
+	ifd := int(order.Uint32(data[4:8]))
+	if ifd < 0 || ifd+2 > len(data) {
+		return dimensions, fmt.Errorf("invalid TIFF IFD offset")
+	}
+	count := int(order.Uint16(data[ifd : ifd+2]))
+	for index := 0; index < count; index++ {
+		entry := ifd + 2 + index*12
+		if entry+12 > len(data) {
+			return dimensions, fmt.Errorf("truncated TIFF IFD")
+		}
+		value := tiffSingleValue(data, order, entry)
+		switch order.Uint16(data[entry : entry+2]) {
+		case 0x0100:
+			dimensions.width = value
+		case 0x0101:
+			dimensions.height = value
+		}
+	}
+	if dimensions.width <= 0 || dimensions.height <= 0 {
+		return struct{ width, height int }{}, fmt.Errorf("TIFF dimensions not found")
+	}
+	return dimensions, nil
+}
+
+func tiffSingleValue(data []byte, order binary.ByteOrder, entry int) int {
+	typ := order.Uint16(data[entry+2 : entry+4])
+	count := order.Uint32(data[entry+4 : entry+8])
+	if count != 1 {
+		return 0
+	}
+	valueSize := map[uint16]int{1: 1, 3: 2, 4: 4}[typ]
+	if valueSize == 0 {
+		return 0
+	}
+	valueOffset := entry + 8
+	if valueSize > 4 {
+		return 0
+	}
+	if valueSize == 4 {
+		return int(order.Uint32(data[valueOffset : valueOffset+4]))
+	}
+	if valueSize == 2 {
+		return int(order.Uint16(data[valueOffset : valueOffset+2]))
+	}
+	return int(data[valueOffset])
+}
+
+func decodeWebPDimensions(data []byte) (dimensions struct{ width, height int }, err error) {
+	if len(data) < 30 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" || string(data[12:16]) != "VP8X" {
+		return dimensions, fmt.Errorf("unsupported WebP frame")
+	}
+	dimensions.width = 1 + int(data[24]) | int(data[25])<<8 | int(data[26])<<16
+	dimensions.height = 1 + int(data[27]) | int(data[28])<<8 | int(data[29])<<16
+	return dimensions, nil
+}
+
+func decodeHEIFDimensions(data []byte) (dimensions struct{ width, height int }, err error) {
+	for index := 4; index+16 <= len(data); index++ {
+		if string(data[index:index+4]) != "ispe" {
+			continue
+		}
+		dimensions.width = int(binary.BigEndian.Uint32(data[index+8 : index+12]))
+		dimensions.height = int(binary.BigEndian.Uint32(data[index+12 : index+16]))
+		if dimensions.width > 0 && dimensions.height > 0 {
+			return dimensions, nil
+		}
+	}
+	return dimensions, fmt.Errorf("HEIF dimensions not found")
 }
 
 func decodeDimensionsBytes(data []byte) (dimensions struct{ width, height int }, err error) {
@@ -324,12 +433,22 @@ func selectCaptureDate(record FileRecord) CaptureDate {
 // falls back to filesystem timestamps. Full metadata retention belongs to the
 // asset metadata extractor, while this value is needed for date search.
 func extractEXIFCaptureDate(path string) (time.Time, error) {
-	if strings.ToLower(filepath.Ext(path)) != ".jpg" && strings.ToLower(filepath.Ext(path)) != ".jpeg" {
-		return time.Time{}, fmt.Errorf("not a JPEG")
-	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return time.Time{}, err
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".tif" || ext == ".tiff" {
+		return parseEXIFDateTags(data, 0x9003, 0x0132)
+	}
+	if ext == ".webp" {
+		if exif := webPChunk(data, "EXIF"); exif != nil {
+			return parseEXIFDateTags(exif, 0x9003, 0x0132)
+		}
+		return time.Time{}, fmt.Errorf("WebP EXIF date not found")
+	}
+	if ext != ".jpg" && ext != ".jpeg" {
+		return time.Time{}, fmt.Errorf("unsupported metadata format")
 	}
 	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
 		return time.Time{}, fmt.Errorf("not a JPEG stream")
@@ -355,7 +474,7 @@ func extractEXIFCaptureDate(path string) (time.Time, error) {
 		}
 		segment := data[offset+2 : offset+segmentLength]
 		if marker == 0xe1 && bytes.HasPrefix(segment, []byte("Exif\x00\x00")) {
-			return parseEXIFDate(segment[6:])
+			return parseEXIFDateTags(segment[6:], 0x9003, 0x0132)
 		}
 		offset += segmentLength
 	}
@@ -363,6 +482,10 @@ func extractEXIFCaptureDate(path string) (time.Time, error) {
 }
 
 func parseEXIFDate(data []byte) (time.Time, error) {
+	return parseEXIFDateTags(data, 0x9003)
+}
+
+func parseEXIFDateTags(data []byte, wantedTags ...uint16) (time.Time, error) {
 	if len(data) < 8 {
 		return time.Time{}, fmt.Errorf("short TIFF header")
 	}
@@ -388,7 +511,14 @@ func parseEXIFDate(data []byte) (time.Time, error) {
 		tag := order.Uint16(data[entry : entry+2])
 		typ := order.Uint16(data[entry+2 : entry+4])
 		units := order.Uint32(data[entry+4 : entry+8])
-		if tag != 0x9003 || typ != 2 || units == 0 {
+		wanted := false
+		for _, wantedTag := range wantedTags {
+			if tag == wantedTag {
+				wanted = true
+				break
+			}
+		}
+		if !wanted || typ != 2 || units == 0 {
 			continue
 		}
 		length := int(units)
@@ -408,18 +538,31 @@ func parseEXIFDate(data []byte) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("DateTimeOriginal not found")
 }
 
+func webPChunk(data []byte, wanted string) []byte {
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return nil
+	}
+	for offset := 12; offset+8 <= len(data); {
+		kind := string(data[offset : offset+4])
+		size := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		start := offset + 8
+		if size < 0 || start > len(data) || size > len(data)-start {
+			return nil
+		}
+		if kind == wanted {
+			return data[start : start+size]
+		}
+		offset = start + size
+		if offset%2 != 0 {
+			offset++
+		}
+	}
+	return nil
+}
+
 func isSupported(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".jpg", ".jpeg", ".png", ".heic", ".heif", ".tif", ".tiff", ".webp":
-		return true
-	default:
-		return false
-	}
-}
-
-func isMetadataOnlyFormat(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".heic", ".heif", ".webp", ".tif", ".tiff":
 		return true
 	default:
 		return false
@@ -443,11 +586,25 @@ func motionCompanion(path string) (string, MediaKind) {
 		kind MediaKind
 	}{{".mov", MediaLivePhoto}, {".mp4", MediaMotionPhoto}} {
 		companion := base + candidate.ext
-		if info, err := os.Stat(companion); err == nil && !info.IsDir() {
+		if info, err := os.Stat(companion); err == nil && !info.IsDir() && validMotionContainer(companion) {
 			return companion, candidate.kind
 		}
 	}
 	return "", MediaStill
+}
+
+func validMotionContainer(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	data := make([]byte, 64)
+	count, err := io.ReadFull(file, data)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return false
+	}
+	return bytes.Contains(data[:count], []byte("ftyp"))
 }
 
 func embeddedMotionMetadata(path string) (MediaKind, string) {

@@ -27,6 +27,29 @@ This installs the pinned worker dependencies, downloads and verifies the
 [`docs/installation.md`](docs/installation.md) for configuration overrides,
 offline validation, and the optional Docker worker.
 
+The default environment includes Pillow and `pillow-heif`, so the supported
+HEIF/HEIC path works for worker analysis and representative-image generation.
+
+### Additional Pillow plugins
+
+Pillow plugins can add decoders for formats that are not included in the
+default environment. For a local experiment, activate the worker environment
+and install the plugin into it:
+
+```sh
+source .venv/bin/activate
+python -m pip install <plugin-package>
+```
+
+For a reproducible setup, add a pinned package to both
+`worker/requirements.in` and `worker/requirements.lock`, then rerun
+`./scripts/setup_worker.sh`. If the plugin requires explicit registration,
+register it in the worker before the first `Image.open` call. Adding a Pillow
+plugin alone does not expand the application’s accepted formats: the Go media
+scanner, metadata/dimension handling, worker decoding, representative-image
+cropper, and tests must all support the extension. The current end-to-end
+allowlist is JPEG/JPG, PNG, HEIF/HEIC, TIFF/TIF, and WebP.
+
 [`config.example.jsonc`](config.example.jsonc) lists every configuration
 parameter, its purpose, and its default value. It uses JSONC comments for
 documentation; the application configuration file itself must be strict JSON.

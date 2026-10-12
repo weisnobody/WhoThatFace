@@ -42,6 +42,49 @@ func TestReviewClusterRequiresExplicitSingletonDecisionAndVersion(t *testing.T) 
 	}
 }
 
+func TestReviewClusterRejectsInvalidDecisionBeforeChangingReviewState(t *testing.T) {
+	database, faceID, personID := fixture(t)
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO clustering_runs (id, algorithm, algorithm_version, k, similarity_threshold, neighbor_search_method, mutual_edge_policy, candidate_scope, input_face_set_json, status, created_at) VALUES ('run-invalid', 'test', '1', 1, .45, 'exact', 'mutual', 'all', '[]', 'active', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO clusters (id, clustering_run_id, cluster_key, proposed_person_id, purity, connectivity, is_mixed, review_status, created_at) VALUES ('cluster-invalid', 'run-invalid', 'face', ?, 1, 1, 0, 'unreviewed', CURRENT_TIMESTAMP)`, personID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO cluster_memberships (cluster_id, face_id) VALUES ('cluster-invalid', ?)`, faceID); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(database)
+	err := store.ReviewCluster(context.Background(), "cluster-invalid", "", "reviewed", 0, []ClusterFaceDecision{{FaceID: "not-a-member", State: AssignedUser, PersonID: personID}}, Actor{Type: "user", AccountID: "account-1"}, "invalid")
+	if err == nil {
+		t.Fatal("expected invalid member error")
+	}
+	var status string
+	if err := database.QueryRow(`SELECT review_status FROM clusters WHERE id = 'cluster-invalid'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "unreviewed" {
+		t.Fatalf("review status = %q, want unreviewed", status)
+	}
+}
+
+func TestReviewClusterRejectsDefaultAssignmentForMixedCluster(t *testing.T) {
+	database, faceID, personID := fixture(t)
+	defer database.Close()
+	if _, err := database.Exec(`INSERT INTO clustering_runs (id, algorithm, algorithm_version, k, similarity_threshold, neighbor_search_method, mutual_edge_policy, candidate_scope, input_face_set_json, status, created_at) VALUES ('run-mixed', 'test', '1', 1, .45, 'exact', 'mutual', 'all', '[]', 'active', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO clusters (id, clustering_run_id, cluster_key, purity, connectivity, is_mixed, review_status, created_at) VALUES ('cluster-mixed', 'run-mixed', 'face', 0.5, 0.5, 1, 'unreviewed', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO cluster_memberships (cluster_id, face_id) VALUES ('cluster-mixed', ?)`, faceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewStore(database).ReviewCluster(context.Background(), "cluster-mixed", personID, "reviewed", 0, nil, Actor{Type: "user", AccountID: "account-1"}, "bulk"); err == nil {
+		t.Fatal("expected mixed-cluster default assignment rejection")
+	}
+}
+
 func TestUndoAssignmentRestoresPreviousStateAndDetectsConflict(t *testing.T) {
 	database, faceID, personID := fixture(t)
 	defer database.Close()

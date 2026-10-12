@@ -740,6 +740,48 @@ The system retains prior predictions and provisional assignments as history or
 marks them stale so results produced before and after the reference change can
 be distinguished.
 
+### 10.9 Person representative images
+
+Each person may have one representative image for user-interface display. It
+is presentation data only and must not be used for face recognition,
+reference matching, clustering, recommendations, worker input, or any other
+processing.
+
+When no explicit representative has been selected, the application chooses the
+highest-scored eligible face using this priority order:
+
+1. current reference faces for the person;
+2. current faces with `assigned-user` state;
+3. current faces with `assigned-system` state;
+4. current faces with `provisional` state;
+5. all remaining faces associated with the person.
+
+Within a priority group, the highest face-quality score wins. Detection
+confidence is the first tie-breaker and the stable face ID is the final
+tie-breaker. The score and selected source face must be retained so the UI can
+explain or reproduce the choice. An explicit user choice overrides automatic
+selection until it is cleared or replaced. If the selected face is no longer
+available, the application falls back to the automatic order.
+
+The representative crop MUST:
+
+- use the oriented source-image coordinates of the selected face;
+- expand the bounding box by 20% of its width and height on every side;
+- expand the shorter dimension further so the captured region is square;
+- clamp the square to the source-image bounds without changing its aspect
+  ratio;
+- be resized so neither output dimension exceeds 96 pixels; and
+- record the crop algorithm version, source face ID, output dimensions, and
+  image encoding.
+
+The representative crop is generated data. It MUST NOT modify the original
+photo, create a new face or embedding, or enter the reference gallery. The
+recommended storage is a small encoded-image BLOB in SQLite, associated with
+the person in a separate current-representative record. This keeps the image
+inside database backup, restore, access-control, deletion, and transaction
+boundaries. The record should distinguish an automatic selection from an
+explicit selection and retain enough metadata to regenerate the image.
+
 ## 11. Clustering
 
 Clustering is performed after analysis as part of the discovery-first review
@@ -866,6 +908,7 @@ Initial logical entities:
 - `clustering_runs`
 - provisional cluster and cluster-membership records
 - cluster review and assignment-disposition records
+- person representative-image records and selection history
 - review accounts, collection permissions, and audit events
 - `schema_migrations`
 - `pipelines`
@@ -884,6 +927,10 @@ confirms, renames, rejects, or otherwise disposes of it.
 - Embeddings belong to faces and inherit pipeline provenance.
 - A face has at most one current confirmed identity.
 - Assignment state and reference status are tracked independently.
+- A person has at most one current representative image selection.
+- An explicit representative selection is not replaced by automatic ranking
+  until it is cleared or its source face is unavailable.
+- Representative images are UI-only derivatives and never processing inputs.
 - People have an independent current don't-track state and corresponding
   history. Faces have an independent don't-track disposition and history.
 - A face may have a person assignment and a don't-track disposition, or may be
@@ -1023,6 +1070,7 @@ these workflows:
 - inspect unknown faces
 - inspect provisional face clusters
 - inspect, confirm, reject, and manually assign suggestions
+- view, choose, clear, and replace person representative faces
 - run and inspect clustering jobs
 - inspect application and worker status
 - configure processing and model settings
@@ -1355,6 +1403,9 @@ reviewed as part of setup validation.
 - hashing and duplicate detection
 - EXIF orientation and coordinate conversion
 - metadata extraction
+- representative-face priority ordering, scoring, and deterministic tie breaks
+- representative crop expansion, squaring, bounds clamping, and 96-pixel limit
+- explicit representative selection persistence and automatic fallback
 - threshold and support-count calculations
 - assignment state transitions
 - SQLite constraints and migrations
@@ -1370,6 +1421,7 @@ reviewed as part of setup validation.
 - missing and restored paths
 - pipeline changes and reprocessing
 - export and purge behavior
+- representative image persistence, backup/restore, and deletion behavior
 - adaptive processing controls
 
 ### 19.3 End-to-end fixtures

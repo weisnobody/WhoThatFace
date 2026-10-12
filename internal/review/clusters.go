@@ -25,15 +25,47 @@ func (s Store) ReviewCluster(ctx context.Context, clusterID string, defaultPerso
 		return fmt.Errorf("invalid cluster review status %q", status)
 	}
 	var runID string
-	var currentVersion, faceCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT clustering_run_id, review_version, (SELECT COUNT(*) FROM cluster_memberships WHERE cluster_id = c.id) FROM clusters c WHERE id = ?`, clusterID).Scan(&runID, &currentVersion, &faceCount); err != nil {
+	var currentVersion, faceCount, mixed int
+	if err := s.db.QueryRowContext(ctx, `SELECT clustering_run_id, review_version, is_mixed, (SELECT COUNT(*) FROM cluster_memberships WHERE cluster_id = c.id) FROM clusters c WHERE id = ?`, clusterID).Scan(&runID, &currentVersion, &mixed, &faceCount); err != nil {
 		return err
+	}
+	if mixed != 0 && defaultPersonID != "" {
+		return fmt.Errorf("mixed cluster requires explicit per-face decisions; default assignment is not allowed")
 	}
 	if expectedVersion != currentVersion {
 		return fmt.Errorf("cluster review conflict: version %d is current, received %d", currentVersion, expectedVersion)
 	}
 	if faceCount == 1 && status == "reviewed" && defaultPersonID == "" && len(decisions) == 0 {
 		return fmt.Errorf("singleton cluster requires an explicit assignment, unknown, ambiguous, false-detection, or don't-track decision")
+	}
+	if defaultPersonID != "" {
+		var exists int
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM people WHERE id = ?)`, defaultPersonID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return fmt.Errorf("default person %q does not exist", defaultPersonID)
+		}
+	}
+	for _, decision := range decisions {
+		if decision.FaceID == "" {
+			continue
+		}
+		var member int
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM cluster_memberships WHERE cluster_id = ? AND face_id = ?)`, clusterID, decision.FaceID).Scan(&member); err != nil {
+			return err
+		}
+		if member == 0 {
+			return fmt.Errorf("face %q is not a member of cluster %q", decision.FaceID, clusterID)
+		}
+		if decision.State != "" {
+			if err := validateAssignment(decision.State, decision.PersonID); err != nil {
+				return err
+			}
+		}
+		if decision.Disposition != "" && decision.Disposition != "incorrect-assignment" && decision.Disposition != "false-detection" && decision.Disposition != "dont-track" {
+			return fmt.Errorf("invalid disposition %q", decision.Disposition)
+		}
 	}
 	eventID, err := id.NewUUIDv7()
 	if err != nil {
@@ -55,33 +87,28 @@ func (s Store) ReviewCluster(ctx context.Context, clusterID string, defaultPerso
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return fmt.Errorf("cluster review conflict: cluster changed while saving")
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	// Apply decisions outside the review-event transaction so each assignment
-	// retains its own immutable history and audit record.
+	var auditEvents []audit.Event
 	for _, decision := range decisions {
 		if decision.FaceID == "" {
 			continue
 		}
 		if decision.State != "" {
-			var member int
-			if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM cluster_memberships WHERE cluster_id = ? AND face_id = ?`, clusterID, decision.FaceID).Scan(&member); err != nil {
-				return fmt.Errorf("face %q is not a member of cluster %q", decision.FaceID, clusterID)
-			}
-			if _, err := s.Assign(ctx, decision.FaceID, decision.PersonID, decision.State, actor, Evidence{ClusteringRunID: runID, ClusterID: clusterID}, "cluster-review"); err != nil {
+			if _, auditEvent, err := s.setAssignmentInTx(ctx, tx, decision.FaceID, decision.PersonID, decision.State, actor, Evidence{ClusteringRunID: runID, ClusterID: clusterID}, "cluster-review", ""); err != nil {
 				return err
+			} else {
+				auditEvents = append(auditEvents, auditEvent)
 			}
 		}
 		if decision.Disposition != "" {
-			if err := s.SetDisposition(ctx, decision.FaceID, decision.Disposition, true, actor, "cluster-review"); err != nil {
+			if auditEvent, err := s.setDispositionInTx(ctx, tx, decision.FaceID, decision.Disposition, true, actor, "cluster-review"); err != nil {
 				return err
+			} else {
+				auditEvents = append(auditEvents, auditEvent)
 			}
 		}
 	}
 	if defaultPersonID != "" {
-		rows, err := s.db.QueryContext(ctx, `SELECT cm.face_id FROM cluster_memberships cm LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id WHERE cm.cluster_id = ? AND (ca.face_id IS NULL OR ca.state = 'unassigned')`, clusterID)
+		rows, err := tx.QueryContext(ctx, `SELECT cm.face_id FROM cluster_memberships cm LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id WHERE cm.cluster_id = ? AND (ca.face_id IS NULL OR ca.state = 'unassigned')`, clusterID)
 		if err != nil {
 			return err
 		}
@@ -98,9 +125,19 @@ func (s Store) ReviewCluster(ctx context.Context, clusterID string, defaultPerso
 			return err
 		}
 		for _, faceID := range faceIDs {
-			if _, err := s.Assign(ctx, faceID, defaultPersonID, AssignedUser, actor, Evidence{ClusteringRunID: runID, ClusterID: clusterID}, "cluster-default"); err != nil {
+			if _, auditEvent, err := s.setAssignmentInTx(ctx, tx, faceID, defaultPersonID, AssignedUser, actor, Evidence{ClusteringRunID: runID, ClusterID: clusterID}, "cluster-default", ""); err != nil {
 				return err
+			} else {
+				auditEvents = append(auditEvents, auditEvent)
 			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, auditEvent := range auditEvents {
+		if err := audit.NewStore(s.db).Record(ctx, auditEvent); err != nil {
+			return err
 		}
 	}
 	return audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: actor.AccountID, TargetEventID: eventID, Action: "cluster-review", EntityType: "cluster", EntityID: clusterID, New: map[string]any{"status": status, "default_person_id": defaultPersonID, "decisions": len(decisions)}})

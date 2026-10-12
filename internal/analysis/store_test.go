@@ -31,7 +31,7 @@ func TestRegisterPipelineIsDeterministicAndPersistStoresFaces(t *testing.T) {
 	binary.LittleEndian.PutUint32(embedding[0:4], 0x3f800000)
 	binary.LittleEndian.PutUint32(embedding[4:8], 0)
 	ok := true
-	response := worker.Message{Command: "analysis_result", OK: &ok, Image: &worker.ImageInfo{Width: 100, Height: 80, InferenceWidth: 100, InferenceHeight: 80}, Faces: []worker.FaceResult{{FaceIndex: 0, Box: worker.BoundingBox{Left: 1, Top: 2, Right: 20, Bottom: 30}, DetectionConfidence: 0.9, Quality: 0.8, Embedding: &worker.Embedding{Encoding: "base64", DType: "float32", ByteOrder: "little", Data: base64.StdEncoding.EncodeToString(embedding[:]), Dimension: 2, Normalized: true}}}}
+	response := worker.Message{Command: "analysis_result", OK: &ok, Model: &worker.ModelInfo{PipelineID: first}, Image: &worker.ImageInfo{Width: 100, Height: 80, InferenceWidth: 100, InferenceHeight: 80}, Faces: []worker.FaceResult{{FaceIndex: 0, Box: worker.BoundingBox{Left: 1, Top: 2, Right: 20, Bottom: 30}, DetectionConfidence: 0.9, Quality: 0.8, Embedding: &worker.Embedding{Encoding: "base64", DType: "float32", ByteOrder: "little", Data: base64.StdEncoding.EncodeToString(embedding[:]), Dimension: 2, Normalized: true}}}}
 	var assetID string
 	if err := database.QueryRow(`SELECT id FROM photo_assets LIMIT 1`).Scan(&assetID); err != nil {
 		// Create a minimal asset through SQL for this focused repository test.

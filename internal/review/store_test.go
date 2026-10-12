@@ -45,6 +45,12 @@ func TestReferenceAndDispositionAreIndependent(t *testing.T) {
 	defer database.Close()
 	store := NewStore(database)
 	actor := Actor{Type: "user", AccountID: "account-1"}
+	if err := store.InitializeFace(context.Background(), faceID, Actor{Type: "system"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Assign(context.Background(), faceID, personID, AssignedUser, actor, Evidence{}, "test"); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.SetReference(context.Background(), faceID, personID, true, actor, "selected"); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +69,14 @@ func TestReferenceAndDispositionAreIndependent(t *testing.T) {
 	}
 	if disposition != "dont-track" {
 		t.Errorf("disposition = %q", disposition)
+	}
+}
+
+func TestReferenceRequiresEligibleAssignment(t *testing.T) {
+	database, faceID, personID := fixture(t)
+	defer database.Close()
+	if err := NewStore(database).SetReference(context.Background(), faceID, personID, true, Actor{Type: "user", AccountID: "account-1"}, "invalid"); err == nil {
+		t.Fatal("expected unassigned face to be rejected as a reference")
 	}
 }
 

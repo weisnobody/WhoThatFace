@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/pjg/face_me_bro/internal/id"
 )
@@ -18,26 +19,27 @@ import (
 // Client manages one persistent worker process. Calls are serialized because
 // the MVP worker owns one loaded model and processes one image at a time.
 type Client struct {
-	command     string
-	args        []string
-	mu          sync.Mutex
-	process     *exec.Cmd
-	input       io.WriteCloser
-	output      *json.Decoder
-	ack         Message
-	minor       int
-	expectation *Expectation
+	command        string
+	args           []string
+	mu             sync.Mutex
+	process        *exec.Cmd
+	input          io.WriteCloser
+	output         *json.Decoder
+	ack            Message
+	minor          int
+	expectation    *Expectation
+	RequestTimeout time.Duration
 }
 
 // NewClient creates a client; it does not start the process until Start.
 func NewClient(command string, args ...string) *Client {
-	return &Client{command: command, args: args}
+	return &Client{command: command, args: args, RequestTimeout: 5 * time.Minute}
 }
 
 // NewClientForPipeline creates a client that rejects workers which do not
 // advertise the requested model and preprocessing contract.
 func NewClientForPipeline(command string, expectation Expectation, args ...string) *Client {
-	return &Client{command: command, args: args, expectation: &expectation}
+	return &Client{command: command, args: args, expectation: &expectation, RequestTimeout: 5 * time.Minute}
 }
 
 // Start launches the process and negotiates the worker protocol.
@@ -73,7 +75,7 @@ func (c *Client) startLocked(ctx context.Context) error {
 		c.stopLocked()
 		return err
 	}
-	if err := c.sendLocked(Message{ProtocolVersion: ProtocolMajor, Command: "hello", ID: requestID}); err != nil {
+	if err := c.sendLocked(Message{ProtocolVersion: ProtocolMajor, ProtocolMajor: ProtocolMajor, ProtocolMinor: ProtocolMinor, Command: "hello", ID: requestID}); err != nil {
 		c.stopLocked()
 		return err
 	}
@@ -86,12 +88,15 @@ func (c *Client) startLocked(ctx context.Context) error {
 		c.stopLocked()
 		return workerError(response.Error)
 	}
-	if response.Command != "hello_ack" || response.ProtocolVersion != ProtocolMajor {
+	if response.Command != "hello_ack" || response.ProtocolVersion != ProtocolMajor || (response.ProtocolMajor != 0 && response.ProtocolMajor != ProtocolMajor) {
 		c.stopLocked()
 		return fmt.Errorf("invalid worker handshake response")
 	}
 	c.ack = response
 	c.minor = ProtocolMinor
+	if response.ProtocolMinor > 0 && response.ProtocolMinor < c.minor {
+		c.minor = response.ProtocolMinor
+	}
 	if err := validateCapabilities(response.Capabilities, c.expectation); err != nil {
 		c.stopLocked()
 		return err
@@ -115,8 +120,14 @@ func validateCapabilities(capabilities *Capabilities, expected *Expectation) err
 	if capabilities.Preprocessing == "" || len(capabilities.Modules) == 0 {
 		return fmt.Errorf("worker did not report preprocessing and module capabilities")
 	}
+	if len(capabilities.SupportedCommands) > 0 && !contains(capabilities.SupportedCommands, "analyze") {
+		return fmt.Errorf("worker does not support analyze command")
+	}
 	if expected == nil {
 		return nil
+	}
+	if expected.PipelineID != "" && capabilities.PipelineID != expected.PipelineID {
+		return fmt.Errorf("worker pipeline %q does not match required %q", capabilities.PipelineID, expected.PipelineID)
 	}
 	if expected.Model != "" && !contains(capabilities.Models, expected.Model) {
 		return fmt.Errorf("worker does not provide required model %q", expected.Model)
@@ -206,7 +217,7 @@ func (c *Client) AnalyzeWithIdentity(ctx context.Context, imagePath, pipelineID 
 	if expectedSize == 0 {
 		expectedSize = identity.size
 	}
-	if err := c.sendLocked(Message{ProtocolVersion: ProtocolMajor, Command: "analyze", ID: requestID, Path: imagePath, ExpectedSHA256: expectedSHA256, ExpectedSize: expectedSize, Model: &ModelInfo{PipelineID: pipelineID}, MaxPixels: maxPixels}); err != nil {
+	if err := c.sendLocked(Message{ProtocolVersion: ProtocolMajor, ProtocolMajor: ProtocolMajor, ProtocolMinor: c.minor, Command: "analyze", ID: requestID, Path: imagePath, ExpectedSHA256: expectedSHA256, ExpectedSize: expectedSize, Model: &ModelInfo{PipelineID: pipelineID}, MaxPixels: maxPixels}); err != nil {
 		_ = c.restartLocked()
 		return Message{}, err
 	}
@@ -222,6 +233,12 @@ func (c *Client) AnalyzeWithIdentity(ctx context.Context, imagePath, pipelineID 
 			err     error
 		}{response, decodeErr}
 	}()
+	requestContext := ctx
+	if c.RequestTimeout > 0 {
+		var cancel context.CancelFunc
+		requestContext, cancel = context.WithTimeout(ctx, c.RequestTimeout)
+		defer cancel()
+	}
 	select {
 	case result := <-responseChannel:
 		if result.err != nil {
@@ -232,6 +249,10 @@ func (c *Client) AnalyzeWithIdentity(ctx context.Context, imagePath, pipelineID 
 			_ = c.restartLocked()
 			return Message{}, fmt.Errorf("worker response ID %q does not match request", result.message.ID)
 		}
+		if result.message.ProtocolVersion != 0 && result.message.ProtocolVersion != ProtocolMajor {
+			_ = c.restartLocked()
+			return Message{}, fmt.Errorf("worker response protocol version %d does not match request", result.message.ProtocolVersion)
+		}
 		if result.message.Command == "error" || (result.message.OK != nil && !*result.message.OK) {
 			if result.message.Error != nil && result.message.Error.Retryable {
 				_ = c.restartLocked()
@@ -239,9 +260,9 @@ func (c *Client) AnalyzeWithIdentity(ctx context.Context, imagePath, pipelineID 
 			return result.message, workerError(result.message.Error)
 		}
 		return result.message, nil
-	case <-ctx.Done():
+	case <-requestContext.Done():
 		_ = c.restartLocked()
-		return Message{}, ctx.Err()
+		return Message{}, requestContext.Err()
 	}
 }
 

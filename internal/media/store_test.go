@@ -71,3 +71,31 @@ func TestPersistScanDeduplicatesAssetsAndRetainsPaths(t *testing.T) {
 		t.Errorf("missing=%d, want 2", missing)
 	}
 }
+
+func TestPersistScanRecordMakesProgressDurableBeforeFinalize(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "scan-progress.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewStore(database)
+	collectionID, err := store.CreateCollection(context.Background(), "Photos", filepath.Join(t.TempDir(), "photos"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := store.StartScan(context.Background(), collectionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := FileRecord{RelativePath: "one.jpg", Status: StatusSupported, MediaKind: MediaStill, ContentSHA256: "hash-progress", ByteSize: 10}
+	if err := store.PersistScanRecord(context.Background(), collectionID, runID, record); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM scan_items WHERE scan_run_id = ? AND status = 'supported'`, runID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("durable scan items = %d, want 1", count)
+	}
+}

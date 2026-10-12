@@ -92,7 +92,31 @@ func (p Processor) ProcessAll(ctx context.Context) error {
 			return err
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	peopleRows, err := p.db.QueryContext(ctx, `SELECT DISTINCT person_id FROM current_face_assignments WHERE state IN ('assigned-system', 'assigned-user') AND person_id IS NOT NULL`)
+	if err != nil {
+		return err
+	}
+	var people []string
+	for peopleRows.Next() {
+		var personID string
+		if err := peopleRows.Scan(&personID); err != nil {
+			peopleRows.Close()
+			return err
+		}
+		people = append(people, personID)
+	}
+	if err := peopleRows.Close(); err != nil {
+		return err
+	}
+	for _, personID := range people {
+		if err := p.RefreshRecommendations(ctx, personID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p Processor) ProcessPerson(ctx context.Context, personID string) error {

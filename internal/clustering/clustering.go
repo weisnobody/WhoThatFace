@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math"
 	"sort"
+
+	"github.com/pjg/face_me_bro/internal/recognition"
 )
 
 type Face struct {
@@ -16,15 +18,16 @@ type Face struct {
 }
 
 type Config struct {
-	K                    int
-	SimilarityThreshold  float32
-	AlgorithmVersion     string
-	NeighborSearchMethod string
-	CandidateScope       string
+	K                     int
+	SimilarityThreshold   float32
+	AlgorithmVersion      string
+	NeighborSearchMethod  string
+	CandidateScope        string
+	RecognitionThresholds recognition.Thresholds
 }
 
 func DefaultConfig() Config {
-	return Config{K: 40, SimilarityThreshold: 0.45, AlgorithmVersion: "mutual-knn-v1", NeighborSearchMethod: "exact", CandidateScope: "all"}
+	return Config{K: 40, SimilarityThreshold: 0.45, AlgorithmVersion: "mutual-knn-v1", NeighborSearchMethod: "exact", CandidateScope: "all", RecognitionThresholds: recognition.DefaultThresholds()}
 }
 
 type Neighbor struct {
