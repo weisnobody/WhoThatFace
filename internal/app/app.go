@@ -57,6 +57,9 @@ type Status struct {
 	RuntimeDataRoot      string  `json:"runtime_data_root"`
 	DatabasePath         string  `json:"database_path"`
 	ModelRoot            string  `json:"model_root"`
+	PythonPath           string  `json:"python_path"`
+	DefaultProvider      string  `json:"default_provider"`
+	ServeAddress         string  `json:"serve_address"`
 	LogRoot              string  `json:"log_root"`
 	TempRoot             string  `json:"temp_root"`
 	ExportRoot           string  `json:"export_root"`
@@ -73,6 +76,9 @@ func (a *App) Status(ctx context.Context) (Status, error) {
 		RuntimeDataRoot:      a.Config.RuntimeDataRoot,
 		DatabasePath:         a.Config.DatabasePath,
 		ModelRoot:            a.Config.ModelRoot,
+		PythonPath:           a.Config.PythonPath,
+		DefaultProvider:      a.Config.Provider,
+		ServeAddress:         a.Config.ServeAddress,
 		LogRoot:              a.Config.LogRoot,
 		TempRoot:             a.Config.TempRoot,
 		ExportRoot:           a.Config.ExportRoot,

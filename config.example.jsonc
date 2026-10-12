@@ -13,6 +13,18 @@
   // directory, for example models/buffalo_l/.
   // "model_root": "models",
 
+  // Python executable used by the worker. The default is venv/bin/python
+  // below runtime_data_root (venv/Scripts/python.exe on Windows).
+  // "python_path": "venv/bin/python",
+
+  // Default ONNX Runtime execution provider used when registering a pipeline.
+  // Set this to the provider installed for this machine, such as
+  // CoreMLExecutionProvider or CUDAExecutionProvider.
+  // "provider": "CPUExecutionProvider",
+
+  // HTTP address for the authenticated review service.
+  // "serve_address": "127.0.0.1:8080",
+
   // Application log directory.
   // "log_root": "logs",
 

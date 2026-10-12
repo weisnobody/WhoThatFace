@@ -10,7 +10,8 @@ From the repository root:
 source .venv/bin/activate
 ```
 
-The script installs the pinned worker dependencies, downloads `buffalo_l` into
+The script installs the pinned worker dependencies (including Pillow and
+`pillow-heif`), downloads `buffalo_l` into
 `runtime/models`, writes a SHA-256 manifest, and performs an offline startup
 validation. `--clean` removes and recreates the virtual environment. If setup
 is interrupted, rerunning the script removes the temporary `.installing.*`
@@ -30,8 +31,11 @@ Validate an already-installed runtime without network access:
 ```
 
 Run the application with an alternate configuration using `--config`. The
-configuration may set `runtime_data_root`, database, model, log, temporary,
-export, and backup paths. Register a pipeline, then start the worker:
+configuration may set `runtime_data_root`, database, model, Python, provider,
+serve address, log, temporary, export, and backup paths. `python_path` defaults
+to the virtual environment under `runtime_data_root`, `serve_address` defaults
+to `127.0.0.1:8080`, and `provider` defaults to `CPUExecutionProvider`.
+Register a pipeline, then start the worker:
 
 ```sh
 face-me-bro pipeline register --model-family buffalo_l

@@ -28,6 +28,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
 	"github.com/pjg/face_me_bro/internal/recognition"
+	"github.com/pjg/face_me_bro/internal/representative"
 	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
 	"github.com/pjg/face_me_bro/internal/setup"
@@ -148,7 +149,7 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		if jsonOutput {
 			return writeJSON(stdout, envelope(command, status))
 		}
-		fmt.Fprintf(stdout, "Config file:      %s\nRuntime root:     %s\nDatabase:         %s\nModel root:       %s\nLog root:         %s\nTemp root:        %s\nExport root:      %s\nBackup root:      %s\nSearch method:    %s\n", status.ConfigFile, status.RuntimeDataRoot, status.DatabasePath, status.ModelRoot, status.LogRoot, status.TempRoot, status.ExportRoot, status.BackupRoot, status.NeighborSearchMethod)
+		fmt.Fprintf(stdout, "Config file:      %s\nRuntime root:     %s\nDatabase:         %s\nModel root:       %s\nPython:           %s\nDefault provider: %s\nServe address:    %s\nLog root:         %s\nTemp root:        %s\nExport root:      %s\nBackup root:      %s\nSearch method:    %s\n", status.ConfigFile, status.RuntimeDataRoot, status.DatabasePath, status.ModelRoot, status.PythonPath, status.DefaultProvider, status.ServeAddress, status.LogRoot, status.TempRoot, status.ExportRoot, status.BackupRoot, status.NeighborSearchMethod)
 		if status.PipelineID == nil {
 			fmt.Fprintln(stdout, "Pipeline:         not configured")
 		} else {
@@ -212,14 +213,14 @@ var commandHelp = map[string]helpTopic{
 	"pipeline":   {Usage: "face-me-bro pipeline <get|register|list> [options]", Description: "Register or inspect model and preprocessing pipeline identities.", Options: "get: --pipeline-id; list: --limit N --page N; register: --model-family --model-version --provider --model-checksums-json --detector-config-json --preprocessing-config-json"},
 	"config":     {Usage: "face-me-bro config <show|set-search> [options]", Description: "Show or change global application configuration.", Options: "set-search: --method exact|ann"},
 	"worker":     {Usage: "face-me-bro worker", Description: "Run the background worker loop for queued analysis and recognition jobs."},
-	"people":     {Usage: "face-me-bro people <get|list|create> [options]", Description: "Inspect, list, or create people records.", Options: "get: --person-id; list: --limit N --page N; create: --name NAME [--provisional]"},
+	"people":     {Usage: "face-me-bro people <get|list|create|representative> [options]", Description: "Inspect, list, or create people records and representative images.", Options: "get: --person-id; list: --limit N --page N; create: --name NAME [--provisional]; representative: --person-id ID [--face-id ID|--clear] --yes"},
 	"face":       {Usage: "face-me-bro face <get|list|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, dispositions, and reference status; list faces with their current state.", Options: "get: --face-id; list: --limit N --page N; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
 	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID] [--scope all|unresolved-only|subset]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
 	"search":     {Usage: "face-me-bro search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
 	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
 	"backup":     {Usage: "face-me-bro backup create", Description: "Create a database backup in the configured backup directory."},
 	"restore":    {Usage: "face-me-bro restore --input FILE --yes", Description: "Replace the configured database from a backup after explicit confirmation."},
-	"export":     {Usage: "face-me-bro export metadata [--output FILE]", Description: "Export application metadata as versioned JSON."},
+	"export":     {Usage: "face-me-bro export <metadata|assignments|embeddings> [--output FILE]", Description: "Export versioned metadata, identity assignments, or sensitive embeddings as JSON."},
 	"purge":      {Usage: "face-me-bro purge derived --yes", Description: "Delete derived face, assignment, clustering, and job data after confirmation."},
 }
 
@@ -284,6 +285,7 @@ func purgeCommand(ctx context.Context, application *app.App, args []string, json
 	defer tx.Rollback()
 	for _, statement := range []string{
 		`DELETE FROM current_face_references`, `DELETE FROM reference_selection_events`,
+		`DELETE FROM person_representatives`,
 		`DELETE FROM reference_recommendation_decisions`, `DELETE FROM reference_recommendations`, `DELETE FROM current_face_dispositions`, `DELETE FROM face_disposition_events`,
 		`DELETE FROM current_face_assignments`, `DELETE FROM assignment_events`, `DELETE FROM cluster_memberships`,
 		`DELETE FROM cluster_review_events`, `DELETE FROM clusters`, `DELETE FROM clustering_runs`,
@@ -305,10 +307,11 @@ func purgeCommand(ctx context.Context, application *app.App, args []string, json
 }
 
 func exportCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
-	if len(args) == 0 || args[0] != "metadata" {
-		return fmt.Errorf("export requires metadata")
+	if len(args) == 0 || (args[0] != "metadata" && args[0] != "assignments" && args[0] != "embeddings") {
+		return fmt.Errorf("export requires metadata, assignments, or embeddings")
 	}
-	flags := flag.NewFlagSet("export metadata", flag.ContinueOnError)
+	kind := args[0]
+	flags := flag.NewFlagSet("export "+kind, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	output := flags.String("output", "", "output JSON file")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -324,11 +327,37 @@ func exportCommand(ctx context.Context, application *app.App, args []string, jso
 	}
 	result := struct {
 		FormatVersion string   `json:"format_version"`
+		SchemaVersion string   `json:"schema_version"`
 		ExportedAt    string   `json:"exported_at"`
 		Application   string   `json:"application"`
+		PipelineIDs   []string `json:"pipeline_ids"`
 		Records       []record `json:"records"`
-	}{FormatVersion: "1", ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Application: "face-me-bro"}
-	for _, table := range []string{"collections", "photo_assets", "photo_paths", "pipelines", "analyses", "faces", "face_correspondences", "people", "person_state_events", "assignment_events", "current_face_assignments", "face_disposition_events", "current_face_dispositions", "reference_recommendations", "reference_recommendation_decisions", "reference_selection_events", "current_face_references", "clustering_runs", "clusters", "cluster_memberships", "cluster_review_events", "jobs", "job_items", "scan_runs", "scan_items", "accounts", "collection_permissions", "audit_events"} {
+	}{FormatVersion: "1", SchemaVersion: "010_person_representatives", ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Application: "face-me-bro"}
+	rows, err := application.DB.QueryContext(ctx, `SELECT id FROM pipelines ORDER BY created_at, id`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var pipelineID string
+		if err := rows.Scan(&pipelineID); err != nil {
+			rows.Close()
+			return err
+		}
+		result.PipelineIDs = append(result.PipelineIDs, pipelineID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	metadataTables := []string{"collections", "photo_assets", "photo_paths", "pipelines", "analyses", "clustering_runs", "clusters", "cluster_memberships", "scan_runs", "scan_items"}
+	assignmentTables := []string{"people", "person_state_events", "assignment_events", "current_face_assignments", "face_disposition_events", "current_face_dispositions", "reference_recommendations", "reference_recommendation_decisions", "reference_selection_events", "current_face_references", "person_representatives", "cluster_review_events", "audit_events"}
+	embeddingTables := []string{"faces", "face_correspondences"}
+	tables := metadataTables
+	if kind == "assignments" {
+		tables = assignmentTables
+	} else if kind == "embeddings" {
+		tables = embeddingTables
+	}
+	for _, table := range tables {
 		rows, err := application.DB.QueryContext(ctx, "SELECT * FROM "+table)
 		if err != nil {
 			return err
@@ -375,7 +404,7 @@ func exportCommand(ctx context.Context, application *app.App, args []string, jso
 		return err
 	}
 	if jsonOutput {
-		return writeJSON(stdout, envelope("export metadata", map[string]string{"path": path, "format_version": "1"}))
+		return writeJSON(stdout, envelope("export "+kind, map[string]string{"path": path, "format_version": "1", "kind": kind}))
 	}
 	fmt.Fprintln(stdout, path)
 	return nil
@@ -569,16 +598,26 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 				if err := store.SetScanControl(ctx, args[1], args[0]); err != nil {
 					return err
 				}
-				records, err := (media.Scanner{}).Scan(root)
+				scanner := media.Scanner{OnRecord: func(record media.FileRecord) error {
+					return store.PersistScanRecord(ctx, collectionID, args[1], record)
+				}}
+				records, err := scanner.Scan(root)
 				if err != nil {
 					_ = store.FinishScan(ctx, args[1], "failed", err.Error())
 					return err
 				}
-				if err := store.PersistScanRun(ctx, collectionID, args[1], records); err != nil {
+				seen := make([]string, 0, len(records))
+				for _, record := range records {
+					seen = append(seen, record.RelativePath)
+				}
+				if err := store.FinalizeScan(ctx, collectionID, args[1], seen); err != nil {
 					_ = store.FinishScan(ctx, args[1], "failed", err.Error())
 					return err
 				}
 				if err := store.FinishScan(ctx, args[1], "completed", ""); err != nil {
+					return err
+				}
+				if _, err := jobs.NewStore(application.DB).Enqueue(ctx, "analysis", 5, map[string]any{"collection_id": collectionID}); err != nil {
 					return err
 				}
 			} else if err := store.SetScanControl(ctx, args[1], args[0]); err != nil {
@@ -596,7 +635,7 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		query, queryArgs, err := applyPagination("SELECT id, collection_id, status, created_at, completed_at FROM scan_runs ORDER BY created_at DESC", nil, *limit, *page)
+		query, queryArgs, err := applyPagination("SELECT sr.id, sr.collection_id, sr.status, sr.created_at, sr.completed_at, (SELECT COUNT(*) FROM scan_items si WHERE si.scan_run_id = sr.id), (SELECT COUNT(*) FROM scan_items si WHERE si.scan_run_id = sr.id AND si.status IN ('supported', 'unsupported', 'corrupt', 'unstable', 'failed')) FROM scan_runs sr ORDER BY sr.created_at DESC", nil, *limit, *page)
 		if err != nil {
 			return err
 		}
@@ -611,12 +650,14 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 			Status       string  `json:"status"`
 			CreatedAt    string  `json:"created_at"`
 			CompletedAt  *string `json:"completed_at,omitempty"`
+			Items        int     `json:"items"`
+			Processed    int     `json:"processed"`
 		}
 		var scans []scan
 		for rows.Next() {
 			var value scan
 			var completed sql.NullString
-			if err := rows.Scan(&value.ID, &value.CollectionID, &value.Status, &value.CreatedAt, &completed); err != nil {
+			if err := rows.Scan(&value.ID, &value.CollectionID, &value.Status, &value.CreatedAt, &completed, &value.Items, &value.Processed); err != nil {
 				return err
 			}
 			if completed.Valid {
@@ -630,9 +671,9 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 		if jsonOutput {
 			return writeJSON(stdout, envelope("scan status", scans))
 		}
-		fmt.Fprintln(stdout, "id\tcollection_id\tstatus")
+		fmt.Fprintln(stdout, "id\tcollection_id\tstatus\titems\tprocessed")
 		for _, value := range scans {
-			fmt.Fprintf(stdout, "%s\t%s\t%s\n", value.ID, value.CollectionID, value.Status)
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\t%d\n", value.ID, value.CollectionID, value.Status, value.Items, value.Processed)
 		}
 		return nil
 	}
@@ -658,6 +699,8 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 		var status string
 		err := application.DB.QueryRowContext(ctx, `SELECT status FROM scan_runs WHERE id = ?`, scanRunID).Scan(&status)
 		return status, err
+	}, OnRecord: func(record media.FileRecord) error {
+		return mediaStore.PersistScanRecord(ctx, *collectionID, scanRunID, record)
 	}}
 	records, err := scanner.ScanContext(ctx, root)
 	if err != nil {
@@ -668,7 +711,11 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 		_ = mediaStore.FinishScan(ctx, scanRunID, status, err.Error())
 		return err
 	}
-	if err := mediaStore.PersistScanRun(ctx, *collectionID, scanRunID, records); err != nil {
+	seen := make([]string, 0, len(records))
+	for _, record := range records {
+		seen = append(seen, record.RelativePath)
+	}
+	if err := mediaStore.FinalizeScan(ctx, *collectionID, scanRunID, seen); err != nil {
 		_ = mediaStore.FinishScan(ctx, scanRunID, "failed", err.Error())
 		return err
 	}
@@ -1055,7 +1102,40 @@ func accountCommand(ctx context.Context, application *app.App, args []string, js
 
 func peopleCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("people requires get, create, or list")
+		return fmt.Errorf("people requires get, create, list, or representative")
+	}
+	if args[0] == "representative" {
+		flags := flag.NewFlagSet("people representative", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "person ID")
+		faceID := flags.String("face-id", "", "explicit representative face ID")
+		clear := flags.Bool("clear", false, "clear explicit selection and use automatic selection")
+		yes := flags.Bool("yes", false, "confirm representative selection change")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *personID == "" || !*yes || (*faceID == "" && !*clear) || (*faceID != "" && *clear) {
+			return fmt.Errorf("people representative requires --person-id, exactly one of --face-id or --clear, and --yes")
+		}
+		store := representative.NewStoreWithPython(application.DB, application.Config.PythonPath)
+		if *clear {
+			if err := store.Clear(ctx, *personID, review.Actor{Type: "cli"}); err != nil {
+				return err
+			}
+			image, err := store.Ensure(ctx, *personID)
+			if errors.Is(err, representative.ErrNoUsableFace) {
+				return writeCommandResult(stdout, jsonOutput, "people representative", map[string]any{"person_id": *personID, "face_id": "", "selection_mode": "automatic"})
+			}
+			if err != nil {
+				return err
+			}
+			return writeCommandResult(stdout, jsonOutput, "people representative", representativeSummary(image))
+		}
+		image, err := store.Select(ctx, *personID, *faceID, review.Actor{Type: "cli"})
+		if err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "people representative", representativeSummary(image))
 	}
 	if args[0] == "get" {
 		flags := flag.NewFlagSet("people get", flag.ContinueOnError)
@@ -1072,7 +1152,13 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 		if err := application.DB.QueryRowContext(ctx, `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)), is_provisional, dont_track, created_at, updated_at FROM people WHERE id = ?`, *personID).Scan(&id, &name, &provisional, &dontTrack, &created, &updated); err != nil {
 			return err
 		}
-		return writeCommandResult(stdout, jsonOutput, "people get", map[string]any{"id": id, "name": name, "provisional": provisional == 1, "dont_track": dontTrack == 1, "created_at": created, "updated_at": updated})
+		result := map[string]any{"id": id, "name": name, "provisional": provisional == 1, "dont_track": dontTrack == 1, "created_at": created, "updated_at": updated}
+		if image, representativeErr := representative.NewStoreWithPython(application.DB, application.Config.PythonPath).Ensure(ctx, *personID); representativeErr == nil {
+			result["representative"] = representativeSummary(image)
+		} else if !errors.Is(representativeErr, representative.ErrNoUsableFace) {
+			return representativeErr
+		}
+		return writeCommandResult(stdout, jsonOutput, "people get", result)
 	}
 	if args[0] == "create" {
 		flags := flag.NewFlagSet("people create", flag.ContinueOnError)
@@ -1144,6 +1230,10 @@ func peopleCommand(ctx context.Context, application *app.App, args []string, jso
 		fmt.Fprintf(stdout, "%s\t%s\n", value.ID, value.Name)
 	}
 	return rows.Err()
+}
+
+func representativeSummary(image representative.Image) map[string]any {
+	return map[string]any{"person_id": image.PersonID, "face_id": image.FaceID, "selection_mode": image.SelectionMode, "face_quality": image.FaceQuality, "detection_confidence": image.DetectionConfidence, "crop_version": image.CropVersion, "mime_type": image.MIMEType, "width": image.Width, "height": image.Height, "updated_at": image.UpdatedAt}
 }
 
 func configCommand(application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
@@ -1608,7 +1698,7 @@ func setupCommand(ctx context.Context, application *app.App, args []string, json
 	if len(args) != 1 || args[0] != "check" {
 		return fmt.Errorf("setup requires check")
 	}
-	report := setup.Validate(ctx, "python3.11", filepath.Join(application.Config.RuntimeDataRoot, "venv"), application.Config.ModelRoot)
+	report := setup.Validate(ctx, application.Config.PythonPath, "", application.Config.ModelRoot)
 	if jsonOutput {
 		return writeJSON(stdout, envelope("setup check", report))
 	}
@@ -1628,14 +1718,14 @@ func setupCommand(ctx context.Context, application *app.App, args []string, json
 func serveCommand(ctx context.Context, application *app.App, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	address := flags.String("address", "127.0.0.1:8080", "HTTP listen address")
+	address := flags.String("address", application.Config.ServeAddress, "HTTP listen address override")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if _, err := auth.NewStore(application.DB).EnsureBootstrapAdmin(ctx); err != nil {
 		return err
 	}
-	server, err := web.NewServer(auth.NewStore(application.DB), application.DB)
+	server, err := web.NewServerWithPython(auth.NewStore(application.DB), application.DB, application.Config.PythonPath)
 	if err != nil {
 		return err
 	}
@@ -1719,7 +1809,7 @@ func pipelineCommand(ctx context.Context, application *app.App, args []string, j
 	family := flags.String("model-family", "buffalo_l", "model family")
 	version := flags.String("model-version", "2.0.0", "model version")
 	dimension := flags.Int("embedding-dimension", 512, "embedding dimension")
-	provider := flags.String("provider", "CPUExecutionProvider", "execution provider")
+	provider := flags.String("provider", application.Config.Provider, "execution provider")
 	checksums := flags.String("model-checksums-json", "{}", "model checksum JSON object")
 	detector := flags.String("detector-config-json", "{}", "detector configuration JSON object")
 	preprocessing := flags.String("preprocessing-config-json", "{}", "preprocessing configuration JSON object")
@@ -1786,7 +1876,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	pipelineID := flags.String("pipeline-id", "", "pipeline ID")
-	pythonPath := flags.String("python", "python3.11", "Python executable")
+	pythonPath := flags.String("python", application.Config.PythonPath, "Python executable override")
 	workerScript := flags.String("script", "worker/insightface_worker.py", "worker script")
 	maxPixels := flags.Int64("max-pixels", 100_000_000, "maximum decoded pixels")
 	if err := flags.Parse(args); err != nil {
@@ -1807,6 +1897,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 		return fmt.Errorf("decode pipeline model checksums: %w", err)
 	}
 	client := worker.NewClientForPipeline(*pythonPath, worker.Expectation{
+		PipelineID:         *pipelineID,
 		Model:              modelFamily,
 		Provider:           provider,
 		ModelChecksums:     checksums,
@@ -1817,7 +1908,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 	}, *workerScript, "--model", modelFamily, "--model-root", application.Config.ModelRoot,
 		"--providers", provider, "--model-checksums-json", checksumsJSON,
 		"--detector-config-json", detectorJSON, "--preprocessing-config-json", preprocessingJSON,
-		"--modules", "detection,recognition")
+		"--modules", "detection,recognition", "--pipeline-id", *pipelineID)
 	if err := client.Start(ctx); err != nil {
 		return err
 	}

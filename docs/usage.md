@@ -1,302 +1,337 @@
-# Example usage: build a searchable family photo library
+# Usage
 
-This walkthrough shows a typical discovery-first workflow: add a collection,
-let the system detect and group faces, review the uncertain results, create and
-name people, select approved reference faces, and search the resulting library.
-It assumes the Go binaries and Python worker have already been built as
-described in [the README](../README.md) and [installation guide](installation.md).
+This guide describes the current end-to-end workflow: install the Python
+worker, configure the application, register a model pipeline, load a photo
+collection, process it, and review the results.
 
-## 1. Initialize the local system
+The commands below run from the repository root. The example keeps all local
+runtime data under `runtime/`; choose another private location if required.
 
-From the repository root, install the worker environment and build the Go
-executables:
+## 1. Install and configure the runtime
+
+Use Python 3.11. Put the virtual environment and model files where the
+application configuration will find them:
 
 ```sh
+export FACE_ME_BRO_VENV="$PWD/runtime/venv"
+export FACE_ME_BRO_MODEL_ROOT="$PWD/runtime/models"
+export FACE_ME_BRO_MODEL=buffalo_l
+
 ./scripts/setup_worker.sh
 go mod download
 mkdir -p bin
 go build -o bin/face-me-bro ./cmd/face-me-bro
-go build -o bin/face-me-bro-benchmark ./cmd/face-me-bro-benchmark
 ```
 
-Set the model environment used by the worker. Adjust the root if a custom
-`FACE_ME_BRO_MODEL_ROOT` was used during setup:
+Create a strict JSON configuration file. Relative paths are resolved below
+`runtime_data_root`; the model root must match the setup script's model root.
 
 ```sh
-export FACE_ME_BRO_MODEL_ROOT="$PWD/runtime/models"
-export FACE_ME_BRO_MODEL=buffalo_l
+cat > config.json <<EOF
+{
+  "runtime_data_root": "$PWD/runtime",
+  "model_root": "$PWD/runtime/models",
+  "python_path": "$PWD/runtime/venv/bin/python",
+  "provider": "CPUExecutionProvider",
+  "serve_address": "127.0.0.1:8080",
+  "neighbor_search_method": "exact"
+}
+EOF
+
+APP="$PWD/bin/face-me-bro"
+CONFIG="$PWD/config.json"
+
+"$APP" --config "$CONFIG" status
+"$APP" --config "$CONFIG" setup check
 ```
 
-Open the database and apply migrations by checking the status:
+`setup check` validates Python, the configured virtual environment, worker
+dependencies, the model directory, and its checksum manifest. The setup
+script downloads `buffalo_l` to
+`runtime/models/models/buffalo_l/` and writes `checksums.json` there. Keep
+the model directory, database, exports, backups, and photos private.
 
-```sh
-./bin/face-me-bro status
-./bin/face-me-bro help
-```
+The CLI accepts `--config PATH` on every command. It also accepts
+`FACE_ME_PRO_CONFIG`; do not provide conflicting values.
 
-The first time the web service starts it creates the system administrator
-account `admin` with temporary password `admin`. Change it immediately after
-logging in.
+## 2. Register the model pipeline
 
-## 2. Register the processing pipeline
-
-Register the exact model contract used by the worker. The checksum manifest
-created by setup is passed to the pipeline record so worker startup can verify
-it:
+Register the exact model and execution provider that the worker will use. The
+`--provider` default comes from the machine-specific `provider` configuration
+setting, and can still be overridden for an individual pipeline. The pipeline
+record is the contract checked during worker startup.
 
 ```sh
 CHECKSUMS="$PWD/runtime/models/models/buffalo_l/checksums.json"
-PIPELINE_ID=$(./bin/face-me-bro pipeline register \
+PIPELINE_ID=$("$APP" --config "$CONFIG" pipeline register \
   --model-family buffalo_l \
   --model-version 2.0.0 \
-  --provider CPUExecutionProvider \
   --model-checksums-json "$(<"$CHECKSUMS")")
 
-./bin/face-me-bro pipeline list
+"$APP" --config "$CONFIG" pipeline get --pipeline-id "$PIPELINE_ID"
 ```
 
-If the model root or setup location is different, use the corresponding
-`checksums.json` path. The registered pipeline records the model, provider,
-embedding format, detector settings, preprocessing, and checksums.
+The register command also accepts explicit detector and preprocessing JSON
+with `--detector-config-json` and `--preprocessing-config-json`. Use
+`pipeline list` to see existing pipeline IDs; a worker must be started with a
+registered pipeline ID.
 
-## 3. Add and scan photo collections
+## 3. Add and scan a collection
 
-Add one directory as a collection. The command prints the collection UUID;
-save it for subsequent commands:
+A collection is a directory tree. Add it once and retain the printed UUID:
 
 ```sh
 PHOTO_ROOT="/path/to/Family Photos"
-COLLECTION_ID=$(./bin/face-me-bro collection add \
+COLLECTION_ID=$("$APP" --config "$CONFIG" collection add \
   --name "Family Photos" --root "$PHOTO_ROOT")
-./bin/face-me-bro collection list
-```
 
-Choose the grouping search method. `exact` is the correctness/reference path;
-`ann` is the evaluated approximate-search prototype:
-
-```sh
-./bin/face-me-bro collection set-search \
+"$APP" --config "$CONFIG" collection get --collection-id "$COLLECTION_ID"
+"$APP" --config "$CONFIG" collection set-search \
   --collection-id "$COLLECTION_ID" --method exact
 ```
 
-Scan the directory recursively. Each distinct file content is analyzed once,
-while every path remains represented in the database:
+`exact` is the correctness/reference search path. `ann` selects the
+approximate-search prototype. The method can be changed later with the same
+`collection set-search` command.
+
+Scan the collection recursively:
 
 ```sh
-./bin/face-me-bro scan --collection-id "$COLLECTION_ID"
-./bin/face-me-bro scan status
+"$APP" --config "$CONFIG" scan --collection-id "$COLLECTION_ID"
+"$APP" --config "$CONFIG" scan status
 ```
 
-The scan output includes an analysis job ID. Unsupported, corrupt, missing,
-and duplicate-path outcomes can be inspected through the scan status and web
-review pages.
+The scan records supported, unsupported, corrupt, unstable, missing, and
+duplicate-path outcomes. It prints a scan run ID and enqueues an analysis job
+for the collection. A later scan reconciles changes and only sends newly
+needed work through the pipeline.
 
-## 4. Start processing
-
-Run the worker in a second terminal and leave it running while the collection
-is processed:
+Scan runs can be controlled with their ID:
 
 ```sh
-export FACE_ME_BRO_MODEL_ROOT="$PWD/runtime/models"
-./bin/face-me-bro worker \
+"$APP" --config "$CONFIG" scan pause SCAN_RUN_ID
+"$APP" --config "$CONFIG" scan resume SCAN_RUN_ID
+"$APP" --config "$CONFIG" scan cancel SCAN_RUN_ID
+"$APP" --config "$CONFIG" scan retry SCAN_RUN_ID
+```
+
+## 4. Start the processing worker
+
+Run the worker in a second terminal and leave it running while jobs are
+queued:
+
+```sh
+"$APP" --config "$CONFIG" worker \
   --pipeline-id "$PIPELINE_ID" \
-  --python "$PWD/.venv/bin/python" \
   --script "$PWD/worker/insightface_worker.py"
 ```
 
-The worker processes analysis, recognition, and clustering jobs. Monitor the
-queue from another terminal:
+The worker uses `python_path` from the configuration and
+`worker/insightface_worker.py` by default. Both can be overridden for one
+invocation with `--python PATH` and `--script PATH`.
+
+The worker starts the Python protocol process, verifies the pipeline contract,
+and processes the queue in this order:
+
+1. analysis detects faces and stores embeddings;
+2. recognition derives candidate assignments and recommendations;
+3. clustering groups unresolved faces;
+4. reference changes enqueue targeted recognition and clustering work.
+
+Monitor or control jobs from another terminal:
 
 ```sh
-./bin/face-me-bro job list
-./bin/face-me-bro job get JOB_ID
+"$APP" --config "$CONFIG" job list
+"$APP" --config "$CONFIG" job status --job-id JOB_ID
+"$APP" --config "$CONFIG" job pause JOB_ID
+"$APP" --config "$CONFIG" job resume JOB_ID
+"$APP" --config "$CONFIG" job retry JOB_ID
+"$APP" --config "$CONFIG" worker status
 ```
 
-When references do not yet exist, faces are kept as unknown, provisional, or
-clustered discoveries. This is expected for a new library.
+The worker can be stopped with `worker stop`. Failed item details are
+available through `job get JOB_ID` and the review service.
 
-## 5. Open the review service
+## 5. Start the review service
 
-Start the authenticated local web service:
+Start the authenticated local web service in another terminal:
 
 ```sh
-./bin/face-me-bro serve --address 127.0.0.1:8080
+"$APP" --config "$CONFIG" serve
 ```
 
-Visit these URLs in a browser:
+The service uses `serve_address` from the configuration. Override it for one
+invocation with `serve --address HOST:PORT`.
 
-- <http://127.0.0.1:8080/login> — sign in and change the temporary password.
-- <http://127.0.0.1:8080/> — review dashboard.
-- <http://127.0.0.1:8080/review/photos> — browse photos and detected faces.
-- <http://127.0.0.1:8080/review/people> — list people currently known to the system.
-- <http://127.0.0.1:8080/review/clusters> — list provisional face clusters.
-- <http://127.0.0.1:8080/admin/accounts> — manage accounts as a system admin.
-- <http://127.0.0.1:8080/admin/collections> — manage collection access.
+On first startup, the service creates the bootstrap system administrator
+`admin` with temporary password `admin`. Log in at
+<http://127.0.0.1:8080/login> and change it immediately. Passwords must be at
+least eight characters and contain letters and numbers.
 
-The cluster page shows each face, its bounding box, candidate evidence, review
-state, purity, connectivity, and whether the clustering run is historical. A
-green border indicates a user-confirmed assignment, yellow indicates a system
-or provisional assignment, and red indicates that attention is needed.
+Useful pages include:
 
-The current service exposes authenticated mutation APIs for the review UI. The
-CLI examples below are convenient for scripted or single-face corrections;
-browser/API clients must preserve the session and CSRF protections.
+- <http://127.0.0.1:8080/> — dashboard;
+- <http://127.0.0.1:8080/review/photos> — photos and detected faces;
+- <http://127.0.0.1:8080/review/people> — people records;
+- <http://127.0.0.1:8080/review/clusters> — clustering results;
+- <http://127.0.0.1:8080/admin/accounts> — account administration;
+- <http://127.0.0.1:8080/admin/collections> — collection permissions.
 
-## 6. Create and name people
-
-Use a person record for anyone who should be searchable. The `--yes` flag is
-required because creating an identity changes the database:
+Additional accounts can be created by a system administrator, either in the
+web UI or with the CLI:
 
 ```sh
-PERSON_ID=$(./bin/face-me-bro people create \
+"$APP" --config "$CONFIG" account create \
+  --username reviewer --password 'replace-with-a-strong-password' \
+  --role reviewer
+"$APP" --config "$CONFIG" account list
+"$APP" --config "$CONFIG" account grant \
+  --account-id ACCOUNT_ID --collection-id "$COLLECTION_ID" \
+  --view --modify --undo
+```
+
+## 6. Review people, faces, and clusters
+
+The initial cluster run happens as part of the worker processing a scan.
+
+Clustering can be re run by the worker, or explicitly for an investigation:
+
+```sh
+"$APP" --config "$CONFIG" cluster run \
+  --collection-id "$COLLECTION_ID" --scope unresolved-only
+"$APP" --config "$CONFIG" cluster list
+"$APP" --config "$CONFIG" cluster get --cluster-id CLUSTER_ID
+```
+
+Create a named person before confirming assignments:
+
+```sh
+PERSON_ID=$("$APP" --config "$CONFIG" people create \
   --name "Alex Example" --yes)
-./bin/face-me-bro people list
+"$APP" --config "$CONFIG" people list
+"$APP" --config "$CONFIG" face list
+"$APP" --config "$CONFIG" face get --face-id FACE_ID
 ```
 
-The clustering process may also create a provisional, unnamed person. Review
-that record and create a named person when you can identify the faces. The
-person ID can be copied from `people list` or the JSON output:
+Identity-changing commands require `--yes`. Assignment state and disposition
+are independent:
 
 ```sh
-./bin/face-me-bro --json people list
+# Confirm or correct an assignment.
+"$APP" --config "$CONFIG" face assign \
+  --face-id FACE_ID --person-id "$PERSON_ID" \
+  --state assigned-user --yes
+
+# Other assignment states include unassigned, unknown, and ambiguous.
+"$APP" --config "$CONFIG" face assign \
+  --face-id FACE_ID --state ambiguous --yes
+
+# Record a false detection or exclude a face from default review lists.
+"$APP" --config "$CONFIG" face disposition \
+  --face-id FACE_ID --disposition false-detection --yes
+"$APP" --config "$CONFIG" face disposition \
+  --face-id FACE_ID --disposition dont-track --yes
 ```
 
-## 7. Accept, correct, reject, or suppress face assignments
-
-Get the current state of a face before changing it:
+Cluster review supports a default person plus explicit per-face exceptions:
 
 ```sh
-./bin/face-me-bro face get --face-id FACE_ID
+"$APP" --config "$CONFIG" cluster review \
+  --cluster-id CLUSTER_ID --default-person-id "$PERSON_ID" \
+  --status reviewed --yes
 ```
 
-Use these actions while reviewing a cluster or photo:
+The web API additionally supports rejecting an assignment and restoring its
+previous state with `POST /api/faces/FACE_ID/assignment` and
+`{"reject":true}`. Use the authenticated review pages or APIs when a
+multi-face review needs optimistic version checking.
 
-| Review decision | Command |
-| --- | --- |
-| Confirm the face belongs to a person | `face assign --face-id FACE_ID --person-id PERSON_ID --state assigned-user --yes` |
-| Reassign it to another person | Run the same command with the other `PERSON_ID`. |
-| Mark it unknown | `face assign --face-id FACE_ID --state unknown --yes` |
-| Mark it ambiguous | `face assign --face-id FACE_ID --state ambiguous --yes` |
-| Reject the current system assignment and restore the previous state | Use the authenticated reject API described below. |
-| Explicitly mark a face unassigned | `face assign --face-id FACE_ID --state unassigned --yes` |
-| Mark it as a false detection | `face disposition --face-id FACE_ID --disposition false-detection --yes` |
-| Exclude it from default review lists as don't-track | `face disposition --face-id FACE_ID --disposition dont-track --yes` |
+## 7. Select reference faces and search
 
-An assignment state and a don't-track disposition are independent. A face may
-be assigned to a named person and still be marked don't-track; it can still
-participate in recognition and grouping, but is hidden from default review
-lists.
-
-For cluster-wide review, open a cluster at
-`/review/clusters/CLUSTER_ID`. Set a default person for faces without an
-existing individual decision, make explicit per-face decisions for exceptions,
-choose a status such as `reviewed` or `needs-review`, and save with the current
-review version. Existing explicit assignments are not overwritten by a new
-default person.
-
-The equivalent authenticated API endpoint is:
-
-```text
-POST /api/clusters/CLUSTER_ID/review
-```
-
-Its JSON body contains `default_person_id`, `status`, `expected_version`,
-`note`, and a `decisions` array. Each decision can contain `face_id`,
-`person_id`, `state`, and `disposition` such as `dont-track` or
-`false-detection`.
-
-To reject a face assignment and restore its previous state, use:
-
-```text
-POST /api/faces/FACE_ID/assignment
-{"reject":true}
-```
-
-## 8. Select approved reference faces
-
-Only faces explicitly selected as references are used for matching a person.
-Choose clear, sharp, reasonably frontal examples with good lighting and no
-occlusion. Avoid near-duplicates and faces containing another person in the
-crop.
-
-Select a face as a reference:
+Select only clear, representative faces as references. Reference selection
+causes targeted recognition and clustering reprocessing, so keep the worker
+running:
 
 ```sh
-./bin/face-me-bro face reference \
-  --face-id FACE_ID --person-id PERSON_ID --reference --yes
+"$APP" --config "$CONFIG" face reference \
+  --face-id FACE_ID --person-id "$PERSON_ID" --reference --yes
+
+# Remove the selection explicitly when needed.
+"$APP" --config "$CONFIG" face reference \
+  --face-id FACE_ID --person-id "$PERSON_ID" --reference=false --yes
 ```
 
-Remove the reference designation by omitting the boolean value or using the
-command's false form supported by the CLI help. The selection records who made
-the change and creates a reference-reprocessing job. Keep the worker running;
-it will rerun recognition, affected clustering, and recommendations while
-preserving user-confirmed assignments.
-
-The authenticated API equivalent is:
-
-```text
-POST /api/faces/FACE_ID/reference
-```
-
-with a body such as `{"person_id":"PERSON_ID","reference":true}`.
-
-## 9. Review a person's photos
-
-Use the CLI to search a person across all accessible collections:
+Each person also has a UI-only representative image. By default it is the
+highest-quality eligible face from references, then user, system, and
+provisional assignments. Choose a face explicitly when the automatic choice
+is not suitable:
 
 ```sh
-./bin/face-me-bro search --person-id "$PERSON_ID"
-./bin/face-me-bro search --person-id "$PERSON_ID" \
-  --directory "vacations" --from 2020-01-01 --until 2024-12-31
+"$APP" --config "$CONFIG" people representative \
+  --person-id "$PERSON_ID" --face-id FACE_ID --yes
+
+# Clear the explicit choice and return to automatic selection.
+"$APP" --config "$CONFIG" people representative \
+  --person-id "$PERSON_ID" --clear --yes
 ```
 
-The authenticated JSON search endpoint supports the same person, directory,
-and capture-date filters:
+The authenticated equivalents are `GET /api/people/PERSON_ID/representative`
+and `POST /api/people/PERSON_ID/representative` with either
+`{"face_id":"FACE_ID"}` or `{"clear":true}`. The generated crop is stored
+in SQLite, is at most 96x96 pixels, and is not used for recognition.
 
-```text
-GET /api/photos?person_id=PERSON_ID
-GET /api/photos?person_id=PERSON_ID&directory=vacations&only_confirmed=true
-```
-
-Each result includes a path ID that can be opened at
-`/api/photos/PATH_ID` to view the original image through the authenticated
-service. The `/review/photos` page provides the browser-oriented photo list;
-use the API filters when a person-specific or confirmed-only view is needed.
-
-## 10. Add more photos later
-
-Repeat the scan command after adding files to an existing collection:
+Search supports person, relative-directory, capture-date, provisional, and
+review-state filters:
 
 ```sh
-./bin/face-me-bro scan --collection-id "$COLLECTION_ID"
+"$APP" --config "$CONFIG" search --person-id "$PERSON_ID"
+"$APP" --config "$CONFIG" search --person-id "$PERSON_ID" \
+  --directory vacations --from 2020-01-01 --until 2024-12-31
+"$APP" --config "$CONFIG" search --review-mode
 ```
 
-Content hashes prevent duplicate analysis. New faces are compared with
-approved references and grouped with existing discoveries. Review new clusters,
-confirm assignments, and select additional high-quality reference faces as the
-library becomes more familiar.
+Use `--json` for versioned machine-readable output from CLI commands, and
+the authenticated `/api/photos` endpoints for browser or application
+integrations.
 
-## 11. Back up and recover
+## 8. Incremental processing and maintenance
 
-Create a database backup before large review or configuration changes:
+After adding or removing files, run the same scan again. Inspect the new scan
+and queued jobs before reviewing new clusters:
 
 ```sh
-BACKUP=$(./bin/face-me-bro backup create)
+"$APP" --config "$CONFIG" scan --collection-id "$COLLECTION_ID"
+"$APP" --config "$CONFIG" scan status
+"$APP" --config "$CONFIG" job list
 ```
 
-Restore only after stopping the web service and worker and verifying the input
-file. Restoration requires explicit confirmation:
+Create a database backup before large review or configuration changes. Stop
+the worker and service before restoring one:
 
 ```sh
-./bin/face-me-bro restore --input "$BACKUP" --yes
+BACKUP=$("$APP" --config "$CONFIG" backup create)
+"$APP" --config "$CONFIG" restore --input "$BACKUP" --yes
 ```
 
-Metadata can be exported separately:
+Exports are JSON and can contain sensitive data, especially embeddings:
 
 ```sh
-./bin/face-me-bro export metadata --output exports/metadata.json
+"$APP" --config "$CONFIG" export metadata --output exports/metadata.json
+"$APP" --config "$CONFIG" export assignments --output exports/assignments.json
+"$APP" --config "$CONFIG" export embeddings --output exports/embeddings.json
 ```
 
-All identity-changing operations are recorded in the audit history. System
-administrators can use the web administration pages and the audit tools to
-review activity; undo operations are subject to current-state conflict checks.
+Audit history can be inspected or retained data can be purged according to
+the deployment policy:
+
+```sh
+"$APP" --config "$CONFIG" audit list
+"$APP" --config "$CONFIG" audit purge --age-days 365
+```
+
+For a complete command list, run:
+
+```sh
+"$APP" help
+"$APP" help worker
+```

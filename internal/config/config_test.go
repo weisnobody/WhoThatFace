@@ -23,8 +23,17 @@ func TestLoadUsesDefaultsWhenConfigurationDoesNotExist(t *testing.T) {
 	if got.RuntimeDataRoot == "" || got.ModelRoot == "" {
 		t.Fatal("expected default runtime and model paths")
 	}
+	if runtime.GOOS != "windows" && got.PythonPath != filepath.Join(got.RuntimeDataRoot, "venv", "bin", "python") {
+		t.Fatalf("PythonPath = %q, want runtime virtual environment", got.PythonPath)
+	}
 	if got.NeighborSearchMethod != "exact" {
 		t.Fatalf("NeighborSearchMethod = %q, want exact", got.NeighborSearchMethod)
+	}
+	if got.ServeAddress != defaultServeAddress {
+		t.Fatalf("ServeAddress = %q, want %q", got.ServeAddress, defaultServeAddress)
+	}
+	if got.Provider != defaultProvider {
+		t.Fatalf("Provider = %q, want %q", got.Provider, defaultProvider)
 	}
 }
 
@@ -35,6 +44,9 @@ func TestLoadResolvesConfiguredRootAndRelativePaths(t *testing.T) {
 		RuntimeDataRoot: "runtime",
 		DatabasePath:    "db/catalog.sqlite3",
 		ModelRoot:       "/models/insightface",
+		PythonPath:      "venv/bin/python-custom",
+		Provider:        "CoreMLExecutionProvider",
+		ServeAddress:    "0.0.0.0:9090",
 	}
 	data, err := json.Marshal(settings)
 	if err != nil {
@@ -57,6 +69,15 @@ func TestLoadResolvesConfiguredRootAndRelativePaths(t *testing.T) {
 	}
 	if got.ModelRoot != filepath.FromSlash("/models/insightface") {
 		t.Errorf("ModelRoot = %q", got.ModelRoot)
+	}
+	if got.PythonPath != filepath.Join(wantRoot, "venv/bin/python-custom") {
+		t.Errorf("PythonPath = %q", got.PythonPath)
+	}
+	if got.ServeAddress != "0.0.0.0:9090" {
+		t.Errorf("ServeAddress = %q", got.ServeAddress)
+	}
+	if got.Provider != "CoreMLExecutionProvider" {
+		t.Errorf("Provider = %q", got.Provider)
 	}
 }
 

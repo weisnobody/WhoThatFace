@@ -19,6 +19,8 @@ const (
 	configEnvironment   = "FACE_ME_PRO_CONFIG"
 	defaultDatabase     = "face_me_bro.sqlite3"
 	defaultSearchMethod = "exact"
+	defaultServeAddress = "127.0.0.1:8080"
+	defaultProvider     = "CPUExecutionProvider"
 )
 
 // File contains settings that may be supplied by a JSON configuration file.
@@ -27,6 +29,9 @@ type File struct {
 	RuntimeDataRoot               string  `json:"runtime_data_root,omitempty"`
 	DatabasePath                  string  `json:"database_path,omitempty"`
 	ModelRoot                     string  `json:"model_root,omitempty"`
+	PythonPath                    string  `json:"python_path,omitempty"`
+	Provider                      string  `json:"provider,omitempty"`
+	ServeAddress                  string  `json:"serve_address,omitempty"`
 	LogRoot                       string  `json:"log_root,omitempty"`
 	TempRoot                      string  `json:"temp_root,omitempty"`
 	ExportRoot                    string  `json:"export_root,omitempty"`
@@ -58,6 +63,9 @@ type Resolved struct {
 	RuntimeDataRoot       string
 	DatabasePath          string
 	ModelRoot             string
+	PythonPath            string
+	Provider              string
+	ServeAddress          string
 	LogRoot               string
 	TempRoot              string
 	ExportRoot            string
@@ -194,11 +202,36 @@ func Load(configPath string) (Resolved, error) {
 		clusteringConfig.CandidateScope = settings.ClusteringCandidateScope
 	}
 	clusteringConfig.NeighborSearchMethod = searchMethod(settings.NeighborSearchMethod)
+	clusteringConfig.RecognitionThresholds = thresholds
+	pythonPath := settings.PythonPath
+	if pythonPath == "" {
+		if runtime.GOOS == "windows" {
+			pythonPath = filepath.Join(root, "venv", "Scripts", "python.exe")
+		} else {
+			pythonPath = filepath.Join(root, "venv", "bin", "python")
+		}
+	} else {
+		pythonPath, err = absolutePath(pythonPath, root)
+		if err != nil {
+			return Resolved{}, fmt.Errorf("resolve Python path: %w", err)
+		}
+	}
+	serveAddress := settings.ServeAddress
+	if serveAddress == "" {
+		serveAddress = defaultServeAddress
+	}
+	provider := settings.Provider
+	if provider == "" {
+		provider = defaultProvider
+	}
 	return Resolved{
 		ConfigFile:            configPath,
 		RuntimeDataRoot:       root,
 		DatabasePath:          resolvePath(settings.DatabasePath, root, defaultDatabase),
 		ModelRoot:             resolvePath(settings.ModelRoot, root, "models"),
+		PythonPath:            pythonPath,
+		Provider:              provider,
+		ServeAddress:          serveAddress,
 		LogRoot:               resolvePath(settings.LogRoot, root, "logs"),
 		TempRoot:              resolvePath(settings.TempRoot, root, "tmp"),
 		ExportRoot:            resolvePath(settings.ExportRoot, root, "exports"),
