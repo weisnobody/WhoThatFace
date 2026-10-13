@@ -644,10 +644,10 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</select><button>Filter</button></form>`)
 	renderPager := func() {
-		body.WriteString(`<nav class="pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="track" value="` + template.HTMLEscapeString(track) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_no_faces")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
+		body.WriteString(`<nav class="pager people-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="track" value="` + template.HTMLEscapeString(track) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_no_faces")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
 	}
 	renderPager()
-	body.WriteString(`<table><tr><th>Name</th><th>Faces</th><th>User</th><th>System</th><th>Provisional</th><th>References</th><th>Recommended References</th><th>Don't track</th><th>Possibles</th></tr>`)
+	body.WriteString(`<table class="people-table"><tr><th>Name</th><th>Faces</th><th>User</th><th>System</th><th>Provisional</th><th>References</th><th>Recommended References</th><th>Don't track</th><th>Possibles</th></tr>`)
 	for _, person := range pagePeople {
 		dontTrack := ""
 		if person.DontTrack != 0 {
@@ -662,7 +662,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	body.WriteString(`</table>`)
 	renderPager()
 	body.WriteString(`<script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
-	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String())})
+	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`.people-table{width:100%}.people-page-pager{width:100%;box-sizing:border-box}`)})
 }
 
 func (s *Server) reviewCandidateRun(w http.ResponseWriter, r *http.Request) {
@@ -895,7 +895,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			face.Recommended = recommendation == 1
 		}
 		if face.Recommended {
-			_ = s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) + 1 FROM reference_recommendations rr2 JOIN reference_recommendations rr1 ON rr1.id = ? WHERE rr2.person_id = ? AND rr2.is_current = 1 AND (rr2.recommendation_score > rr1.recommendation_score OR (rr2.recommendation_score = rr1.recommendation_score AND rr2.face_id < rr1.face_id))`, face.FaceID, personID).Scan(&face.RecommendationPriority)
+			_ = s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) + 1 FROM reference_recommendations rr2 WHERE rr2.person_id = ? AND rr2.is_current = 1 AND (rr2.recommendation_score > (SELECT rr1.recommendation_score FROM reference_recommendations rr1 WHERE rr1.face_id = ? AND rr1.person_id = ? AND rr1.is_current = 1 LIMIT 1) OR (rr2.recommendation_score = (SELECT rr1.recommendation_score FROM reference_recommendations rr1 WHERE rr1.face_id = ? AND rr1.person_id = ? AND rr1.is_current = 1 LIMIT 1) AND rr2.face_id < ?))`, personID, face.FaceID, personID, face.FaceID, personID, face.FaceID).Scan(&face.RecommendationPriority)
 		}
 		var cluster personCluster
 		var purity, consistency, connectivity sql.NullFloat64
