@@ -782,6 +782,37 @@ inside database backup, restore, access-control, deletion, and transaction
 boundaries. The record should distinguish an automatic selection from an
 explicit selection and retain enough metadata to regenerate the image.
 
+## 10.1 Possible candidate discovery
+
+Possible candidate discovery is a review-only operation for faces whose
+identity remains uncertain. It compares eligible target faces with people who
+have at least one approved reference face. It does not mutate assignments,
+create automatic assignments, or change cluster membership.
+
+The default target set includes `unknown`, `ambiguous`, and `unassigned` faces,
+plus faces in provisional people with one through five current provisional
+faces. `assigned-user` and don't-track faces are excluded by default;
+`assigned-system` and don't-track inclusion are explicit options. Faces without
+compatible embeddings or pipeline provenance are skipped. The default limits
+are five provisional faces per person, five retained candidates per target,
+and a 0.25 similarity floor. Candidates below the floor may still be retained
+when they are among the configured top-ranked results.
+
+Each run records its scope, policy snapshot, pipeline and reference-set
+provenance, status, counts, timestamps, and errors. Each result records the
+target face, candidate person, rank, similarity, margin, reference support,
+quality, detection, evidence category, retention reason, and current/stale
+state. Previous rows remain available for audit. Changing approved references,
+pipeline identity, or policy marks affected current rows stale. Candidate
+discovery may be run for a person, collection, or all data and is exposed as a
+separate job and CLI run family. Reference reprocessing may enqueue it after
+the existing debounce, but candidate discovery never starts clustering.
+
+The review UI displays candidate scores and provenance as possible matches. A
+user may explicitly assign a selected candidate, which creates an
+`assigned-user` assignment and an audit event containing the candidate row and
+run identifiers. Otherwise the result is informational only.
+
 ## 11. Clustering
 
 Clustering is performed after analysis as part of the discovery-first review

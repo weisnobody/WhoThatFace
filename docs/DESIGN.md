@@ -490,6 +490,22 @@ These states must not be collapsed into a single nullable person field. In
 particular, a provisional association is not equivalent to user confirmation,
 and `don't track` exists both as a person state and a face-level disposition.
 
+## Possible candidate discovery
+
+Possible candidate discovery is deliberately separate from both assignment
+and clustering. The generator selects unknown, ambiguous, unassigned, and
+small provisional groups, then compares their embeddings with approved
+reference galleries. It stores immutable run history and current candidate
+projections; it never promotes a candidate or changes cluster membership.
+
+The worker runs it as a coalesced, retry-safe job with person, collection,
+and all-data scopes. Reference-set, pipeline, and policy provenance are stored
+with every run. Reference reprocessing may enqueue candidate discovery after
+the debounce interval, but candidate discovery must not enqueue clustering.
+The review service shows scores, evidence, retention reason, run provenance,
+and stale/current state. Assigning a candidate is an explicit user action and
+is audited with the candidate row and run IDs.
+
 ## Clustering run data
 
 Each clustering execution is an immutable, inspectable run. It records:

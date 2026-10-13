@@ -41,6 +41,24 @@ func TestStoreEnqueueClaimAndComplete(t *testing.T) {
 	}
 }
 
+func TestPossibleCandidateJobsCoalesceIdenticalPendingRequests(t *testing.T) {
+	database, err := db.Open(context.Background(), t.TempDir()+"/candidate-jobs.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewStore(database)
+	payload := map[string]any{"scope": "all", "reference_set_version": "1:x"}
+	first, queued, err := store.EnqueuePossibleCandidates(context.Background(), payload)
+	if err != nil || !queued {
+		t.Fatalf("first enqueue = %v, %t", err, queued)
+	}
+	second, queued, err := store.EnqueuePossibleCandidates(context.Background(), payload)
+	if err != nil || !queued || second.ID != first.ID {
+		t.Fatalf("second enqueue = %v, %t, want %s", err, queued, first.ID)
+	}
+}
+
 func TestReferenceReprocessRequiresApprovedReferenceAndHonorsDelay(t *testing.T) {
 	database, err := db.Open(context.Background(), t.TempDir()+"/reference-reprocess.sqlite3")
 	if err != nil {

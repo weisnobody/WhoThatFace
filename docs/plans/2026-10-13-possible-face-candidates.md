@@ -142,55 +142,55 @@ changing assignments or cluster membership.
 
 ## Phase 6: Audit, stale results, and operational behavior
 
- - [ ] Audit candidate-run creation, completion, cancellation, retry, and failure.
- - [ ] Audit user assignments made from candidate results, including candidate run
+ - [x] Audit candidate-run creation, completion, cancellation, retry, and failure.
+ - [x] Audit user assignments made from candidate results, including candidate run
    and row IDs where available.
- - [ ] Define and implement stale-result behavior when references change while a
+ - [x] Define and implement stale-result behavior when references change while a
    run is active.
- - [ ] Ensure old run pages remain viewable and identify superseded/stale data.
- - [ ] Ensure don't-track filtering is consistent across CLI, web, and persistence.
- - [ ] Ensure candidate generation is local-only and does not log embeddings or
+ - [x] Ensure old run pages remain viewable and identify superseded/stale data.
+ - [x] Ensure don't-track filtering is consistent across CLI, web, and persistence.
+ - [x] Ensure candidate generation is local-only and does not log embeddings or
    private image data.
 
 ## Phase 7: Tests
 
 ### Unit tests
 
-- [ ] Eligibility for every assignment state.
-- [ ] Singleton and one-to-five provisional-person limits.
-- [ ] Exclusion and opt-in behavior for assigned-system and don't-track faces.
-- [ ] Missing embeddings and incompatible pipeline handling.
-- [ ] Candidate ranking, tie-breaking, margin, support, and similarity floor.
-- [ ] Top-five retention below normal assignment thresholds.
-- [ ] Evidence-category calculation and retention reasons.
+- [x] Eligibility for every assignment state.
+- [x] Singleton and one-to-five provisional-person limits.
+- [x] Exclusion and opt-in behavior for assigned-system and don't-track faces.
+- [x] Missing embeddings and incompatible pipeline handling.
+- [x] Candidate ranking, tie-breaking, margin, support, and similarity floor.
+- [x] Top-five retention below normal assignment thresholds.
+- [x] Evidence-category calculation and retention reasons.
 
 ### Store and migration tests
 
-- [ ] Run and candidate-row creation.
-- [ ] Historical rows retained while current rows are replaced.
-- [ ] Foreign keys and indexes.
-- [ ] Stale-result marking and provenance mismatch handling.
+- [x] Run and candidate-row creation.
+- [x] Historical rows retained while current rows are replaced.
+- [x] Foreign keys and indexes.
+- [x] Stale-result marking and provenance mismatch handling.
 
 ### Job and integration tests
 
-- [ ] Person, collection, and all scopes.
-- [ ] Empty galleries and zero-candidate faces.
-- [ ] Idempotent retry behavior.
-- [ ] Duplicate-request coalescing.
-- [ ] Reference-reprocess integration without clustering.
-- [ ] Job progress and summary output.
+- [x] Person, collection, and all scopes.
+- [x] Empty galleries and zero-candidate faces.
+- [x] Idempotent retry behavior.
+- [x] Duplicate-request coalescing.
+- [x] Reference-reprocess integration without clustering.
+- [x] Job progress and summary output.
 
 ### Web and CLI tests
 
-- [ ] Candidate display and filters.
-- [ ] Candidate links and stale labels.
-- [ ] Assignment action from a candidate creates `assigned-user` and an audit row.
-- [ ] User-confirmed assignments remain unchanged during discovery.
-- [ ] Authorization, CSRF, don't-track defaults, pagination, and JSON output.
+- [x] Candidate display and filters.
+- [x] Candidate links and stale labels.
+- [x] Assignment action from a candidate creates `assigned-user` and an audit row.
+- [x] User-confirmed assignments remain unchanged during discovery.
+- [x] Authorization, CSRF, don't-track defaults, pagination, and JSON output.
 
 ## Verification and rollout
 
- - [ ] Run `gofmt`, `go test ./...`, `go vet ./...`, and `git diff --check`.
+ - [x] Run `gofmt`, `go test ./...`, `go vet ./...`, and `git diff --check`.
  - [ ] Run the feature against a fixture containing:
    - established people with one and multiple references;
    - singleton provisional people;
@@ -201,5 +201,5 @@ changing assignments or cluster membership.
    at ranks 1 through 5.
  - [ ] Verify runtime and database behavior on the representative dataset before
    enabling automatic post-reference scheduling by default.
- - [ ] Update `docs/SPEC.md` and `docs/DESIGN.md` with the finalized data model,
+ - [x] Update `docs/SPEC.md` and `docs/DESIGN.md` with the finalized data model,
    scheduling rules, and review semantics before calling the feature complete.
