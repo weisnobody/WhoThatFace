@@ -23,7 +23,7 @@ assignments or clusters, and it must not break face reprocessing or deletion.
   - Record the reason or reasons when more than one rule applies.
   - Preserve the reason as part of the historical run snapshot.
   - Expose target counts separately from skipped/incompatible counts.
-- [ ] Restrict the reference gallery to established people
+- [x] Restrict the reference gallery to established people
   (`is_provisional = 0`) with at least one approved reference.
 - [ ] Make ranking deterministic.
   - Sort by similarity descending.
@@ -35,7 +35,7 @@ assignments or clusters, and it must not break face reprocessing or deletion.
   - Validate embedding dimension, dtype, normalization, and pipeline identity.
   - Skip incompatible targets and record the skip reason.
   - Do not fail the complete run because one face or reference is malformed.
-- [ ] Prevent a target face from matching against itself when it is also an
+- [x] Prevent a target face from matching against itself when it is also an
   approved reference for the candidate person.
 - [ ] Make candidate-row deletion behavior safe.
   - Add appropriate `ON DELETE` behavior or an explicit invalidation/archive
@@ -48,7 +48,7 @@ assignments or clusters, and it must not break face reprocessing or deletion.
 
 ## Phase 2: Provenance, stale state, and run lifecycle
 
-- [ ] Replace the count/max-timestamp reference version with a stable
+- [x] Replace the count/max-timestamp reference version with a stable
   reference-set snapshot/version.
   - Ensure additions, removals, replacements, and concurrent changes produce a
     distinct version.
@@ -61,9 +61,9 @@ assignments or clusters, and it must not break face reprocessing or deletion.
   - Do not stale unrelated collections or people unnecessarily.
   - Mark rows stale when references, pipeline provenance, policy, target face,
     or candidate person changes.
-- [ ] Add explicit invalidation handling when a referenced face or person is
+- [x] Add explicit invalidation handling when a referenced face or person is
   removed or becomes unusable.
-- [ ] Implement cancellation semantics.
+- [x] Implement cancellation semantics.
   - Detect context cancellation during target processing.
   - Finish the run as `cancelled`, retain partial history safely, and audit it.
   - Ensure cancellation does not leave current rows from an incomplete run.
@@ -75,7 +75,7 @@ assignments or clusters, and it must not break face reprocessing or deletion.
 
 ## Phase 3: Scheduling and worker behavior
 
-- [ ] Remove clustering from the reference-reprocess path caused by candidate
+- [x] Remove clustering from the reference-reprocess path caused by candidate
   discovery.
   - Reference reprocessing may enqueue possible-candidate discovery.
   - Possible-candidate discovery must never enqueue or run clustering.
@@ -97,15 +97,15 @@ assignments or clusters, and it must not break face reprocessing or deletion.
 
 ## Phase 4: CLI and web review behavior
 
-- [ ] Enforce current-row selection when assigning from a candidate.
+- [x] Enforce current-row selection when assigning from a candidate.
   - Require `is_current = 1`.
   - Confirm the candidate run is valid for the face and accessible collection.
   - Reject stale or superseded candidate IDs.
-- [ ] Include both candidate row ID and run ID in the assignment audit event,
+- [x] Include both candidate row ID and run ID in the assignment audit event,
   along with the prior assignment state and selected person.
 - [ ] Display candidate generated time, provenance, and stale/current state on
   face cards and provisional/unknown/ambiguous review pages.
-- [ ] Add review filters for stale versus current results.
+- [x] Add review filters for stale versus current results.
 - [ ] Ensure candidate displays consistently include rank, similarity, margin,
   support, quality, detection, evidence, retention reason, and run link.
 - [ ] Clearly label candidates as possible matches and keep the default action
@@ -159,10 +159,10 @@ assignments or clusters, and it must not break face reprocessing or deletion.
 
 ## Phase 6: Verification and rollout
 
-- [ ] Run `gofmt -w` on changed Go files.
-- [ ] Run `go test ./...`.
-- [ ] Run `go vet ./...`.
-- [ ] Run `git diff --check`.
+- [x] Run `gofmt -w` on changed Go files.
+- [x] Run `go test ./...`.
+- [x] Run `go vet ./...`.
+- [x] Run `git diff --check`.
 - [ ] Build a private fixture containing:
   - established people with one and multiple approved references;
   - singleton provisional people;
