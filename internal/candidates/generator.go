@@ -26,6 +26,14 @@ type JobPayload struct {
 	Policy              Config `json:"policy"`
 }
 
+type Progress struct {
+	RunID      string
+	Processed  int
+	Total      int
+	Candidates int
+	Skipped    int
+}
+
 type targetFace struct {
 	ID                string
 	Embedding         []float32
@@ -47,6 +55,14 @@ func NewGenerator(database *sql.DB, config Config, thresholds recognition.Thresh
 }
 
 func (g Generator) Run(ctx context.Context, request Request) (result Run, err error) {
+	return g.run(ctx, request, nil)
+}
+
+func (g Generator) RunWithProgress(ctx context.Context, request Request, progress func(Progress) error) (result Run, err error) {
+	return g.run(ctx, request, progress)
+}
+
+func (g Generator) run(ctx context.Context, request Request, progress func(Progress) error) (result Run, err error) {
 	if request.Scope != "person" && request.Scope != "collection" && request.Scope != "all" {
 		return Run{}, fmt.Errorf("invalid possible-candidate scope %q", request.Scope)
 	}
@@ -78,7 +94,14 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 	finished := false
 	candidateCount := 0
 	skippedCount := 0
+	processedCount := 0
 	var targets []targetFace
+	report := func() error {
+		if progress == nil {
+			return nil
+		}
+		return progress(Progress{RunID: run.ID, Processed: processedCount, Total: len(targets), Candidates: candidateCount, Skipped: skippedCount})
+	}
 	defer func() {
 		if finished || run.ID == "" {
 			return
@@ -128,6 +151,10 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 			return Run{}, err
 		}
 		if targetStatus == "skipped" {
+			processedCount++
+			if err := report(); err != nil {
+				return Run{}, err
+			}
 			continue
 		}
 		references, refErr := g.loadReferences(ctx, target.ID)
@@ -150,6 +177,10 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 		if len(matches) == 0 {
 			skippedCount++
 			if err := g.store.MarkTargetStatus(ctx, run.ID, target.ID, "no-candidates", "no-compatible-approved-reference"); err != nil {
+				return Run{}, err
+			}
+			processedCount++
+			if err := report(); err != nil {
 				return Run{}, err
 			}
 			continue
@@ -177,6 +208,10 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 				return Run{}, err
 			}
 			candidateCount++
+		}
+		processedCount++
+		if err := report(); err != nil {
+			return Run{}, err
 		}
 	}
 	if err := g.store.ActivateRunRows(ctx, run.ID); err != nil {

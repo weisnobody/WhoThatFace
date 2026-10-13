@@ -175,6 +175,15 @@ func (r Runner) persistSummary(ctx context.Context, job Job, before Metrics, sta
 	}
 	if progress != nil {
 		summary["last_progress"] = progress
+		if job.Kind == "possible-candidates" {
+			if details, ok := progress.(map[string]any); ok {
+				for _, key := range []string{"run_id", "processed", "total", "targets", "candidates", "skipped"} {
+					if value, exists := details[key]; exists {
+						summary[key] = value
+					}
+				}
+			}
+		}
 	}
 	started := job.CreatedAt
 	if job.StartedAt != nil {

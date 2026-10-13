@@ -81,13 +81,13 @@ assignments or clusters, and it must not break face reprocessing or deletion.
   - Possible-candidate discovery must never enqueue or run clustering.
   - Preserve any independent clustering behavior only where another explicit
     workflow requires it.
-- [ ] Make duplicate-request coalescing atomic.
+- [x] Make duplicate-request coalescing atomic.
   - Add a database-backed uniqueness strategy or transactional insert for
     equivalent pending requests.
   - Test concurrent enqueue attempts.
-- [ ] Add incremental progress reporting for processed targets, retained
+- [x] Add incremental progress reporting for processed targets, retained
   candidates, skipped targets, and the run ID.
-- [ ] Persist a candidate-specific job summary, not only progress data.
+- [x] Persist a candidate-specific job summary, not only progress data.
   - Include job ID, run ID, scope, target count, candidate count, skipped count,
     and final status.
 - [ ] Verify scope behavior for person, collection, and all-accessible-data

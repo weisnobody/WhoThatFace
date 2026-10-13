@@ -2455,7 +2455,14 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 				policy = application.Config.PossibleCandidates
 			}
 			generator := candidates.NewGenerator(application.DB, policy, application.Config.RecognitionThresholds, *pipelineID)
-			run, err := generator.Run(jobContext, candidates.Request{Scope: payload.Scope, ScopeID: payload.ScopeID, ReferenceSetVersion: payload.ReferenceSetVersion})
+			run, err := generator.RunWithProgress(jobContext, candidates.Request{Scope: payload.Scope, ScopeID: payload.ScopeID, ReferenceSetVersion: payload.ReferenceSetVersion}, func(progress candidates.Progress) error {
+				return jobStore.UpdateProgress(jobContext, job.ID, map[string]any{
+					"phase": "possible-candidates", "run_id": progress.RunID,
+					"processed": progress.Processed, "total": progress.Total,
+					"targets": progress.Total, "candidates": progress.Candidates,
+					"skipped": progress.Skipped,
+				})
+			})
 			if err != nil {
 				return err
 			}
