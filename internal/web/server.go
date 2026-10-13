@@ -781,11 +781,12 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		s.render(w, map[string]any{"Title": personName, "Account": account, "Body": template.HTML(`<h1>` + template.HTMLEscapeString(personName) + `</h1><p>No collections are assigned to this account.</p>`)})
 		return
 	}
-	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(pa.width, a.source_width, 0), COALESCE(pa.height, a.source_height, 0),
+	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(col.name, ''), COALESCE(pa.width, a.source_width, 0), COALESCE(pa.height, a.source_height, 0),
 		f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
 		CASE WHEN ae.reason = 'cluster-provisional' AND COALESCE(ae.support_count, 0) = 0 AND COALESCE(ae.quality, 0) = 0 AND COALESCE(ae.detection_confidence, 0) = 0 AND ae.agreement IS NULL THEN NULL ELSE ae.similarity END, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(cfr.reference, 0)
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
+		JOIN collections col ON col.id = pp.collection_id
 		JOIN current_face_assignments ca ON ca.face_id = f.id
 		LEFT JOIN assignment_events ae ON ae.id = ca.event_id
 		LEFT JOIN current_face_references cfr ON cfr.face_id = f.id AND cfr.person_id = ?
@@ -817,20 +818,20 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		Quality, Detection                                           float64
 	}
 	type personFace struct {
-		FaceID, PathID, RelativePath string
-		Width, Height                int
-		Left, Top, Right, Bottom     float64
-		Quality, Detection           float64
-		Confidence                   float64
-		ConfidenceAvailable          bool
-		State, PersonID              string
-		Reference                    bool
-		Recommended                  bool
-		RecommendationPriority       int
-		Representative               bool
-		Cluster                      *personCluster
-		Candidates                   []personCandidate
-		PossibleCandidates           []possibleCandidateView
+		FaceID, PathID, RelativePath, Collection string
+		Width, Height                            int
+		Left, Top, Right, Bottom                 float64
+		Quality, Detection                       float64
+		Confidence                               float64
+		ConfidenceAvailable                      bool
+		State, PersonID                          string
+		Reference                                bool
+		Recommended                              bool
+		RecommendationPriority                   int
+		Representative                           bool
+		Cluster                                  *personCluster
+		Candidates                               []personCandidate
+		PossibleCandidates                       []possibleCandidateView
 	}
 	var faces []personFace
 	referenceCount := 0
@@ -838,7 +839,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		var face personFace
 		var reference, representativeFace int
 		var confidence sql.NullFloat64
-		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &confidence, &face.State, &face.PersonID, &reference); err != nil {
+		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Collection, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &confidence, &face.State, &face.PersonID, &reference); err != nil {
 			http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -1016,6 +1017,35 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	sort.SliceStable(faces, func(i, j int) bool {
 		less := false
 		switch faceSort {
+		case "collection":
+			less = faces[i].Collection < faces[j].Collection
+		case "cluster":
+			left, right := "", ""
+			if faces[i].Cluster != nil {
+				left = faces[i].Cluster.ID
+			}
+			if faces[j].Cluster != nil {
+				right = faces[j].Cluster.ID
+			}
+			less = left < right
+		case "consistency":
+			left, right := 0.0, 0.0
+			if faces[i].Cluster != nil && faces[i].Cluster.ConsistencyAvailable {
+				left = faces[i].Cluster.Consistency
+			}
+			if faces[j].Cluster != nil && faces[j].Cluster.ConsistencyAvailable {
+				right = faces[j].Cluster.Consistency
+			}
+			less = left < right
+		case "ref_recs":
+			left, right := 0, 0
+			if faces[i].Recommended {
+				left = faces[i].RecommendationPriority
+			}
+			if faces[j].Recommended {
+				right = faces[j].RecommendationPriority
+			}
+			less = left < right
 		case "confidence":
 			less = faces[i].Confidence < faces[j].Confidence
 		case "quality":
@@ -1250,8 +1280,17 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		body.WriteString(`<option value="` + evidence + `"` + selectedAttr(evidence, evidenceFilter) + `>` + evidence + `</option>`)
 	}
 	body.WriteString(`</select></label> <label>Sort <select name="sort">`)
-	for _, option := range []string{"path", "confidence", "quality", "detection"} {
-		body.WriteString(`<option value="` + option + `"` + selectedAttr(option, faceSort) + `>` + option + `</option>`)
+	for _, option := range []struct{ Value, Label string }{
+		{Value: "path", Label: "Path"},
+		{Value: "collection", Label: "Collection"},
+		{Value: "cluster", Label: "Cluster"},
+		{Value: "consistency", Label: "Consistency"},
+		{Value: "confidence", Label: "Confidence"},
+		{Value: "quality", Label: "Quality"},
+		{Value: "detection", Label: "Detection"},
+		{Value: "ref_recs", Label: "Ref Recs"},
+	} {
+		body.WriteString(`<option value="` + option.Value + `"` + selectedAttr(option.Value, faceSort) + `>` + option.Label + `</option>`)
 	}
 	body.WriteString(`</select></label> <select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select> <button>Apply</button></form>`)
 	body.WriteString(`</div>`)
@@ -1323,6 +1362,9 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		if canModify {
 			body.WriteString(`<div class="actions"><div class="person-dispositions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Ambiguous</button>`)
 			body.WriteString(`</div>`)
+			if !face.Representative && (!hasTrustedFaces || face.State == string(review.AssignedUser) || face.State == string(review.AssignedSystem)) {
+				body.WriteString(`<button type="button" data-action="representative" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Key Photo</button>`)
+			}
 			if face.Reference || face.State == string(review.AssignedSystem) || face.State == string(review.AssignedUser) {
 				label := "Reference"
 				if face.Reference {
@@ -1332,9 +1374,6 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 					label = "<strong>Reference</strong>"
 				}
 				body.WriteString(`<button type="button" data-action="role" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-reference="` + fmt.Sprint(face.Reference) + `">` + label + `</button>`)
-			}
-			if !face.Representative && (!hasTrustedFaces || face.State == string(review.AssignedUser) || face.State == string(review.AssignedSystem)) {
-				body.WriteString(`<button type="button" data-action="representative" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Key Photo</button>`)
 			}
 			body.WriteString(`</div>`)
 			selectedName := ""
