@@ -1120,6 +1120,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
   border:1px solid #ccc;
   padding:10px}
 .card.provisional{border:2px solid #d6a800}
+.card.assigned{border:2px solid #0a2}
 .card.needs-attention{border:2px solid #c62828}
 .viewer{
   position:relative;
@@ -1264,7 +1265,9 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			boxClass += " reference"
 		}
 		cardClass := "card"
-		if face.State == string(review.Provisional) {
+		if face.State == string(review.AssignedUser) || face.State == string(review.AssignedSystem) {
+			cardClass += " assigned"
+		} else if face.State == string(review.Provisional) {
 			cardClass += " provisional"
 		} else if face.State != string(review.AssignedUser) && face.State != string(review.AssignedSystem) {
 			cardClass += " needs-attention"
@@ -1344,7 +1347,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			body.WriteString(`</div><div class="person-assignment"><input class="person-select" list="person-options" data-assignment-person="` + template.HTMLEscapeString(face.FaceID) + `" data-person-id="` + template.HTMLEscapeString(face.PersonID) + `" value="` + template.HTMLEscapeString(selectedName) + `" placeholder="Person, Unknown, or Ambiguous"><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Save</button></div>`)
+			body.WriteString(`<div class="person-assignment"><input class="person-select" list="person-options" data-assignment-person="` + template.HTMLEscapeString(face.FaceID) + `" data-person-id="` + template.HTMLEscapeString(face.PersonID) + `" value="` + template.HTMLEscapeString(selectedName) + `" placeholder="Person, Unknown, or Ambiguous"><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Save</button></div>`)
 		}
 		body.WriteString(`</article>`)
 	}
@@ -1364,7 +1367,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		}
 		body.WriteString(`</select></label> <button type="button" data-action="page-unknown">Unknown</button><button type="button" data-action="page-ambiguous">Ambiguous</button></div><div><input class="person-select" id="page-assignment-person" list="person-options" data-person-id="` + template.HTMLEscapeString(personID) + `" value="` + template.HTMLEscapeString(personName) + `"><button type="button" data-action="page-assign">Save</button></div></div>`)
 	}
-	body.WriteString(`<p class="person-footer-note">Photo card borders: green indicates a user/system assignment, yellow indicates a provisional assignment, and red indicates a face needing attention.</p>`)
+	body.WriteString(`<p class="person-footer-note">Photo card borders: dark green indicates an assigned-user or assigned-system face, gold indicates a provisional assignment, and red indicates a face needing attention.</p>`)
 	body.WriteString(`</div>`)
 	if canModify {
 		body.WriteString(`<script src="/static/person.js" defer></script>`)

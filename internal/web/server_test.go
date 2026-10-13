@@ -383,7 +383,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("CSP does not allow the page styles: %s", policy)
 	}
-	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card\"", "class=\"grid\"", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:", "All non-assigned", "id=\"page-assignment-state\"", `data-person-id="person-1" value="person-1"`} {
+	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card assigned\"", "class=\"grid\"", "dark green indicates", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:", "All non-assigned", "id=\"page-assignment-state\"", `data-person-id="person-1" value="person-1"`} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())
 		}
@@ -439,5 +439,10 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 		if !strings.Contains(photoResponse.Body.String(), value) {
 			t.Errorf("photo review is missing %q: %s", value, photoResponse.Body.String())
 		}
+	}
+	assignmentIndex := strings.Index(response.Body.String(), `class="person-assignment"`)
+	articleEnd := strings.Index(response.Body.String(), `</article>`)
+	if assignmentIndex < 0 || articleEnd < 0 || assignmentIndex > articleEnd {
+		t.Fatalf("person-assignment is outside the first photo article")
 	}
 }
