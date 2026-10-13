@@ -70,7 +70,7 @@ assignments or clusters, and it must not break face reprocessing or deletion.
 - [x] Make retries idempotent.
   - Decide whether retries resume a run or create a new run.
   - Guarantee no duplicate current rows after retry or worker restart.
-- [ ] Audit run creation, start, completion, cancellation, retry, and failure
+- [x] Audit run creation, start, completion, cancellation, retry, and failure
   as separate lifecycle events with useful scope and provenance.
 
 ## Phase 3: Scheduling and worker behavior

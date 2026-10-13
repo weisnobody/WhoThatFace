@@ -17,6 +17,7 @@ type Request struct {
 	Scope               string
 	ScopeID             string
 	ReferenceSetVersion string
+	Attempt             int
 }
 
 type JobPayload struct {
@@ -79,7 +80,7 @@ func (g Generator) run(ctx context.Context, request Request, progress func(Progr
 	}
 	if err := audit.NewStore(g.db).Record(ctx, audit.Event{Action: "possible-candidate-run", EntityType: "candidate-run", EntityID: run.ID, New: map[string]any{
 		"status": "created", "scope": request.Scope, "scope_id": request.ScopeID,
-		"reference_set_version": version, "pipeline_id": g.pipelineID,
+		"reference_set_version": version, "pipeline_id": g.pipelineID, "attempt": request.Attempt,
 	}}); err != nil {
 		return Run{}, err
 	}

@@ -2455,6 +2455,13 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 				policy = application.Config.PossibleCandidates
 			}
 			generator := candidates.NewGenerator(application.DB, policy, application.Config.RecognitionThresholds, *pipelineID)
+			if job.Attempts > 0 {
+				if err := audit.NewStore(application.DB).Record(jobContext, audit.Event{Action: "possible-candidate-run", EntityType: "job", EntityID: job.ID, New: map[string]any{
+					"status": "retry", "attempt": job.Attempts,
+				}}); err != nil {
+					return err
+				}
+			}
 			run, err := generator.RunWithProgress(jobContext, candidates.Request{Scope: payload.Scope, ScopeID: payload.ScopeID, ReferenceSetVersion: payload.ReferenceSetVersion}, func(progress candidates.Progress) error {
 				return jobStore.UpdateProgress(jobContext, job.ID, map[string]any{
 					"phase": "possible-candidates", "run_id": progress.RunID,
