@@ -671,7 +671,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	body.WriteString(`</table>`)
 	renderPager()
 	body.WriteString(`<script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
-	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`.people-table{width:100%}.people-page-pager{width:100%;box-sizing:border-box}`)})
+	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`.people-page-pager{width:max-content}.people-table{width:max-content}`)})
 }
 
 func (s *Server) reviewCandidateRun(w http.ResponseWriter, r *http.Request) {
@@ -1172,6 +1172,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 .ref-rec{float:right}
 .person-footer-note{margin-top:1rem;font-size:.9em;color:#555}
 .person-select{min-width:10rem}
+.person-select-filter{min-width:10rem}
 .person-page-controls{margin:8px 0}
 .person-page-actions{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:10px 0;border-top:1px solid #ccc}
 .person-page-actions select{max-width:14rem}
@@ -1252,11 +1253,6 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		body.WriteString(`<option value="` + option + `"` + selectedAttr(option, faceSort) + `>` + option + `</option>`)
 	}
 	body.WriteString(`</select></label> <select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select> <button>Apply</button></form>`)
-	body.WriteString(`<datalist id="person-options"><option value="Unknown" data-person-id=""></option><option value="Ambiguous" data-person-id="__ambiguous__"></option>`)
-	for _, option := range people {
-		body.WriteString(`<option value="` + template.HTMLEscapeString(option.Name) + `" data-person-id="` + template.HTMLEscapeString(option.ID) + `"></option>`)
-	}
-	body.WriteString(`</datalist>`)
 	body.WriteString(`</div>`)
 	body.WriteString(`<div id="photos" class="grid">`)
 	for _, face := range faces {
@@ -1347,7 +1343,15 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			body.WriteString(`<div class="person-assignment"><input class="person-select" list="person-options" data-assignment-person="` + template.HTMLEscapeString(face.FaceID) + `" data-person-id="` + template.HTMLEscapeString(face.PersonID) + `" value="` + template.HTMLEscapeString(selectedName) + `" placeholder="Person, Unknown, or Ambiguous"><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Save</button></div>`)
+			body.WriteString(`<div class="person-assignment"><input class="person-select-filter" data-person-filter="assignment-options-` + template.HTMLEscapeString(face.FaceID) + `" value="` + template.HTMLEscapeString(selectedName) + `" placeholder="Type to filter people"><select class="person-select" id="assignment-options-` + template.HTMLEscapeString(face.FaceID) + `" data-assignment-person="` + template.HTMLEscapeString(face.FaceID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+			for _, option := range people {
+				selected := ""
+				if option.ID == face.PersonID {
+					selected = ` selected`
+				}
+				body.WriteString(`<option value="` + template.HTMLEscapeString(option.ID) + `" data-person-name="` + template.HTMLEscapeString(option.Name) + `"` + selected + `>` + template.HTMLEscapeString(option.Name) + `</option>`)
+			}
+			body.WriteString(`</select><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `">Save</button></div>`)
 		}
 		body.WriteString(`</article>`)
 	}
@@ -1365,7 +1369,14 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				body.WriteString(`<option value="` + state + `">` + state + `</option>`)
 			}
 		}
-		body.WriteString(`</select></label> <button type="button" data-action="page-unknown">Unknown</button><button type="button" data-action="page-ambiguous">Ambiguous</button></div><div><input class="person-select" id="page-assignment-person" list="person-options" data-person-id="` + template.HTMLEscapeString(personID) + `" value="` + template.HTMLEscapeString(personName) + `"><button type="button" data-action="page-assign">Save</button></div></div>`)
+		body.WriteString(`</select></label> <button type="button" data-action="page-unknown">Unknown</button><button type="button" data-action="page-ambiguous">Ambiguous</button></div><div><input class="person-select-filter" data-person-filter="page-assignment-person" value="` + template.HTMLEscapeString(personName) + `" placeholder="Type to filter people"><select class="person-select" id="page-assignment-person" data-assignment-person="page-assignment-person"><option value="` + template.HTMLEscapeString(personID) + `" selected>` + template.HTMLEscapeString(personName) + `</option>`)
+		for _, option := range people {
+			if option.ID == personID {
+				continue
+			}
+			body.WriteString(`<option value="` + template.HTMLEscapeString(option.ID) + `" data-person-name="` + template.HTMLEscapeString(option.Name) + `">` + template.HTMLEscapeString(option.Name) + `</option>`)
+		}
+		body.WriteString(`</select><button type="button" data-action="page-assign">Save</button></div></div>`)
 	}
 	body.WriteString(`<p class="person-footer-note">Photo card borders: dark green indicates an assigned-user or assigned-system face, gold indicates a provisional assignment, and red indicates a face needing attention.</p>`)
 	body.WriteString(`</div>`)
@@ -1628,12 +1639,25 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
   const page = document.getElementById('person-page');
   if (!page) return;
   const token = page.dataset.csrf || '';
-  function personID(input) {
-    if (!input) return '';
-    if (input.value === '__ambiguous__') return '__ambiguous__';
-    const option = Array.from(document.querySelectorAll('#person-options option')).find((item) => item.value === input.value);
-    return option ? option.dataset.personId : '';
-  }
+  function personID(select) { return select ? select.value : ''; }
+  document.querySelectorAll('[data-person-filter]').forEach((input) => {
+    const select = document.getElementById(input.dataset.personFilter);
+    if (!select) return;
+    const filter = () => {
+      const text = input.value.toLowerCase();
+      Array.from(select.options).forEach((option) => {
+        const label = (option.dataset.personName || option.textContent || '').toLowerCase();
+        option.hidden = text !== '' && !label.includes(text);
+      });
+      const selected = select.options[select.selectedIndex];
+      if (selected && selected.hidden) {
+        const first = Array.from(select.options).find((option) => !option.hidden);
+        if (first) select.value = first.value;
+      }
+    };
+    input.addEventListener('input', filter);
+    filter();
+  });
   const renameForm = document.getElementById('rename-person');
   if (renameForm) renameForm.onsubmit = async (event) => {
     event.preventDefault();
