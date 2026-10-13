@@ -396,7 +396,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 				if index > 0 {
 					body.WriteString(`, `)
 				}
-				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
+				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, generated: ` + template.HTMLEscapeString(candidate.CreatedAt) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
 				if account.Role != auth.Viewer {
 					body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(value.ID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
 				}
@@ -629,6 +629,15 @@ func (s *Server) reviewCandidateRun(w http.ResponseWriter, r *http.Request) {
 		JOIN people p ON p.id = pc.person_id
 		WHERE pc.run_id = ?`
 	args := []any{run.ID}
+	rowState := r.URL.Query().Get("state")
+	if rowState != "current" && rowState != "stale" {
+		rowState = "all"
+	}
+	if rowState == "current" {
+		query += ` AND pc.is_current = 1`
+	} else if rowState == "stale" {
+		query += ` AND pc.is_current = 0`
+	}
 	if allowed != nil {
 		if len(allowed) == 0 {
 			s.render(w, map[string]any{"Title": "Candidate run", "Account": account, "Body": template.HTML(`<h1>Candidate run</h1><p>No collections are assigned to this account.</p>`)})
@@ -647,7 +656,7 @@ func (s *Server) reviewCandidateRun(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	var body strings.Builder
-	body.WriteString(`<h1>Possible candidate run ` + template.HTMLEscapeString(idSuffix(run.ID)) + `</h1><p>Status: ` + template.HTMLEscapeString(run.Status) + `; scope: ` + template.HTMLEscapeString(run.Scope) + `; targets: ` + fmt.Sprint(run.TargetCount) + `; candidates: ` + fmt.Sprint(run.CandidateCount) + `</p><table><tr><th>Face</th><th>Photo</th><th>Candidate</th><th>Rank</th><th>Similarity</th><th>Margin</th><th>Support</th><th>Evidence</th><th>Reason</th><th>Row state</th><th>Generated</th></tr>`)
+	body.WriteString(`<h1>Possible candidate run ` + template.HTMLEscapeString(idSuffix(run.ID)) + `</h1><p>Status: ` + template.HTMLEscapeString(run.Status) + `; scope: ` + template.HTMLEscapeString(run.Scope) + `; targets: ` + fmt.Sprint(run.TargetCount) + `; candidates: ` + fmt.Sprint(run.CandidateCount) + `</p><p>Pipeline: ` + template.HTMLEscapeString(run.PipelineID) + `; reference version: ` + template.HTMLEscapeString(run.ReferenceSetVersion) + `</p><p>Rows: <a href="?state=all">all</a> · <a href="?state=current">current</a> · <a href="?state=stale">stale</a></p><table><tr><th>Face</th><th>Photo</th><th>Candidate</th><th>Rank</th><th>Similarity</th><th>Margin</th><th>Support</th><th>Evidence</th><th>Reason</th><th>Row state</th><th>Generated</th></tr>`)
 	for rows.Next() {
 		var faceID, pathID, relative, personID, personName, evidence, reason, createdAt string
 		var rank, support int
@@ -2206,9 +2215,11 @@ func (s *Server) assignFace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid assignment", http.StatusBadRequest)
 		return
 	}
+	candidateRun := ""
 	if input.CandidateID != "" && !input.Reject {
 		var candidateFace, candidatePerson string
-		if err := s.db.QueryRowContext(r.Context(), `SELECT face_id, person_id FROM possible_face_candidates WHERE id = ?`, input.CandidateID).Scan(&candidateFace, &candidatePerson); err != nil || candidateFace != faceID || candidatePerson != input.PersonID {
+		var current int
+		if err := s.db.QueryRowContext(r.Context(), `SELECT face_id, person_id, run_id, is_current FROM possible_face_candidates WHERE id = ?`, input.CandidateID).Scan(&candidateFace, &candidatePerson, &candidateRun, &current); err != nil || candidateFace != faceID || candidatePerson != input.PersonID || current != 1 {
 			http.Error(w, "invalid candidate", http.StatusBadRequest)
 			return
 		}
@@ -2225,7 +2236,7 @@ func (s *Server) assignFace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.CandidateID != "" && !input.Reject {
-		if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, TargetEventID: assignment.EventID, Action: "possible-candidate-assignment", EntityType: "face", EntityID: faceID, New: map[string]any{"candidate_id": input.CandidateID, "person_id": input.PersonID}}); err != nil {
+		if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, TargetEventID: assignment.EventID, Action: "possible-candidate-assignment", EntityType: "face", EntityID: faceID, New: map[string]any{"candidate_id": input.CandidateID, "candidate_run_id": candidateRun, "person_id": input.PersonID}}); err != nil {
 			http.Error(w, "audit failed", http.StatusInternalServerError)
 			return
 		}

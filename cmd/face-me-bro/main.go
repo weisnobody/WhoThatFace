@@ -335,6 +335,7 @@ func purgeCommand(ctx context.Context, application *app.App, args []string, json
 	defer tx.Rollback()
 	for _, statement := range []string{
 		`DELETE FROM current_face_references`, `DELETE FROM reference_selection_events`,
+		`DELETE FROM possible_candidate_targets`, `DELETE FROM possible_face_candidates`, `DELETE FROM possible_candidate_runs`,
 		`DELETE FROM person_representatives`,
 		`DELETE FROM reference_recommendation_decisions`, `DELETE FROM reference_recommendations`, `DELETE FROM current_face_dispositions`, `DELETE FROM face_disposition_events`,
 		`DELETE FROM current_face_assignments`, `DELETE FROM assignment_events`, `DELETE FROM cluster_memberships`,
@@ -2489,36 +2490,6 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			}
 			if err := recognitionProcessor.ProcessPerson(jobContext, payload.PersonID); err != nil {
 				return err
-			}
-			rows, err := application.DB.QueryContext(jobContext, `SELECT DISTINCT face_id FROM (
-				SELECT ca.face_id FROM current_face_assignments ca WHERE ca.person_id = ?
-				UNION SELECT fr.face_id FROM current_face_references fr WHERE fr.person_id = ?
-				UNION SELECT rc.face_id FROM recognition_candidates rc WHERE rc.person_id = ?
-				UNION SELECT cm.face_id FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id WHERE c.proposed_person_id = ?
-			) ORDER BY face_id`, payload.PersonID, payload.PersonID, payload.PersonID, payload.PersonID)
-			if err != nil {
-				return err
-			}
-			var affectedFaces []string
-			for rows.Next() {
-				var faceID string
-				if err := rows.Scan(&faceID); err != nil {
-					rows.Close()
-					return err
-				}
-				affectedFaces = append(affectedFaces, faceID)
-			}
-			if err := rows.Close(); err != nil {
-				return err
-			}
-			clusteringConfig := application.Config.ClusteringConfig
-			if len(affectedFaces) > 0 {
-				// Subset runs currently supersede the active full run. Until the
-				// clustering invalidation/anchor model is implemented, re-run the
-				// complete clustering input instead.
-				if _, err := clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, "all"); err != nil {
-					return err
-				}
 			}
 			if err := recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID); err != nil {
 				return err

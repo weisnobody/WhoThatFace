@@ -60,6 +60,13 @@ func TestGeneratorFindsCandidatesAndRecordsRun(t *testing.T) {
 	if personID != "person-test" {
 		t.Fatalf("candidate person = %q", personID)
 	}
+	var eligibility, targetStatus string
+	if err := database.QueryRow(`SELECT eligibility_reason, status FROM possible_candidate_targets WHERE run_id = ? AND face_id = 'face-target'`, run.ID).Scan(&eligibility, &targetStatus); err != nil {
+		t.Fatal(err)
+	}
+	if eligibility != "unassigned" || targetStatus != "eligible" {
+		t.Fatalf("target = %q/%q", eligibility, targetStatus)
+	}
 	var auditCount int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE entity_type = 'candidate-run' AND entity_id = ?`, run.ID).Scan(&auditCount); err != nil {
 		t.Fatal(err)

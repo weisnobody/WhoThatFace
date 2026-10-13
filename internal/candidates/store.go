@@ -44,6 +44,16 @@ type Row struct {
 	CreatedAt       time.Time
 }
 
+type Target struct {
+	ID                string
+	RunID             string
+	FaceID            string
+	EligibilityReason string
+	Status            string
+	SkipReason        string
+	CreatedAt         time.Time
+}
+
 type Store struct{ db *sql.DB }
 
 func NewStore(database *sql.DB) Store { return Store{db: database} }
@@ -151,6 +161,39 @@ func (s Store) InsertRow(ctx context.Context, row Row) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, row.ID, row.RunID,
 		row.FaceID, row.PersonID, row.Rank, row.Similarity, row.Margin, row.Support,
 		row.Quality, row.Detection, row.Evidence, row.RetentionReason, boolInt(row.Current), row.CreatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s Store) InsertTarget(ctx context.Context, target Target) error {
+	if target.ID == "" {
+		var err error
+		target.ID, err = id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+	}
+	if target.CreatedAt.IsZero() {
+		target.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO possible_candidate_targets
+		(id, run_id, face_id, eligibility_reason, status, skip_reason, created_at)
+		VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, target.ID, target.RunID,
+		target.FaceID, target.EligibilityReason, target.Status, target.SkipReason,
+		target.CreatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s Store) MarkTargetStatus(ctx context.Context, runID, faceID, status, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE possible_candidate_targets
+		SET status = ?, skip_reason = NULLIF(?, '')
+		WHERE run_id = ? AND face_id = ?`, status, reason, runID, faceID)
+	return err
+}
+
+func (s Store) ActivateRunRows(ctx context.Context, runID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE possible_face_candidates SET is_current = 1 WHERE run_id = ?`, runID)
 	return err
 }
 

@@ -31,13 +31,13 @@ func TestOpenAppliesMigrationsAndIsIdempotent(t *testing.T) {
 	if err := database.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migrationCount != 15 {
-		t.Fatalf("migration count = %d, want 15", migrationCount)
+	if migrationCount != 17 {
+		t.Fatalf("migration count = %d, want 17", migrationCount)
 	}
 
 	for _, table := range []string{
 		"photo_assets", "photo_paths", "faces", "people", "person_representatives", "assignment_events",
-		"current_face_assignments", "clustering_runs", "jobs", "accounts", "audit_events",
+		"current_face_assignments", "clustering_runs", "jobs", "accounts", "audit_events", "possible_candidate_targets",
 	} {
 		var name string
 		err := database.QueryRowContext(ctx,

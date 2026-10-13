@@ -2,8 +2,10 @@ package candidates
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 
@@ -24,10 +26,11 @@ type JobPayload struct {
 }
 
 type targetFace struct {
-	ID        string
-	Embedding []float32
-	Quality   float32
-	Detection float32
+	ID                string
+	Embedding         []float32
+	Quality           float32
+	Detection         float32
+	EligibilityReason string
 }
 
 type Generator struct {
@@ -63,6 +66,9 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 		return Run{}, err
 	}
 	finished := false
+	candidateCount := 0
+	skippedCount := 0
+	var targets []targetFace
 	defer func() {
 		if finished || run.ID == "" {
 			return
@@ -71,16 +77,20 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 		if err != nil {
 			message = err.Error()
 		}
-		_ = g.store.FinishRun(context.Background(), run.ID, "failed", 0, 0, 0, message)
+		status := "failed"
+		if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = "cancelled"
+		}
+		_ = g.store.FinishRun(context.Background(), run.ID, status, len(targets), candidateCount, skippedCount, message)
 		_ = audit.NewStore(g.db).Record(context.Background(), audit.Event{Action: "possible-candidate-run", EntityType: "candidate-run", EntityID: run.ID, New: map[string]any{
-			"status": "failed", "error": message,
+			"status": status, "error": message,
 		}})
 	}()
 	if err := g.store.MarkRowsStaleForProvenance(ctx, version, g.pipelineID, g.config); err != nil {
 		_ = g.store.FinishRun(context.Background(), run.ID, "failed", 0, 0, 0, err.Error())
 		return Run{}, err
 	}
-	targets, err := g.loadTargets(ctx, request)
+	targets, err = g.loadTargets(ctx, request)
 	if err != nil {
 		_ = g.store.FinishRun(context.Background(), run.ID, "failed", 0, 0, 0, err.Error())
 		return Run{}, err
@@ -93,21 +103,45 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 		_ = g.store.FinishRun(context.Background(), run.ID, "failed", len(targets), 0, 0, err.Error())
 		return Run{}, err
 	}
-	references, err := g.loadReferences(ctx)
-	if err != nil {
-		_ = g.store.FinishRun(context.Background(), run.ID, "failed", len(targets), 0, 0, err.Error())
-		return Run{}, err
-	}
-	candidateCount := 0
-	skippedCount := 0
 	for _, target := range targets {
-		matches, matchErr := recognition.Match(target.Embedding, references, target.Quality, target.Detection)
+		if err := ctx.Err(); err != nil {
+			return Run{}, err
+		}
+		targetStatus := "eligible"
+		targetSkipReason := ""
+		if len(target.Embedding) == 0 {
+			targetStatus = "skipped"
+			targetSkipReason = "incompatible-embedding"
+			skippedCount++
+		}
+		if err := g.store.InsertTarget(ctx, Target{RunID: run.ID, FaceID: target.ID, EligibilityReason: target.EligibilityReason, Status: targetStatus, SkipReason: targetSkipReason}); err != nil {
+			return Run{}, err
+		}
+		if targetStatus == "skipped" {
+			continue
+		}
+		references, refErr := g.loadReferences(ctx, target.ID)
+		if refErr != nil {
+			return Run{}, refErr
+		}
+		compatibleReferences := make(map[string][][]float32, len(references))
+		for personID, embeddings := range references {
+			for _, embedding := range embeddings {
+				if len(embedding) == len(target.Embedding) {
+					compatibleReferences[personID] = append(compatibleReferences[personID], embedding)
+				}
+			}
+		}
+		matches, matchErr := recognition.Match(target.Embedding, compatibleReferences, target.Quality, target.Detection)
 		if matchErr != nil {
 			_ = g.store.FinishRun(context.Background(), run.ID, "failed", len(targets), candidateCount, skippedCount, matchErr.Error())
 			return Run{}, matchErr
 		}
 		if len(matches) == 0 {
 			skippedCount++
+			if err := g.store.MarkTargetStatus(ctx, run.ID, target.ID, "no-candidates", "no-compatible-approved-reference"); err != nil {
+				return Run{}, err
+			}
 			continue
 		}
 		limit := g.config.MaxCandidates
@@ -127,13 +161,16 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 				Similarity: match.Similarity, Margin: match.Margin, Support: match.Support,
 				Quality: match.Quality, Detection: match.Detection,
 				Evidence:        string(recognition.ClassifyStandalone(match, g.thresholds)),
-				RetentionReason: reason, Current: true,
+				RetentionReason: reason, Current: false,
 			}); err != nil {
 				_ = g.store.FinishRun(context.Background(), run.ID, "failed", len(targets), candidateCount, skippedCount, err.Error())
 				return Run{}, err
 			}
 			candidateCount++
 		}
+	}
+	if err := g.store.ActivateRunRows(ctx, run.ID); err != nil {
+		return Run{}, err
 	}
 	if err := g.store.FinishRun(ctx, run.ID, "completed", len(targets), candidateCount, skippedCount, ""); err != nil {
 		return Run{}, err
@@ -156,6 +193,11 @@ func (g Generator) loadTargets(ctx context.Context, request Request) ([]targetFa
 			GROUP BY person_id
 		)
 		SELECT f.id, f.embedding, f.embedding_dimension,
+		       CASE
+		         WHEN COALESCE(ca.state, 'unassigned') IN ('unknown', 'ambiguous', 'unassigned') THEN COALESCE(ca.state, 'unassigned')
+		         WHEN COALESCE(ca.state, '') = 'assigned-system' THEN 'assigned-system'
+		         ELSE 'provisional-person-small-group'
+		       END,
 		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
 		FROM faces f
 		JOIN analyses a ON a.id = f.analysis_id
@@ -195,26 +237,30 @@ func (g Generator) loadTargets(ctx context.Context, request Request) ([]targetFa
 		var target targetFace
 		var blob []byte
 		var dimension int
-		if err := rows.Scan(&target.ID, &blob, &dimension, &target.Quality, &target.Detection); err != nil {
+		if err := rows.Scan(&target.ID, &blob, &dimension, &target.EligibilityReason, &target.Quality, &target.Detection); err != nil {
 			return nil, err
 		}
 		target.Embedding, err = decodeEmbedding(blob, dimension)
 		if err != nil {
-			return nil, fmt.Errorf("decode target face %s: %w", target.ID, err)
+			// Preserve the eligible face in the run snapshot and record it as
+			// skipped instead of aborting the complete run.
+			target.Embedding = nil
 		}
 		result = append(result, target)
 	}
 	return result, rows.Err()
 }
 
-func (g Generator) loadReferences(ctx context.Context) (map[string][][]float32, error) {
+func (g Generator) loadReferences(ctx context.Context, excludeFaceID string) (map[string][][]float32, error) {
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT r.person_id, f.embedding, f.embedding_dimension
 		FROM current_face_references r
 		JOIN faces f ON f.id = r.face_id
 		JOIN analyses a ON a.id = f.analysis_id
-		WHERE r.reference = 1 AND f.embedding IS NOT NULL AND a.pipeline_id = ?
-		ORDER BY r.person_id, r.face_id`, g.pipelineID)
+		JOIN people p ON p.id = r.person_id
+		WHERE r.reference = 1 AND p.is_provisional = 0 AND r.face_id <> ?
+		  AND f.embedding IS NOT NULL AND a.pipeline_id = ?
+		ORDER BY r.person_id, r.face_id`, excludeFaceID, g.pipelineID)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +275,7 @@ func (g Generator) loadReferences(ctx context.Context) (map[string][][]float32, 
 		}
 		embedding, err := decodeEmbedding(blob, dimension)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		result[personID] = append(result[personID], embedding)
 	}
@@ -237,12 +283,23 @@ func (g Generator) loadReferences(ctx context.Context) (map[string][][]float32, 
 }
 
 func ReferenceSetVersion(ctx context.Context, database *sql.DB) (string, error) {
-	var count int
-	var updated string
-	if err := database.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM current_face_references WHERE reference = 1`).Scan(&count, &updated); err != nil {
+	rows, err := database.QueryContext(ctx, `SELECT face_id, person_id, updated_at FROM current_face_references WHERE reference = 1 ORDER BY face_id, person_id`)
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%d:%s", count, updated), nil
+	defer rows.Close()
+	hash := sha256.New()
+	for rows.Next() {
+		var faceID, personID, updated string
+		if err := rows.Scan(&faceID, &personID, &updated); err != nil {
+			return "", err
+		}
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00", faceID, personID, updated)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%x", hash.Sum(nil)), nil
 }
 
 func decodeEmbedding(blob []byte, dimension int) ([]float32, error) {

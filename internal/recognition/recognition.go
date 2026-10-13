@@ -83,14 +83,41 @@ func Match(query []float32, references map[string][][]float32, quality, detectio
 			candidates = append(candidates, Candidate{PersonID: personID, Similarity: best, Support: len(embeddings), Quality: quality, Detection: detection, References: true})
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Similarity > candidates[j].Similarity })
-	for index := range candidates {
-		if index+1 < len(candidates) {
-			candidates[index].Margin = candidates[index].Similarity - candidates[index+1].Similarity
-		} else {
-			candidates[index].Margin = candidates[index].Similarity
+	// Establish a deterministic order before calculating margins. The final
+	// ordering below repeats the complete contract after margins are known.
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Similarity != candidates[j].Similarity {
+			return candidates[i].Similarity > candidates[j].Similarity
 		}
+		if candidates[i].Support != candidates[j].Support {
+			return candidates[i].Support > candidates[j].Support
+		}
+		return candidates[i].PersonID < candidates[j].PersonID
+	})
+	for index := range candidates {
+		secondBest := float32(-1)
+		for other := range candidates {
+			if other != index && candidates[other].Similarity > secondBest {
+				secondBest = candidates[other].Similarity
+			}
+		}
+		if secondBest < 0 {
+			secondBest = 0
+		}
+		candidates[index].Margin = candidates[index].Similarity - secondBest
 	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Similarity != candidates[j].Similarity {
+			return candidates[i].Similarity > candidates[j].Similarity
+		}
+		if candidates[i].Margin != candidates[j].Margin {
+			return candidates[i].Margin > candidates[j].Margin
+		}
+		if candidates[i].Support != candidates[j].Support {
+			return candidates[i].Support > candidates[j].Support
+		}
+		return candidates[i].PersonID < candidates[j].PersonID
+	})
 	return candidates, nil
 }
 

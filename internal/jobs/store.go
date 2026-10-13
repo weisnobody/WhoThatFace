@@ -81,6 +81,17 @@ func (s Store) EnqueuePossibleCandidates(ctx context.Context, payload any) (Job,
 		return Job{}, false, err
 	}
 	job, err := s.Enqueue(ctx, "possible-candidates", 3, payload)
+	if err != nil {
+		// The partial unique index closes the select/insert race. If another
+		// caller won the insert, return that existing pending job.
+		if existingErr := s.db.QueryRowContext(ctx, `
+			SELECT id FROM jobs
+			WHERE kind = 'possible-candidates' AND status = 'pending' AND payload_json = ?
+			ORDER BY created_at DESC, id DESC LIMIT 1`, payloadJSON).Scan(&existingID); existingErr == nil {
+			existing, getErr := s.Get(ctx, existingID)
+			return existing, true, getErr
+		}
+	}
 	return job, true, err
 }
 
