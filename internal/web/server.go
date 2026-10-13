@@ -647,11 +647,11 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	for _, option := range []struct{ Value, Label string }{{"name", "Name"}, {"faces", "Faces"}, {"user", "User"}, {"system", "System"}, {"provisional", "Provisional"}} {
 		body.WriteString(`<option value="` + option.Value + `"` + selectedAttr(option.Value, sortKey) + `>` + option.Label + `</option>`)
 	}
-	body.WriteString(`</select><select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select><select name="per_page" onchange="this.form.submit()">`)
+	body.WriteString(`</select></label><label>Direction <select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select></label><label>Per page <select name="per_page" onchange="this.form.submit()">`)
 	for _, size := range []int{10, 20, 25, 50, 100} {
 		body.WriteString(`<option value="` + fmt.Sprint(size) + `"` + selectedAttr(fmt.Sprint(size), fmt.Sprint(perPage)) + `>` + fmt.Sprint(size) + `</option>`)
 	}
-	body.WriteString(`</select><button>Filter</button></form>`)
+	body.WriteString(`</select></label><button>Filter</button></form>`)
 	renderPager := func() {
 		body.WriteString(`<nav class="pager people-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="track" value="` + template.HTMLEscapeString(track) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_no_faces")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
 	}

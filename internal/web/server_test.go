@@ -81,6 +81,9 @@ func TestReviewPeopleWorksForRestrictedCollectionAccount(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "People") {
 		t.Fatalf("unexpected response: %s", response.Body.String())
 	}
+	if !strings.Contains(response.Body.String(), `Sort <select name="sort">`) || !strings.Contains(response.Body.String(), `</select></label><label>Direction`) {
+		t.Fatalf("people filter form has malformed sort labels: %s", response.Body.String())
+	}
 }
 
 func TestViewerCannotUseMutatingAPI(t *testing.T) {
