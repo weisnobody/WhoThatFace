@@ -81,7 +81,7 @@ func TestReviewPeopleWorksForRestrictedCollectionAccount(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "People") {
 		t.Fatalf("unexpected response: %s", response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), `<strong>Sort</strong> <select name="sort">`) || !strings.Contains(response.Body.String(), `</select></label><label><strong>Direction</strong>`) || !strings.Contains(response.Body.String(), `<strong>Per Page</strong>`) {
+	if !strings.Contains(response.Body.String(), `<strong>Sort</strong> <select name="sort">`) || !strings.Contains(response.Body.String(), `</select></label><label><strong>Direction</strong>`) || !strings.Contains(response.Body.String(), `<strong>Per Page</strong>`) || !strings.Contains(response.Body.String(), `<label>Jump to Page <input type="number" name="page"`) {
 		t.Fatalf("people filter form has malformed sort labels: %s", response.Body.String())
 	}
 }
