@@ -480,6 +480,16 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
+	possibleCount := `(SELECT COUNT(DISTINCT pc.face_id) FROM possible_face_candidates pc WHERE pc.person_id = p.id AND pc.is_current = 1)`
+	var possibleArgs []any
+	if allowed != nil {
+		placeholders := make([]string, len(allowed))
+		for i := range allowed {
+			placeholders[i] = "?"
+			possibleArgs = append(possibleArgs, allowed[i])
+		}
+		possibleCount = `(SELECT COUNT(DISTINCT pc.face_id) FROM possible_face_candidates pc JOIN faces pcf ON pcf.id = pc.face_id JOIN analyses pca ON pca.id = pcf.analysis_id JOIN photo_paths pcp ON pcp.asset_id = pca.asset_id WHERE pc.person_id = p.id AND pc.is_current = 1 AND pcp.collection_id IN (` + strings.Join(placeholders, ",") + `))`
+	}
 	peopleQuery := `SELECT p.id, COALESCE(NULLIF(p.name, ''), substr(p.id, -8)), p.dont_track,
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL THEN ca.face_id END),
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND ca.state = 'assigned-user' THEN ca.face_id END),
@@ -487,7 +497,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND ca.state = 'provisional' THEN ca.face_id END),
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND cfr.reference = 1 THEN ca.face_id END),
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND rr.is_current = 1 THEN ca.face_id END),
-		(SELECT COUNT(DISTINCT pc.face_id) FROM possible_face_candidates pc WHERE pc.person_id = p.id AND pc.is_current = 1)
+		` + possibleCount + `
 		FROM people p
 		LEFT JOIN current_face_assignments ca ON ca.person_id = p.id
 		LEFT JOIN faces f ON f.id = ca.face_id
@@ -497,7 +507,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN current_face_references cfr ON cfr.face_id = ca.face_id AND cfr.person_id = p.id
 		LEFT JOIN reference_recommendations rr ON rr.face_id = ca.face_id AND rr.person_id = p.id
 		WHERE `
-	var args []any
+	args := append([]any(nil), possibleArgs...)
 	if allowed != nil {
 		if len(allowed) == 0 {
 			body := `<h1>People</h1><p>No collections are assigned to this account.</p>`
@@ -505,9 +515,8 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		placeholders := make([]string, len(allowed))
-		for i, id := range allowed {
+		for i := range allowed {
 			placeholders[i] = "?"
-			args = append(args, id)
 		}
 		peopleQuery += `EXISTS (SELECT 1 FROM faces f2 JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id JOIN current_face_assignments ca2 ON ca2.face_id = f2.id WHERE ca2.person_id = p.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
 		for _, id := range allowed {
