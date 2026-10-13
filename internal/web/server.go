@@ -671,7 +671,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	body.WriteString(`</table>`)
 	renderPager()
 	body.WriteString(`<script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
-	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`#create-person,#people-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0}.people-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.people-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.people-table{width:max-content}`)})
+	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`#create-person{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0}#people-controls{display:flex;align-items:center;flex-wrap:nowrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}.people-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.people-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.people-table{width:max-content}`)})
 }
 
 func (s *Server) reviewCandidateRun(w http.ResponseWriter, r *http.Request) {
