@@ -71,8 +71,8 @@ func TestGeneratorFindsCandidatesAndRecordsRun(t *testing.T) {
 	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE entity_type = 'candidate-run' AND entity_id = ?`, run.ID).Scan(&auditCount); err != nil {
 		t.Fatal(err)
 	}
-	if auditCount != 2 {
-		t.Fatalf("candidate run audit count = %d, want 2", auditCount)
+	if auditCount != 3 {
+		t.Fatalf("candidate run audit count = %d, want 3", auditCount)
 	}
 }
 

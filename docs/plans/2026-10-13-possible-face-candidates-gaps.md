@@ -53,11 +53,11 @@ assignments or clusters, and it must not break face reprocessing or deletion.
   - Ensure additions, removals, replacements, and concurrent changes produce a
     distinct version.
   - Store the version used by both the job request and the completed run.
-- [ ] Validate the queued reference-set version before generation.
+- [x] Validate the queued reference-set version before generation.
   - Either reject/requeue stale jobs or explicitly record that the run used a
     newer version.
   - Ensure coalescing compares scope, policy, pipeline, and reference version.
-- [ ] Make stale invalidation scope-aware where appropriate.
+- [x] Make stale invalidation scope-aware where appropriate.
   - Do not stale unrelated collections or people unnecessarily.
   - Mark rows stale when references, pipeline provenance, policy, target face,
     or candidate person changes.
@@ -67,7 +67,7 @@ assignments or clusters, and it must not break face reprocessing or deletion.
   - Detect context cancellation during target processing.
   - Finish the run as `cancelled`, retain partial history safely, and audit it.
   - Ensure cancellation does not leave current rows from an incomplete run.
-- [ ] Make retries idempotent.
+- [x] Make retries idempotent.
   - Decide whether retries resume a run or create a new run.
   - Guarantee no duplicate current rows after retry or worker restart.
 - [ ] Audit run creation, start, completion, cancellation, retry, and failure

@@ -61,6 +61,12 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 	if err != nil {
 		return Run{}, err
 	}
+	if err := audit.NewStore(g.db).Record(ctx, audit.Event{Action: "possible-candidate-run", EntityType: "candidate-run", EntityID: run.ID, New: map[string]any{
+		"status": "created", "scope": request.Scope, "scope_id": request.ScopeID,
+		"reference_set_version": version, "pipeline_id": g.pipelineID,
+	}}); err != nil {
+		return Run{}, err
+	}
 	if err := g.store.StartRun(ctx, run.ID); err != nil {
 		return Run{}, err
 	}
