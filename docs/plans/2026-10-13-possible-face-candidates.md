@@ -25,14 +25,14 @@ changing assignments or cluster membership.
 
 ## Phase 1: Configuration and data model
 
- - [ ] Add configuration fields and defaults for:
+ - [x] Add configuration fields and defaults for:
    - maximum provisional faces per target person (`5`);
    - maximum candidates per face (`5`);
    - minimum candidate similarity (`0.25`);
    - inclusion of `assigned-system` faces (`false`);
    - inclusion of don't-track faces (`false`);
    - default discovery scope and stale-result policy.
- - [ ] Add a migration for a possible-candidate run table containing:
+ - [x] Add a migration for a possible-candidate run table containing:
    - UUIDv7 ID;
    - scope and scope ID;
    - policy/configuration snapshot;
@@ -40,38 +40,38 @@ changing assignments or cluster membership.
    - status and timestamps;
    - target and result counts;
    - error summary.
- - [ ] Add a migration for candidate rows containing:
+ - [x] Add a migration for candidate rows containing:
    - run ID, target face ID, candidate person ID, and rank;
    - similarity, margin, support, quality, and detection;
    - evidence category and retention reason;
    - current/stale state and timestamps.
- - [ ] Add indexes and foreign keys for target-face, candidate-person, current-row,
+ - [x] Add indexes and foreign keys for target-face, candidate-person, current-row,
    and run lookups.
- - [ ] Add Go models and stores for creating runs, writing rows, marking prior
+ - [x] Add Go models and stores for creating runs, writing rows, marking prior
    rows stale, retrieving current candidates, and retrieving run details.
 
 ## Phase 2: Eligibility and candidate generation
 
- - [ ] Implement a deterministic target selector that records the reason each face
+ - [x] Implement a deterministic target selector that records the reason each face
    was eligible:
    - unknown, ambiguous, or unassigned;
    - provisional assignment;
    - provisional person with one through five provisional faces.
- - [ ] Apply exclusions for assigned-user, don't-track, missing embeddings, and
+ - [x] Apply exclusions for assigned-user, don't-track, missing embeddings, and
    incompatible pipeline/model provenance.
- - [ ] Add explicit options for including assigned-system and don't-track faces.
- - [ ] Load candidate people with at least one approved reference face and group
+ - [x] Add explicit options for including assigned-system and don't-track faces.
+ - [x] Load candidate people with at least one approved reference face and group
    their compatible reference embeddings.
- - [ ] Evaluate each target face against every candidate person with the existing
+ - [x] Evaluate each target face against every candidate person with the existing
    matcher.
- - [ ] Calculate strongest similarity, second-best similarity, margin, support,
+ - [x] Calculate strongest similarity, second-best similarity, margin, support,
    quality, detection, evidence level, rank, and retention reason.
- - [ ] Retain candidates meeting the similarity floor or the top-five rule.
- - [ ] Apply deterministic ordering:
+ - [x] Retain candidates meeting the similarity floor or the top-five rule.
+ - [x] Apply deterministic ordering:
    similarity descending, margin descending, support descending, person ID
    ascending.
- - [ ] Persist all results under one run, including zero-candidate target faces.
- - [ ] Ensure the implementation never calls assignment mutation methods or
+ - [x] Persist all results under one run, including zero-candidate target faces.
+ - [x] Ensure the implementation never calls assignment mutation methods or
     modifies clusters.
 
 ## Phase 3: Jobs and worker integration
