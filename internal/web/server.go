@@ -1058,7 +1058,14 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				}
 				return 2
 			}
-			less = refRecRank(faces[i]) < refRecRank(faces[j])
+			leftRank, rightRank := refRecRank(faces[i]), refRecRank(faces[j])
+			if leftRank != rightRank {
+				less = leftRank < rightRank
+			} else if leftRank == 0 && faces[i].RecommendationPriority != faces[j].RecommendationPriority {
+				less = faces[i].RecommendationPriority < faces[j].RecommendationPriority
+			} else {
+				less = faces[i].FaceID < faces[j].FaceID
+			}
 		case "confidence":
 			less = faces[i].Confidence < faces[j].Confidence
 		case "quality":
