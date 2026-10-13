@@ -41,12 +41,14 @@ type Server struct {
 
 type possibleCandidateView struct {
 	ID, RunID, PersonID, PersonName string
+	PipelineID, ReferenceSetVersion string
 	Rank                            int
 	Similarity, Margin              float64
 	Support                         int
 	Quality, Detection              float64
 	Evidence, RetentionReason       string
 	CreatedAt                       string
+	Current                         bool
 }
 
 func (s *Server) currentPossibleCandidates(ctx context.Context, faceID string) ([]possibleCandidateView, error) {
@@ -55,9 +57,11 @@ func (s *Server) currentPossibleCandidates(ctx context.Context, faceID string) (
 		       COALESCE(NULLIF(p.name, ''), substr(p.id, -8), p.id),
 		       pc.rank, pc.similarity, pc.margin, pc.support_count,
 		       pc.quality, pc.detection_confidence, pc.evidence,
-		       pc.retention_reason, pc.created_at
+		       pc.retention_reason, pc.created_at, cr.pipeline_id,
+		       cr.reference_set_version
 		FROM possible_face_candidates pc
 		JOIN people p ON p.id = pc.person_id
+		JOIN possible_candidate_runs cr ON cr.id = pc.run_id
 		WHERE pc.face_id = ? AND pc.is_current = 1
 		ORDER BY pc.rank`, faceID)
 	if err != nil {
@@ -70,9 +74,11 @@ func (s *Server) currentPossibleCandidates(ctx context.Context, faceID string) (
 		if err := rows.Scan(&value.ID, &value.RunID, &value.PersonID, &value.PersonName,
 			&value.Rank, &value.Similarity, &value.Margin, &value.Support,
 			&value.Quality, &value.Detection, &value.Evidence,
-			&value.RetentionReason, &value.CreatedAt); err != nil {
+			&value.RetentionReason, &value.CreatedAt, &value.PipelineID,
+			&value.ReferenceSetVersion); err != nil {
 			return nil, err
 		}
+		value.Current = true
 		result = append(result, value)
 	}
 	return result, rows.Err()
@@ -396,7 +402,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 				if index > 0 {
 					body.WriteString(`, `)
 				}
-				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, generated: ` + template.HTMLEscapeString(candidate.CreatedAt) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
+				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, possible/current, generated: ` + template.HTMLEscapeString(candidate.CreatedAt) + `, pipeline: ` + template.HTMLEscapeString(candidate.PipelineID) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
 				if account.Role != auth.Viewer {
 					body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(value.ID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
 				}
@@ -1155,7 +1161,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				if index > 0 {
 					body.WriteString(`, `)
 				}
-				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
+				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, possible/current, generated: ` + template.HTMLEscapeString(candidate.CreatedAt) + `, pipeline: ` + template.HTMLEscapeString(candidate.PipelineID) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
 				if canModify {
 					body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
 				}

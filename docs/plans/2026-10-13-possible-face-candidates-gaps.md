@@ -103,12 +103,12 @@ assignments or clusters, and it must not break face reprocessing or deletion.
   - Reject stale or superseded candidate IDs.
 - [x] Include both candidate row ID and run ID in the assignment audit event,
   along with the prior assignment state and selected person.
-- [ ] Display candidate generated time, provenance, and stale/current state on
+- [x] Display candidate generated time, provenance, and stale/current state on
   face cards and provisional/unknown/ambiguous review pages.
 - [x] Add review filters for stale versus current results.
-- [ ] Ensure candidate displays consistently include rank, similarity, margin,
+- [x] Ensure candidate displays consistently include rank, similarity, margin,
   support, quality, detection, evidence, retention reason, and run link.
-- [ ] Clearly label candidates as possible matches and keep the default action
+- [x] Clearly label candidates as possible matches and keep the default action
   as review rather than acceptance.
 - [ ] Add authorization tests for candidate run pages, candidate links, and
   assignment actions across collection permissions.
