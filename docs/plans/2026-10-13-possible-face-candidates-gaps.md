@@ -17,7 +17,7 @@ assignments or clusters, and it must not break face reprocessing or deletion.
 
 ## Phase 1: Correctness and data model
 
-- [ ] Persist target eligibility records or extend the run model so every
+- [x] Persist target eligibility records or extend the run model so every
   selected target face records its eligibility reason, including faces with no
   retained candidates.
   - Record the reason or reasons when more than one rule applies.
@@ -25,19 +25,19 @@ assignments or clusters, and it must not break face reprocessing or deletion.
   - Expose target counts separately from skipped/incompatible counts.
 - [x] Restrict the reference gallery to established people
   (`is_provisional = 0`) with at least one approved reference.
-- [ ] Make ranking deterministic.
+- [x] Make ranking deterministic.
   - Sort by similarity descending.
   - Then margin descending.
   - Then support count descending.
   - Then person ID ascending.
   - Add tests with equal similarities and equal margins.
-- [ ] Handle incompatible target/reference embeddings per face.
+- [x] Handle incompatible target/reference embeddings per face.
   - Validate embedding dimension, dtype, normalization, and pipeline identity.
   - Skip incompatible targets and record the skip reason.
   - Do not fail the complete run because one face or reference is malformed.
 - [x] Prevent a target face from matching against itself when it is also an
   approved reference for the candidate person.
-- [ ] Make candidate-row deletion behavior safe.
+- [x] Make candidate-row deletion behavior safe.
   - Add appropriate `ON DELETE` behavior or an explicit invalidation/archive
     path for face and person removal.
   - Verify that analysis reprocessing, collection removal, and person removal

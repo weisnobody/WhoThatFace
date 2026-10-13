@@ -2455,7 +2455,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 				policy = application.Config.PossibleCandidates
 			}
 			generator := candidates.NewGenerator(application.DB, policy, application.Config.RecognitionThresholds, *pipelineID)
-			run, err := generator.Run(jobContext, candidates.Request{Scope: payload.Scope, ScopeID: payload.ScopeID})
+			run, err := generator.Run(jobContext, candidates.Request{Scope: payload.Scope, ScopeID: payload.ScopeID, ReferenceSetVersion: payload.ReferenceSetVersion})
 			if err != nil {
 				return err
 			}

@@ -14,8 +14,9 @@ import (
 )
 
 type Request struct {
-	Scope   string
-	ScopeID string
+	Scope               string
+	ScopeID             string
+	ReferenceSetVersion string
 }
 
 type JobPayload struct {
@@ -52,6 +53,9 @@ func (g Generator) Run(ctx context.Context, request Request) (result Run, err er
 	version, err := ReferenceSetVersion(ctx, g.db)
 	if err != nil {
 		return Run{}, err
+	}
+	if request.ReferenceSetVersion != "" && request.ReferenceSetVersion != version {
+		return Run{}, fmt.Errorf("possible-candidate reference set changed before generation: queued=%s current=%s", request.ReferenceSetVersion, version)
 	}
 	run, err := g.store.CreateRun(ctx, request.Scope, request.ScopeID, g.pipelineID, version, g.config)
 	if err != nil {
@@ -193,14 +197,17 @@ func (g Generator) loadTargets(ctx context.Context, request Request) ([]targetFa
 			GROUP BY person_id
 		)
 		SELECT f.id, f.embedding, f.embedding_dimension,
+		       COALESCE(f.embedding_dtype, ''), COALESCE(f.embedding_normalized, 0),
+		       pipe.embedding_dimension, pipe.embedding_dtype, pipe.normalization,
 		       CASE
 		         WHEN COALESCE(ca.state, 'unassigned') IN ('unknown', 'ambiguous', 'unassigned') THEN COALESCE(ca.state, 'unassigned')
 		         WHEN COALESCE(ca.state, '') = 'assigned-system' THEN 'assigned-system'
-		         ELSE 'provisional-person-small-group'
+		         ELSE 'provisional-assignment,small-provisional-person'
 		       END,
 		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
 		FROM faces f
 		JOIN analyses a ON a.id = f.analysis_id
+		JOIN pipelines pipe ON pipe.id = a.pipeline_id
 		LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
 		LEFT JOIN people p ON p.id = ca.person_id
 		LEFT JOIN provisional_counts pc ON pc.person_id = ca.person_id
@@ -236,12 +243,16 @@ func (g Generator) loadTargets(ctx context.Context, request Request) ([]targetFa
 	for rows.Next() {
 		var target targetFace
 		var blob []byte
-		var dimension int
-		if err := rows.Scan(&target.ID, &blob, &dimension, &target.EligibilityReason, &target.Quality, &target.Detection); err != nil {
+		var dimension, normalized, expectedDimension int
+		var dtype, expectedDtype, normalization string
+		if err := rows.Scan(&target.ID, &blob, &dimension, &dtype, &normalized, &expectedDimension, &expectedDtype, &normalization, &target.EligibilityReason, &target.Quality, &target.Detection); err != nil {
 			return nil, err
 		}
-		target.Embedding, err = decodeEmbedding(blob, dimension)
-		if err != nil {
+		compatible := dimension == expectedDimension && dtype == expectedDtype && (normalization != "l2" || normalized == 1)
+		if compatible {
+			target.Embedding, err = decodeEmbedding(blob, dimension)
+		}
+		if !compatible || err != nil {
 			// Preserve the eligible face in the run snapshot and record it as
 			// skipped instead of aborting the complete run.
 			target.Embedding = nil
@@ -258,8 +269,12 @@ func (g Generator) loadReferences(ctx context.Context, excludeFaceID string) (ma
 		JOIN faces f ON f.id = r.face_id
 		JOIN analyses a ON a.id = f.analysis_id
 		JOIN people p ON p.id = r.person_id
+		JOIN pipelines pipe ON pipe.id = a.pipeline_id
 		WHERE r.reference = 1 AND p.is_provisional = 0 AND r.face_id <> ?
 		  AND f.embedding IS NOT NULL AND a.pipeline_id = ?
+		  AND f.embedding_dimension = pipe.embedding_dimension
+		  AND f.embedding_dtype = pipe.embedding_dtype
+		  AND (pipe.normalization <> 'l2' OR f.embedding_normalized = 1)
 		ORDER BY r.person_id, r.face_id`, excludeFaceID, g.pipelineID)
 	if err != nil {
 		return nil, err
