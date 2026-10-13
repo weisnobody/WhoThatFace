@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/pjg/face_me_bro/internal/candidates"
 	"github.com/pjg/face_me_bro/internal/clustering"
 	"github.com/pjg/face_me_bro/internal/recognition"
 )
@@ -55,6 +56,11 @@ type File struct {
 	ClusteringK                   int     `json:"clustering_k,omitempty"`
 	ClusteringSimilarityThreshold float32 `json:"clustering_similarity_threshold,omitempty"`
 	ClusteringCandidateScope      string  `json:"clustering_candidate_scope,omitempty"`
+	PossibleMaxProvisionalFaces   int     `json:"possible_max_provisional_faces,omitempty"`
+	PossibleMaxCandidates         int     `json:"possible_max_candidates,omitempty"`
+	PossibleMinSimilarity         float32 `json:"possible_min_similarity,omitempty"`
+	PossibleIncludeAssignedSystem *bool   `json:"possible_include_assigned_system,omitempty"`
+	PossibleIncludeDontTrack      *bool   `json:"possible_include_dont_track,omitempty"`
 }
 
 // Resolved is the complete configuration used by application services.
@@ -73,6 +79,7 @@ type Resolved struct {
 	NeighborSearchMethod  string
 	RecognitionThresholds recognition.Thresholds
 	ClusteringConfig      clustering.Config
+	PossibleCandidates    candidates.Config
 }
 
 // DefaultConfigFile returns the default configuration file for the current
@@ -203,6 +210,22 @@ func Load(configPath string) (Resolved, error) {
 	}
 	clusteringConfig.NeighborSearchMethod = searchMethod(settings.NeighborSearchMethod)
 	clusteringConfig.RecognitionThresholds = thresholds
+	possibleConfig := candidates.DefaultConfig()
+	if settings.PossibleMaxProvisionalFaces != 0 {
+		possibleConfig.MaxProvisionalFaces = settings.PossibleMaxProvisionalFaces
+	}
+	if settings.PossibleMaxCandidates != 0 {
+		possibleConfig.MaxCandidates = settings.PossibleMaxCandidates
+	}
+	if settings.PossibleMinSimilarity != 0 {
+		possibleConfig.MinSimilarity = settings.PossibleMinSimilarity
+	}
+	if settings.PossibleIncludeAssignedSystem != nil {
+		possibleConfig.IncludeAssignedSystem = *settings.PossibleIncludeAssignedSystem
+	}
+	if settings.PossibleIncludeDontTrack != nil {
+		possibleConfig.IncludeDontTrack = *settings.PossibleIncludeDontTrack
+	}
 	pythonPath := settings.PythonPath
 	if pythonPath == "" {
 		if runtime.GOOS == "windows" {
@@ -239,6 +262,7 @@ func Load(configPath string) (Resolved, error) {
 		NeighborSearchMethod:  searchMethod(settings.NeighborSearchMethod),
 		RecognitionThresholds: thresholds,
 		ClusteringConfig:      clusteringConfig,
+		PossibleCandidates:    possibleConfig,
 	}, nil
 }
 
