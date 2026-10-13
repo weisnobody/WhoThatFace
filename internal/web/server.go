@@ -975,6 +975,9 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			if referenceFilter == "reference" && !face.Reference {
 				continue
 			}
+			if referenceFilter == "reference-or-recommended" && !face.Reference && !face.Recommended {
+				continue
+			}
 			if referenceFilter == "non-reference" && face.Reference {
 				continue
 			}
@@ -985,10 +988,18 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		}
 		faces = filtered
 	}
-	if possibleFilter == "true" || candidatePersonFilter != "" || evidenceFilter != "" {
+	if possibleFilter == "" {
+		possibleFilter = "without"
+	}
+	if possibleFilter == "possibles" || possibleFilter == "without" || candidatePersonFilter != "" || evidenceFilter != "" {
 		filtered := faces[:0]
 		for _, face := range faces {
-			matched := possibleFilter != "true" || len(face.PossibleCandidates) > 0
+			matched := true
+			if possibleFilter == "possibles" || possibleFilter == "true" {
+				matched = len(face.PossibleCandidates) > 0
+			} else if possibleFilter == "without" || possibleFilter == "false" {
+				matched = len(face.PossibleCandidates) == 0
+			}
 			if matched && candidatePersonFilter != "" {
 				matched = false
 				for _, candidate := range face.PossibleCandidates {
@@ -1038,14 +1049,16 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			}
 			less = left < right
 		case "ref_recs":
-			left, right := 0, 0
-			if faces[i].Recommended {
-				left = faces[i].RecommendationPriority
+			refRecRank := func(face personFace) int {
+				if face.Recommended {
+					return 0
+				}
+				if face.Reference {
+					return 1
+				}
+				return 2
 			}
-			if faces[j].Recommended {
-				right = faces[j].RecommendationPriority
-			}
-			less = left < right
+			less = refRecRank(faces[i]) < refRecRank(faces[j])
 		case "confidence":
 			less = faces[i].Confidence < faces[j].Confidence
 		case "quality":
@@ -1260,7 +1273,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	for _, state := range []string{"provisional", "assigned-user", "assigned-system", "unknown", "ambiguous", "unassigned"} {
 		body.WriteString(`<option value="` + state + `"` + selectedAttr(state, faceFilter) + `>` + state + `</option>`)
 	}
-	body.WriteString(`</select></label> <label>Reference <select name="reference"><option value="">All</option><option value="recommended"` + selectedAttr("recommended", referenceFilter) + `>Recommended</option><option value="reference"` + selectedAttr("reference", referenceFilter) + `>Reference</option><option value="non-reference"` + selectedAttr("non-reference", referenceFilter) + `>Non-reference</option></select></label> <label>Cluster <select name="cluster"><option value="">All</option>`)
+	body.WriteString(`</select></label> <label>Reference <select name="reference"><option value="">All</option><option value="recommended"` + selectedAttr("recommended", referenceFilter) + `>Recommended</option><option value="reference"` + selectedAttr("reference", referenceFilter) + `>Reference</option><option value="reference-or-recommended"` + selectedAttr("reference-or-recommended", referenceFilter) + `>Ref / Rec Refs</option><option value="non-reference"` + selectedAttr("non-reference", referenceFilter) + `>Non-reference</option></select></label> <label>Cluster <select name="cluster"><option value="">All</option>`)
 	clusterOptions := make(map[string]string)
 	for _, face := range faces {
 		if face.Cluster != nil {
@@ -1275,7 +1288,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	for _, clusterID := range clusterIDs {
 		body.WriteString(`<option value="` + template.HTMLEscapeString(clusterID) + `"` + selectedAttr(clusterID, clusterFilter) + `>` + template.HTMLEscapeString(clusterOptions[clusterID]) + `</option>`)
 	}
-	body.WriteString(`</select></label> <label>Possible <select name="possible"><option value="">All</option><option value="true"` + selectedAttr("true", possibleFilter) + `>With possible candidates</option></select></label> <label>Candidate <input name="candidate_person" value="` + template.HTMLEscapeString(candidatePersonFilter) + `" placeholder="name or ID"></label> <label>Evidence <select name="evidence"><option value="">All</option>`)
+	body.WriteString(`</select></label> <label>Possible <select name="possible"><option value="without"` + selectedAttr("without", possibleFilter) + `>With Out</option><option value="possibles"` + selectedAttr("possibles", possibleFilter) + `>Possibles</option><option value="all"` + selectedAttr("all", possibleFilter) + `>All</option></select></label> <label>Candidate <input name="candidate_person" value="` + template.HTMLEscapeString(candidatePersonFilter) + `" placeholder="name or ID"></label> <label>Evidence <select name="evidence"><option value="">All</option>`)
 	for _, evidence := range []string{"high", "medium", "low", "manual-review"} {
 		body.WriteString(`<option value="` + evidence + `"` + selectedAttr(evidence, evidenceFilter) + `>` + evidence + `</option>`)
 	}

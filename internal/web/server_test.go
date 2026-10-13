@@ -386,7 +386,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("CSP does not allow the page styles: %s", policy)
 	}
-	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card assigned\"", "class=\"grid\"", "dark green indicates", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:", "All non-assigned", "id=\"page-assignment-state\"", `data-person-filter="assignment-options-face-1"`, `value="person-1" selected`, `value="collection"`, `>Collection</option>`, `value="cluster"`, `>Cluster</option>`, `value="consistency"`, `>Consistency</option>`, `value="ref_recs"`, `>Ref Recs</option>`} {
+	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card assigned\"", "class=\"grid\"", "dark green indicates", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:", "All non-assigned", "id=\"page-assignment-state\"", `data-person-filter="assignment-options-face-1"`, `value="person-1" selected`, `value="collection"`, `>Collection</option>`, `value="cluster"`, `>Cluster</option>`, `value="consistency"`, `>Consistency</option>`, `value="ref_recs"`, `>Ref Recs</option>`, `value="reference-or-recommended"`, `>Ref / Rec Refs</option>`, `value="without" selected`, `>With Out</option>`, `value="possibles"`, `>Possibles</option>`, `value="all"`, `>All</option>`} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())
 		}
