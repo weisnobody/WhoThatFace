@@ -209,7 +209,7 @@ func (s Store) SetReference(ctx context.Context, faceID, personID string, refere
 			return err
 		}
 	}
-	_, err = jobs.NewStore(s.db).Enqueue(ctx, "reference-reprocess", 1, map[string]string{"person_id": personID, "face_id": faceID})
+	_, _, err = jobs.NewStore(s.db).EnqueueReferenceReprocess(ctx, personID)
 	return err
 }
 

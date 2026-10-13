@@ -2,6 +2,7 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
@@ -17,10 +18,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pjg/face_me_bro/internal/analysis"
 	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/jobs"
+	"github.com/pjg/face_me_bro/internal/media"
 	"github.com/pjg/face_me_bro/internal/representative"
 	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
@@ -31,6 +34,8 @@ type Server struct {
 	db         *sql.DB
 	pythonPath string
 	templates  *template.Template
+	statusJSON []byte
+	setupJSON  []byte
 }
 
 func boolInt(value bool) int {
@@ -61,6 +66,18 @@ func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
 
 func NewServerWithPython(authStore auth.Store, database *sql.DB, pythonPath string) (*Server, error) {
 	return newServer(authStore, database, pythonPath)
+}
+
+// NewServerWithDiagnostics configures the dashboard's status and setup-check
+// pages with the same snapshots used when the serve command starts.
+func NewServerWithDiagnostics(authStore auth.Store, database *sql.DB, pythonPath string, statusJSON, setupJSON []byte) (*Server, error) {
+	server, err := newServer(authStore, database, pythonPath)
+	if err != nil {
+		return nil, err
+	}
+	server.statusJSON = append([]byte(nil), statusJSON...)
+	server.setupJSON = append([]byte(nil), setupJSON...)
+	return server, nil
 }
 
 func newServer(authStore auth.Store, database *sql.DB, pythonPath string) (*Server, error) {
@@ -94,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /static/person.js", s.personScript)
 	mux.HandleFunc("GET /static/photo.js", s.photoScript)
 	mux.HandleFunc("GET /static/cluster.js", s.clusterScript)
+	mux.HandleFunc("GET /static/admin.js", s.adminScript)
 	mux.HandleFunc("POST /api/faces/{faceID}/assignment", s.assignFace)
 	mux.HandleFunc("POST /api/faces/{faceID}/disposition", s.faceDisposition)
 	mux.HandleFunc("POST /api/faces/{faceID}/reference", s.referenceFace)
@@ -113,8 +131,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{clusterID}/review", s.reviewClusterAPI)
 	mux.HandleFunc("POST /api/audit/{eventID}/undo", s.undoAudit)
 	mux.HandleFunc("GET /admin/accounts", s.adminAccounts)
+	mux.HandleFunc("GET /admin", s.adminDashboard)
+	mux.HandleFunc("GET /admin/jobs", s.adminJobs)
+	mux.HandleFunc("GET /admin/jobs/{jobID}", s.adminJob)
+	mux.HandleFunc("GET /admin/runs", s.adminRuns)
+	mux.HandleFunc("GET /admin/runs/{runID}", s.adminRun)
+	mux.HandleFunc("GET /admin/scans", s.adminScans)
+	mux.HandleFunc("GET /admin/scans/{scanID}", s.adminScan)
+	mux.HandleFunc("GET /admin/audit", s.adminAudit)
+	mux.HandleFunc("GET /admin/audit/{eventID}", s.adminAuditEvent)
+	mux.HandleFunc("GET /admin/pipelines", s.adminPipelines)
+	mux.HandleFunc("GET /admin/pipelines/{pipelineID}", s.adminPipeline)
+	mux.HandleFunc("GET /admin/accounts/{accountID}", s.adminAccount)
+	mux.HandleFunc("GET /admin/status", s.adminStatus)
+	mux.HandleFunc("GET /admin/setup-check", s.adminSetupCheck)
 	mux.HandleFunc("GET /admin/collections", s.adminCollections)
 	mux.HandleFunc("POST /api/admin/accounts", s.adminCreateAccount)
+	mux.HandleFunc("POST /api/admin/collections", s.adminCreateCollection)
+	mux.HandleFunc("POST /api/admin/pipelines", s.adminCreatePipeline)
 	mux.HandleFunc("POST /api/admin/accounts/{accountID}/password", s.adminResetPassword)
 	mux.HandleFunc("POST /api/admin/accounts/{accountID}/disabled", s.adminDisableAccount)
 	mux.HandleFunc("POST /api/admin/permissions", s.adminPermission)
@@ -683,6 +717,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 		return
 	}
+	totalFaceCount := len(faces)
 	faceFilter := r.URL.Query().Get("state")
 	if faceFilter != "" {
 		filtered := faces[:0]
@@ -863,7 +898,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	if canModify {
 		recommendButton = `<button type="button" data-action="recommend-references">Recommend References</button>`
 	}
-	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><div class="person-identity"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><div><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Similarity Max: ` + maxConfidenceText + `, Min: ` + minConfidenceText + `, Cluster Min: ` + minConsistencyText + `, Max: ` + maxConsistencyText + `)</span></h1><form id="rename-person" class="person-name-form"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button>` + recommendButton + `</form></div></div>`)
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><div class="person-identity"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><div><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(totalFaceCount) + ` / ` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Similarity Max: ` + maxConfidenceText + `, Min: ` + minConfidenceText + `, Cluster Min: ` + minConsistencyText + `, Max: ` + maxConsistencyText + `)</span></h1><form id="rename-person" class="person-name-form"><input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button>` + recommendButton + `</form></div></div>`)
 	body.WriteString(`<form method="get" class="person-page-controls"><label>Filter <select name="state"><option value="">All faces</option>`)
 	for _, state := range []string{"provisional", "assigned-user", "assigned-system", "unknown", "ambiguous", "unassigned"} {
 		body.WriteString(`<option value="` + state + `"` + selectedAttr(state, faceFilter) + `>` + state + `</option>`)
@@ -976,7 +1011,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		for _, face := range faces {
 			visibleStates[face.State] = true
 		}
-		body.WriteString(`<div class="person-page-actions"><div><label>Assignment <select id="page-assignment-state"><option value="__all_non_assigned__">All non-assigned</option>`)
+		body.WriteString(`<div class="person-page-actions"><div><label>Assignment <input type="checkbox" id="page-bulk-confirm" required> Bulk Assignment <select id="page-assignment-state"><option value="__all_non_assigned__">All non-assigned</option>`)
 		for _, state := range []string{"provisional", "assigned-system", "assigned-user", "unassigned", "unknown", "ambiguous"} {
 			if visibleStates[state] {
 				body.WriteString(`<option value="` + state + `">` + state + `</option>`)
@@ -1073,16 +1108,27 @@ func (s *Server) referenceReprocess(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	job, err := jobs.NewStore(s.db).Enqueue(r.Context(), "reference-reprocess", 1, map[string]string{"person_id": personID})
+	job, queued, err := jobs.NewStore(s.db).EnqueueReferenceReprocess(r.Context(), personID)
 	if err != nil {
 		http.Error(w, "queue reference recommendations: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, Action: "reference-reprocess-request", EntityType: "person", EntityID: personID, New: map[string]any{"job_id": job.ID}}); err != nil {
+	auditDetails := map[string]any{"queued": queued}
+	if queued {
+		auditDetails["job_id"] = job.ID
+	}
+	if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, Action: "reference-reprocess-request", EntityType: "person", EntityID: personID, New: auditDetails}); err != nil {
 		http.Error(w, "record reference recommendation audit event: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"person_id": personID, "job_id": job.ID, "status": job.Status})
+	result := map[string]any{"person_id": personID, "queued": queued}
+	if queued {
+		result["job_id"] = job.ID
+		result["status"] = job.Status
+	} else {
+		result["status"] = "skipped-no-approved-references"
+	}
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func (s *Server) personReferences(w http.ResponseWriter, r *http.Request) {
@@ -1273,8 +1319,15 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
     }).map((card) => card.dataset.faceId);
   }
   async function sendBulk(state, personID) {
+    const acknowledgement = document.getElementById('page-bulk-confirm');
+    if (!acknowledgement || !acknowledgement.checked) {
+      alert('Check "Apply to all matching faces" before using a bulk action.');
+      return;
+    }
     const faceIDs = bulkFaces();
     if (!faceIDs.length) { alert('No visible faces match the selected assignment.'); return; }
+    const action = state === 'assigned-user' ? 'assign' : state;
+    if (!confirm('Bulk ' + action + ' will affect ' + faceIDs.length + ' face' + (faceIDs.length === 1 ? '' : 's') + '. Continue?')) return;
     for (const faceID of faceIDs) {
       const response = await fetch('/api/faces/' + encodeURIComponent(faceID) + '/assignment', {
         method: 'POST',
@@ -1322,6 +1375,34 @@ func (s *Server) photoScript(w http.ResponseWriter, _ *http.Request) {
   });
   document.querySelectorAll('[data-action="disposition"]').forEach((button) => {
     button.onclick = () => send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/disposition', {disposition:button.dataset.disposition, active:true});
+  });
+})();
+`))
+}
+
+func (s *Server) adminScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write([]byte(`(function () {
+  document.querySelectorAll('form[data-admin-json]').forEach(function (form) {
+    form.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      const values = new FormData(form);
+      const payload = {};
+      values.forEach(function (value, key) {
+        if (key !== 'csrf') payload[key] = value;
+      });
+      ['must_change', 'view', 'modify', 'undo', 'disabled'].forEach(function (key) {
+        if (key in payload) payload[key] = payload[key] === 'on' || payload[key] === 'true';
+      });
+      if ('dimension' in payload) payload.dimension = Number(payload.dimension);
+      const response = await fetch(form.action, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': values.get('csrf') || ''},
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) { alert(await response.text()); return; }
+      location.reload();
+    });
   });
 })();
 `))
@@ -2091,32 +2172,509 @@ func (s *Server) undoAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"undone_audit_event": eventID})
 }
 
-func (s *Server) adminAccounts(w http.ResponseWriter, r *http.Request) {
+func (s *Server) requireSystemAdmin(w http.ResponseWriter, r *http.Request) (auth.Account, bool) {
 	account, ok := s.requireAccount(w, r)
 	if !ok {
-		return
+		return auth.Account{}, false
 	}
 	if account.Role != auth.SystemAdmin {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return auth.Account{}, false
+	}
+	return account, true
+}
+
+func adminNav() string {
+	return `<p><a href="/admin">Admin dashboard</a> · <a href="/admin/jobs">Jobs</a> · <a href="/admin/runs">Runs</a> · <a href="/admin/scans">Scans</a> · <a href="/admin/audit">Audit</a> · <a href="/admin/pipelines">Pipelines</a> · <a href="/admin/accounts">Accounts</a> · <a href="/admin/collections">Collections</a> · <a href="/admin/status">Status</a> · <a href="/admin/setup-check">Setup check</a></p>`
+}
+
+func adminPageParams(r *http.Request, defaultSort string, sorts map[string]string) (string, int, int, string) {
+	query := r.URL.Query()
+	search := strings.TrimSpace(query.Get("q"))
+	sortName := query.Get("sort")
+	sortSQL, ok := sorts[sortName]
+	if !ok {
+		sortName = defaultSort
+		sortSQL = sorts[defaultSort]
+	}
+	order := adminOrderValue(r, defaultSort)
+	limit := 20
+	if value, err := strconv.Atoi(query.Get("limit")); err == nil && value > 0 && value <= 100 {
+		limit = value
+	}
+	page := 1
+	if value, err := strconv.Atoi(query.Get("page")); err == nil && value > 0 {
+		page = value
+	}
+	return search, limit, page, sortSQL + " " + order
+}
+
+func adminOrderValue(r *http.Request, defaultSort string) string {
+	switch strings.ToLower(r.URL.Query().Get("order")) {
+	case "asc":
+		return "ASC"
+	case "desc":
+		return "DESC"
+	default:
+		if defaultSort == "username" {
+			return "ASC"
+		}
+		return "DESC"
+	}
+}
+
+func adminOrderOptions(r *http.Request, defaultSort string) string {
+	selected := strings.ToLower(adminOrderValue(r, defaultSort))
+	return `<option value="asc"` + selectedAttr("asc", selected) + `>Ascending</option><option value="desc"` + selectedAttr("desc", selected) + `>Descending</option>`
+}
+
+func adminPager(r *http.Request, search, sortSQL string, limit, page, total int) string {
+	pages := (total + limit - 1) / limit
+	if pages < 1 {
+		pages = 1
+	}
+	link := func(target int) string {
+		values := r.URL.Query()
+		if search == "" {
+			values.Del("q")
+		}
+		values.Set("limit", strconv.Itoa(limit))
+		values.Set("page", strconv.Itoa(target))
+		return "?" + values.Encode()
+	}
+	return fmt.Sprintf(`<p>Showing page %d of %d (%d items) · <a href="%s">Previous</a> · <a href="%s">Next</a></p>`, page, pages, total, link(maxInt(1, page-1)), link(minInt(pages, page+1)))
+}
+
+func adminDistinctStrings(ctx context.Context, database *sql.DB, query string) ([]string, error) {
+	rows, err := database.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var values []string
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
+func adminSelectOptions(values []string, selected string) string {
+	var result strings.Builder
+	for _, value := range values {
+		selectedAttr := ""
+		if value == selected {
+			selectedAttr = ` selected`
+		}
+		result.WriteString(`<option value="` + template.HTMLEscapeString(value) + `"` + selectedAttr + `>` + template.HTMLEscapeString(value) + `</option>`)
+	}
+	return result.String()
+}
+
+func adminIDLink(prefix, id string) string {
+	label := id
+	if len(id) > 8 {
+		label = id[len(id)-8:]
+	}
+	return `<a href="` + prefix + template.HTMLEscapeString(url.PathEscape(id)) + `">` + template.HTMLEscapeString(label) + `</a>`
+}
+
+func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT username, role, disabled_at IS NOT NULL FROM accounts ORDER BY username`)
+	body := `<h1>Administration</h1>` + adminNav() + `<ul><li>Jobs, runs, scans, audit events, pipelines, accounts, and collections can be browsed from the links above.</li><li><a href="/admin/status">Status</a> shows the application status snapshot.</li><li><a href="/admin/setup-check">Setup check</a> shows the worker environment checks.</li></ul>`
+	s.render(w, map[string]any{"Title": "Administration", "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	body := `<h1>Status</h1>` + adminNav() + `<pre>` + template.HTMLEscapeString(string(s.statusJSON)) + `</pre>`
+	s.render(w, map[string]any{"Title": "Status", "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminSetupCheck(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	body := `<h1>Setup check</h1>` + adminNav() + `<pre>` + template.HTMLEscapeString(string(s.setupJSON)) + `</pre>`
+	s.render(w, map[string]any{"Title": "Setup check", "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	search, limit, page, order := adminPageParams(r, "created", map[string]string{"created": "created_at", "kind": "kind", "status": "status"})
+	query := r.URL.Query()
+	kindFilter, statusFilter, priorityFilter := query.Get("kind_filter"), query.Get("status_filter"), query.Get("priority_filter")
+	whereParts := []string{"(kind LIKE ? OR status LIKE ? OR id LIKE ?)"}
+	whereArgs := []any{}
+	pattern := "%" + search + "%"
+	whereArgs = append(whereArgs, pattern, pattern, pattern)
+	if kindFilter != "" {
+		whereParts = append(whereParts, "kind = ?")
+		whereArgs = append(whereArgs, kindFilter)
+	}
+	if statusFilter != "" {
+		whereParts = append(whereParts, "status = ?")
+		whereArgs = append(whereArgs, statusFilter)
+	}
+	if priorityFilter != "" {
+		whereParts = append(whereParts, "priority = ?")
+		whereArgs = append(whereArgs, priorityFilter)
+	}
+	where := "WHERE " + strings.Join(whereParts, " AND ")
+	var total int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM jobs "+where, whereArgs...).Scan(&total); err != nil {
+		http.Error(w, "job lookup failed", 500)
+		return
+	}
+	offset := (page - 1) * limit
+	rowsArgs := append(append([]any{}, whereArgs...), limit, offset)
+	rows, err := s.db.QueryContext(r.Context(), "SELECT id, kind, status, priority, created_at, COALESCE(started_at,''), COALESCE(completed_at,'') FROM jobs "+where+" ORDER BY "+order+", id LIMIT ? OFFSET ?", rowsArgs...)
 	if err != nil {
-		http.Error(w, "account lookup failed", http.StatusInternalServerError)
+		http.Error(w, "job lookup failed", 500)
 		return
 	}
 	defer rows.Close()
-	var body strings.Builder
-	body.WriteString(`<h1>Accounts</h1><table><tr><th>Username</th><th>Role</th><th>Disabled</th></tr>`)
+	kinds, err := adminDistinctStrings(r.Context(), s.db, `SELECT DISTINCT kind FROM jobs ORDER BY kind`)
+	if err != nil {
+		http.Error(w, "job filter lookup failed", 500)
+		return
+	}
+	statuses, err := adminDistinctStrings(r.Context(), s.db, `SELECT DISTINCT status FROM jobs ORDER BY status`)
+	if err != nil {
+		http.Error(w, "job filter lookup failed", 500)
+		return
+	}
+	priorities, err := adminDistinctStrings(r.Context(), s.db, `SELECT DISTINCT CAST(priority AS TEXT) FROM jobs ORDER BY priority`)
+	if err != nil {
+		http.Error(w, "job filter lookup failed", 500)
+		return
+	}
+	body := `<h1>Jobs</h1>` + adminNav() + `<form><input name="q" value="` + template.HTMLEscapeString(search) + `" placeholder="Filter"><label>Kind <select name="kind_filter"><option value="">All</option>` + adminSelectOptions(kinds, kindFilter) + `</select></label><label>Status <select name="status_filter"><option value="">All</option>` + adminSelectOptions(statuses, statusFilter) + `</select></label><label>Priority <select name="priority_filter"><option value="">All</option>` + adminSelectOptions(priorities, priorityFilter) + `</select></label><select name="sort"><option value="created">Created</option><option value="kind">Kind</option><option value="status">Status</option></select><select name="order">` + adminOrderOptions(r, "created") + `</select><select name="limit"><option>20</option><option>50</option><option>100</option></select><button>Filter</button></form>` + adminPager(r, search, order, limit, page, total) + `<table><tr><th>ID</th><th>Kind</th><th>Status</th><th>Priority</th><th>Created</th><th>Started</th><th>Completed</th></tr>`
 	for rows.Next() {
-		var username, role string
-		var disabled int
-		if rows.Scan(&username, &role, &disabled) == nil {
-			body.WriteString(`<tr><td>` + template.HTMLEscapeString(username) + `</td><td>` + template.HTMLEscapeString(role) + `</td><td>` + fmt.Sprint(disabled == 1) + `</td></tr>`)
+		var id, kind, status, created, started, completed string
+		var priority int
+		if err := rows.Scan(&id, &kind, &status, &priority, &created, &started, &completed); err != nil {
+			continue
+		}
+		body += `<tr><td>` + adminIDLink("/admin/jobs/", id) + `</td><td>` + template.HTMLEscapeString(kind) + `</td><td>` + template.HTMLEscapeString(status) + `</td><td>` + fmt.Sprint(priority) + `</td><td>` + template.HTMLEscapeString(created) + `</td><td>` + template.HTMLEscapeString(started) + `</td><td>` + template.HTMLEscapeString(completed) + `</td></tr>`
+	}
+	body += `</table>`
+	s.render(w, map[string]any{"Title": "Jobs", "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminRuns(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	search, limit, page, order := adminPageParams(r, "created", map[string]string{"created": "created_at", "status": "status", "algorithm": "algorithm"})
+	where := "WHERE algorithm LIKE ? OR status LIKE ? OR id LIKE ?"
+	pattern := "%" + search + "%"
+	var total int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM clustering_runs "+where, pattern, pattern, pattern).Scan(&total); err != nil {
+		http.Error(w, "run lookup failed", 500)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), "SELECT id,status,algorithm,algorithm_version,k,similarity_threshold,created_at,COALESCE(completed_at,'') FROM clustering_runs "+where+" ORDER BY "+order+", id LIMIT ? OFFSET ?", pattern, pattern, pattern, limit, (page-1)*limit)
+	if err != nil {
+		http.Error(w, "run lookup failed", 500)
+		return
+	}
+	defer rows.Close()
+	body := `<h1>Clustering runs</h1>` + adminNav() + `<form><input name="q" value="` + template.HTMLEscapeString(search) + `" placeholder="Filter"><select name="sort"><option value="created">Created</option><option value="status">Status</option><option value="algorithm">Algorithm</option></select><select name="order">` + adminOrderOptions(r, "created") + `</select><select name="limit"><option>20</option><option>50</option><option>100</option></select><button>Filter</button></form>` + adminPager(r, search, order, limit, page, total) + `<table><tr><th>ID</th><th>Status</th><th>Algorithm</th><th>Version</th><th>k</th><th>Similarity</th><th>Created</th><th>Completed</th></tr>`
+	for rows.Next() {
+		var id, status, algorithm, version, created, completed string
+		var k int
+		var similarity float64
+		if err := rows.Scan(&id, &status, &algorithm, &version, &k, &similarity, &created, &completed); err != nil {
+			continue
+		}
+		body += `<tr><td>` + adminIDLink("/admin/runs/", id) + `</td><td>` + template.HTMLEscapeString(status) + `</td><td>` + template.HTMLEscapeString(algorithm) + `</td><td>` + template.HTMLEscapeString(version) + `</td><td>` + fmt.Sprint(k) + `</td><td>` + fmt.Sprintf("%.3f", similarity) + `</td><td>` + template.HTMLEscapeString(created) + `</td><td>` + template.HTMLEscapeString(completed) + `</td></tr>`
+	}
+	body += `</table>`
+	s.render(w, map[string]any{"Title": "Clustering runs", "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminScans(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	search, limit, page, order := adminPageParams(r, "created", map[string]string{"created": "sr.created_at", "status": "sr.status", "collection": "c.name"})
+	pattern := "%" + search + "%"
+	where := "WHERE sr.status LIKE ? OR c.name LIKE ? OR sr.id LIKE ?"
+	var total int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM scan_runs sr JOIN collections c ON c.id=sr.collection_id "+where, pattern, pattern, pattern).Scan(&total); err != nil {
+		http.Error(w, "scan lookup failed", 500)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), "SELECT sr.id,c.name,sr.status,sr.created_at,COALESCE(sr.started_at,''),COALESCE(sr.completed_at,''), (SELECT COUNT(*) FROM scan_items si WHERE si.scan_run_id=sr.id) FROM scan_runs sr JOIN collections c ON c.id=sr.collection_id "+where+" ORDER BY "+order+", sr.id LIMIT ? OFFSET ?", pattern, pattern, pattern, limit, (page-1)*limit)
+	if err != nil {
+		http.Error(w, "scan lookup failed", 500)
+		return
+	}
+	defer rows.Close()
+	body := `<h1>Scans</h1>` + adminNav() + `<form><input name="q" value="` + template.HTMLEscapeString(search) + `" placeholder="Filter"><select name="sort"><option value="created">Created</option><option value="status">Status</option><option value="collection">Collection</option></select><select name="order">` + adminOrderOptions(r, "created") + `</select><select name="limit"><option>20</option><option>50</option><option>100</option></select><button>Filter</button></form>` + adminPager(r, search, order, limit, page, total) + `<table><tr><th>ID</th><th>Collection</th><th>Status</th><th>Created</th><th>Started</th><th>Completed</th><th>Items</th></tr>`
+	for rows.Next() {
+		var id, name, status, created, started, completed string
+		var items int
+		if err := rows.Scan(&id, &name, &status, &created, &started, &completed, &items); err != nil {
+			continue
+		}
+		body += `<tr><td>` + adminIDLink("/admin/scans/", id) + `</td><td>` + template.HTMLEscapeString(name) + `</td><td>` + template.HTMLEscapeString(status) + `</td><td>` + template.HTMLEscapeString(created) + `</td><td>` + template.HTMLEscapeString(started) + `</td><td>` + template.HTMLEscapeString(completed) + `</td><td>` + fmt.Sprint(items) + `</td></tr>`
+	}
+	body += `</table>`
+	s.render(w, map[string]any{"Title": "Scans", "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminAudit(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	search, limit, page, order := adminPageParams(r, "created", map[string]string{"created": "created_at", "action": "action", "entity": "entity_type"})
+	query := r.URL.Query()
+	actionFilter, entityFilter, accountFilter := query.Get("action_filter"), query.Get("entity_filter"), query.Get("account_filter")
+	pattern := "%" + search + "%"
+	whereParts := []string{"(action LIKE ? OR entity_type LIKE ? OR entity_id LIKE ? OR id LIKE ?)"}
+	whereArgs := []any{pattern, pattern, pattern, pattern}
+	if actionFilter != "" {
+		whereParts = append(whereParts, "action = ?")
+		whereArgs = append(whereArgs, actionFilter)
+	}
+	if entityFilter != "" {
+		whereParts = append(whereParts, "entity_type = ?")
+		whereArgs = append(whereArgs, entityFilter)
+	}
+	if accountFilter != "" {
+		whereParts = append(whereParts, "COALESCE(account_id, '') = ?")
+		whereArgs = append(whereArgs, accountFilter)
+	}
+	where := "WHERE " + strings.Join(whereParts, " AND ")
+	var total int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM audit_events "+where, whereArgs...).Scan(&total); err != nil {
+		http.Error(w, "audit lookup failed", 500)
+		return
+	}
+	rowsArgs := append(append([]any{}, whereArgs...), limit, (page-1)*limit)
+	rows, err := s.db.QueryContext(r.Context(), "SELECT id,action,entity_type,entity_id,COALESCE(account_id,''),created_at FROM audit_events "+where+" ORDER BY "+order+", id LIMIT ? OFFSET ?", rowsArgs...)
+	if err != nil {
+		http.Error(w, "audit lookup failed", 500)
+		return
+	}
+	defer rows.Close()
+	actions, err := adminDistinctStrings(r.Context(), s.db, `SELECT DISTINCT action FROM audit_events ORDER BY action`)
+	if err != nil {
+		http.Error(w, "audit filter lookup failed", 500)
+		return
+	}
+	entities, err := adminDistinctStrings(r.Context(), s.db, `SELECT DISTINCT entity_type FROM audit_events ORDER BY entity_type`)
+	if err != nil {
+		http.Error(w, "audit filter lookup failed", 500)
+		return
+	}
+	accounts, err := adminDistinctStrings(r.Context(), s.db, `SELECT DISTINCT COALESCE(account_id, '') FROM audit_events ORDER BY account_id`)
+	if err != nil {
+		http.Error(w, "audit filter lookup failed", 500)
+		return
+	}
+	body := `<h1>Audit events</h1>` + adminNav() + `<form><input name="q" value="` + template.HTMLEscapeString(search) + `" placeholder="Filter"><label>Action <select name="action_filter"><option value="">All</option>` + adminSelectOptions(actions, actionFilter) + `</select></label><label>Entity <select name="entity_filter"><option value="">All</option>` + adminSelectOptions(entities, entityFilter) + `</select></label><label>Account <select name="account_filter"><option value="">All</option>` + adminSelectOptions(accounts, accountFilter) + `</select></label><select name="sort"><option value="created">Created</option><option value="action">Action</option><option value="entity">Entity</option></select><select name="order">` + adminOrderOptions(r, "created") + `</select><select name="limit"><option>20</option><option>50</option><option>100</option></select><button>Filter</button></form>` + adminPager(r, search, order, limit, page, total) + `<table><tr><th>ID</th><th>Action</th><th>Entity</th><th>Entity ID</th><th>Account</th><th>Created</th></tr>`
+	for rows.Next() {
+		var id, action, entity, entityID, accountID, created string
+		if err := rows.Scan(&id, &action, &entity, &entityID, &accountID, &created); err != nil {
+			continue
+		}
+		body += `<tr><td>` + adminIDLink("/admin/audit/", id) + `</td><td>` + template.HTMLEscapeString(action) + `</td><td>` + template.HTMLEscapeString(entity) + `</td><td>` + template.HTMLEscapeString(entityID) + `</td><td>` + template.HTMLEscapeString(accountID) + `</td><td>` + template.HTMLEscapeString(created) + `</td></tr>`
+	}
+	body += `</table>`
+	s.render(w, map[string]any{"Title": "Audit events", "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminPipelines(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	search, limit, page, order := adminPageParams(r, "created", map[string]string{"created": "created_at", "family": "model_family", "provider": "execution_provider"})
+	pattern := "%" + search + "%"
+	where := "WHERE model_family LIKE ? OR execution_provider LIKE ? OR id LIKE ?"
+	var total int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM pipelines "+where, pattern, pattern, pattern).Scan(&total); err != nil {
+		http.Error(w, "pipeline lookup failed", 500)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), "SELECT id,model_family,model_version,execution_provider,embedding_dimension,created_at FROM pipelines "+where+" ORDER BY "+order+", id LIMIT ? OFFSET ?", pattern, pattern, pattern, limit, (page-1)*limit)
+	if err != nil {
+		http.Error(w, "pipeline lookup failed", 500)
+		return
+	}
+	defer rows.Close()
+	body := `<h1>Pipelines</h1>` + adminNav() + `<form><input name="q" value="` + template.HTMLEscapeString(search) + `" placeholder="Filter"><select name="sort"><option value="created">Created</option><option value="family">Model</option><option value="provider">Provider</option></select><select name="order">` + adminOrderOptions(r, "created") + `</select><select name="limit"><option>20</option><option>50</option><option>100</option></select><button>Filter</button></form>` + adminPager(r, search, order, limit, page, total) + `<table><tr><th>ID</th><th>Model</th><th>Version</th><th>Provider</th><th>Embedding dimension</th><th>Created</th></tr>`
+	for rows.Next() {
+		var id, family, version, provider, created string
+		var dimension int
+		if err := rows.Scan(&id, &family, &version, &provider, &dimension, &created); err != nil {
+			continue
+		}
+		body += `<tr><td>` + adminIDLink("/admin/pipelines/", id) + `</td><td>` + template.HTMLEscapeString(family) + `</td><td>` + template.HTMLEscapeString(version) + `</td><td>` + template.HTMLEscapeString(provider) + `</td><td>` + fmt.Sprint(dimension) + `</td><td>` + template.HTMLEscapeString(created) + `</td></tr>`
+	}
+	csrf := ""
+	if cookie, err := r.Cookie("csrf"); err == nil {
+		csrf = cookie.Value
+	}
+	body += `</table><h2>Add pipeline</h2><form method="post" action="/api/admin/pipelines" data-admin-json><input type="hidden" name="csrf" value="` + template.HTMLEscapeString(csrf) + `"><label>Model family <input name="model_family" required></label><label>Model version <input name="model_version" required></label><label>Provider <input name="provider" required></label><label>Embedding dimension <input type="number" name="dimension" min="1" required></label><button>Create</button></form><script src="/static/admin.js" defer></script>`
+	s.render(w, map[string]any{"Title": "Pipelines", "Account": account, "CSRF": csrf, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminObjectDetail(w http.ResponseWriter, r *http.Request, table, id, title, prefix string) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	columnsRows, err := s.db.QueryContext(r.Context(), "PRAGMA table_info("+table+")")
+	if err != nil {
+		http.Error(w, "object lookup failed", 500)
+		return
+	}
+	var columns []string
+	for columnsRows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primary int
+		var defaultValue sql.NullString
+		if err := columnsRows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primary); err == nil {
+			columns = append(columns, name)
 		}
 	}
-	body.WriteString(`</table><p>Use the account CLI for creation, password reset, disablement, and collection permission changes.</p>`)
-	s.render(w, map[string]any{"Title": "Accounts", "Account": account, "Body": template.HTML(body.String())})
+	columnsRows.Close()
+	if len(columns) == 0 {
+		http.Error(w, "object not found", 404)
+		return
+	}
+	values := make([]any, len(columns))
+	pointers := make([]any, len(columns))
+	for i := range values {
+		pointers[i] = &values[i]
+	}
+	query := "SELECT " + strings.Join(columns, ",") + " FROM " + table + " WHERE id = ?"
+	if err := s.db.QueryRowContext(r.Context(), query, id).Scan(pointers...); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "object not found", 404)
+		} else {
+			http.Error(w, "object lookup failed", 500)
+		}
+		return
+	}
+	body := `<h1>` + template.HTMLEscapeString(title) + `</h1>` + adminNav() + `<table>`
+	for i, name := range columns {
+		value := fmt.Sprint(values[i])
+		if data, ok := values[i].([]byte); ok {
+			value = string(data)
+		}
+		body += `<tr><th>` + template.HTMLEscapeString(name) + `</th><td><pre>` + template.HTMLEscapeString(value) + `</pre></td></tr>`
+	}
+	body += `</table><p><a href="` + template.HTMLEscapeString(prefix) + `">Back to list</a></p>`
+	s.render(w, map[string]any{"Title": title, "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminJob(w http.ResponseWriter, r *http.Request) {
+	s.adminObjectDetail(w, r, "jobs", r.PathValue("jobID"), "Job", "/admin/jobs")
+}
+func (s *Server) adminRun(w http.ResponseWriter, r *http.Request) {
+	s.adminObjectDetail(w, r, "clustering_runs", r.PathValue("runID"), "Clustering run", "/admin/runs")
+}
+func (s *Server) adminScan(w http.ResponseWriter, r *http.Request) {
+	s.adminObjectDetail(w, r, "scan_runs", r.PathValue("scanID"), "Scan", "/admin/scans")
+}
+func (s *Server) adminAuditEvent(w http.ResponseWriter, r *http.Request) {
+	s.adminObjectDetail(w, r, "audit_events", r.PathValue("eventID"), "Audit event", "/admin/audit")
+}
+func (s *Server) adminPipeline(w http.ResponseWriter, r *http.Request) {
+	s.adminObjectDetail(w, r, "pipelines", r.PathValue("pipelineID"), "Pipeline", "/admin/pipelines")
+}
+
+func (s *Server) adminAccounts(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	search, limit, page, order := adminPageParams(r, "username", map[string]string{"username": "username", "role": "role", "created": "created_at"})
+	pattern := "%" + search + "%"
+	where := "WHERE username LIKE ? OR role LIKE ? OR id LIKE ?"
+	var total int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM accounts "+where, pattern, pattern, pattern).Scan(&total); err != nil {
+		http.Error(w, "account lookup failed", 500)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), "SELECT id, username, role, disabled_at IS NOT NULL, created_at FROM accounts "+where+" ORDER BY "+order+", id LIMIT ? OFFSET ?", pattern, pattern, pattern, limit, (page-1)*limit)
+	if err != nil {
+		http.Error(w, "account lookup failed", 500)
+		return
+	}
+	defer rows.Close()
+	csrf := ""
+	if cookie, err := r.Cookie("csrf"); err == nil {
+		csrf = cookie.Value
+	}
+	body := `<h1>Accounts</h1>` + adminNav() + `<form><input name="q" value="` + template.HTMLEscapeString(search) + `" placeholder="Filter"><select name="sort"><option value="username">Username</option><option value="role">Role</option><option value="created">Created</option></select><select name="order">` + adminOrderOptions(r, "username") + `</select><select name="limit"><option>20</option><option>50</option><option>100</option></select><button>Filter</button></form>` + adminPager(r, search, order, limit, page, total) + `<table><tr><th>ID</th><th>Username</th><th>Role</th><th>Disabled</th><th>Created</th></tr>`
+	for rows.Next() {
+		var id, username, role, created string
+		var disabled int
+		if err := rows.Scan(&id, &username, &role, &disabled, &created); err != nil {
+			continue
+		}
+		body += `<tr><td>` + adminIDLink("/admin/accounts/", id) + `</td><td>` + template.HTMLEscapeString(username) + `</td><td>` + template.HTMLEscapeString(role) + `</td><td>` + fmt.Sprint(disabled == 1) + `</td><td>` + template.HTMLEscapeString(created) + `</td></tr>`
+	}
+	body += `</table><h2>Add account</h2><form method="post" action="/api/admin/accounts" data-admin-json><input type="hidden" name="csrf" value="` + template.HTMLEscapeString(csrf) + `"><label>Username <input name="username" required></label><label>Password <input type="password" name="password" required></label><label>Role <select name="role"><option>viewer</option><option>reviewer</option><option>collection-manager</option><option>system-admin</option></select></label><button>Create</button></form><script src="/static/admin.js" defer></script>`
+	s.render(w, map[string]any{"Title": "Accounts", "Account": account, "CSRF": csrf, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminAccount(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireSystemAdmin(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("accountID")
+	var username, role, created, updated string
+	var disabled, mustChange int
+	if err := s.db.QueryRowContext(r.Context(), `SELECT username, role, disabled_at IS NOT NULL, must_change_password, created_at, updated_at FROM accounts WHERE id = ?`, id).Scan(&username, &role, &disabled, &mustChange, &created, &updated); err != nil {
+		http.Error(w, "account not found", 404)
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `SELECT c.id, c.name, COALESCE(cp.can_view, 0), COALESCE(cp.can_modify, 0), COALESCE(cp.can_undo, 0) FROM collections c LEFT JOIN collection_permissions cp ON cp.collection_id=c.id AND cp.account_id=? ORDER BY c.name`, id)
+	if err != nil {
+		http.Error(w, "permission lookup failed", 500)
+		return
+	}
+	defer rows.Close()
+	csrf := ""
+	if cookie, err := r.Cookie("csrf"); err == nil {
+		csrf = cookie.Value
+	}
+	body := `<h1>Account ` + template.HTMLEscapeString(username) + `</h1>` + adminNav() + `<table><tr><th>Field</th><th>Value</th></tr><tr><td>ID</td><td>` + template.HTMLEscapeString(id) + `</td></tr><tr><td>Username</td><td>` + template.HTMLEscapeString(username) + `</td></tr><tr><td>Role</td><td>` + template.HTMLEscapeString(role) + `</td></tr><tr><td>Disabled</td><td>` + fmt.Sprint(disabled == 1) + `</td></tr><tr><td>Must change password</td><td>` + fmt.Sprint(mustChange == 1) + `</td></tr><tr><td>Created</td><td>` + template.HTMLEscapeString(created) + `</td></tr><tr><td>Updated</td><td>` + template.HTMLEscapeString(updated) + `</td></tr></table><h2>Change password</h2><form method="post" action="/api/admin/accounts/` + template.HTMLEscapeString(id) + `/password" data-admin-json><input type="hidden" name="csrf" value="` + template.HTMLEscapeString(csrf) + `"><input type="password" name="password" placeholder="New password" required><label><input type="checkbox" name="must_change"> Require change at next login</label><button>Reset password</button></form><h2>Disable account</h2><form method="post" action="/api/admin/accounts/` + template.HTMLEscapeString(id) + `/disabled" data-admin-json><input type="hidden" name="csrf" value="` + template.HTMLEscapeString(csrf) + `"><input type="hidden" name="disabled" value="` + fmt.Sprint(disabled == 0) + `"><button>` + map[bool]string{true: "Disable", false: "Enable"}[disabled == 0] + `</button></form><h2>Collection permissions</h2><table><tr><th>Collection</th><th>View</th><th>Modify</th><th>Undo</th></tr>`
+	for rows.Next() {
+		var collectionID, name string
+		var view, modify, undo int
+		if err := rows.Scan(&collectionID, &name, &view, &modify, &undo); err != nil {
+			continue
+		}
+		body += `<tr><td>` + template.HTMLEscapeString(name) + `</td><td>` + fmt.Sprint(view == 1) + `</td><td>` + fmt.Sprint(modify == 1) + `</td><td>` + fmt.Sprint(undo == 1) + `</td><td><form method="post" action="/api/admin/permissions" data-admin-json><input type="hidden" name="csrf" value="` + template.HTMLEscapeString(csrf) + `"><input type="hidden" name="account_id" value="` + template.HTMLEscapeString(id) + `"><input type="hidden" name="collection_id" value="` + template.HTMLEscapeString(collectionID) + `"><label>View <input type="checkbox" name="view"` + map[bool]string{true: " checked", false: ""}[view == 1] + `></label><label>Modify <input type="checkbox" name="modify"` + map[bool]string{true: " checked", false: ""}[modify == 1] + `></label><label>Undo <input type="checkbox" name="undo"` + map[bool]string{true: " checked", false: ""}[undo == 1] + `></label><button>Save</button></form></td></tr>`
+	}
+	body += `</table><script src="/static/admin.js" defer></script>`
+	s.render(w, map[string]any{"Title": "Account", "Account": account, "CSRF": csrf, "Body": template.HTML(body)})
 }
 
 func (s *Server) adminCollections(w http.ResponseWriter, r *http.Request) {
@@ -2143,8 +2701,12 @@ func (s *Server) adminCollections(w http.ResponseWriter, r *http.Request) {
 			body.WriteString(`<tr><td>` + template.HTMLEscapeString(name) + `</td><td>` + template.HTMLEscapeString(root) + `</td><td>` + fmt.Sprint(enabled == 1) + `</td></tr>`)
 		}
 	}
-	body.WriteString(`</table><p>Use the collection CLI for creation and lifecycle changes.</p>`)
-	s.render(w, map[string]any{"Title": "Collections", "Account": account, "Body": template.HTML(body.String())})
+	csrf := ""
+	if cookie, err := r.Cookie("csrf"); err == nil {
+		csrf = cookie.Value
+	}
+	body.WriteString(`</table><h2>Add collection</h2><form method="post" action="/api/admin/collections" data-admin-json><input type="hidden" name="csrf" value="` + template.HTMLEscapeString(csrf) + `"><label>Name <input name="name" required></label><label>Root path <input name="root" required></label><button>Create</button></form><script src="/static/admin.js" defer></script>`)
+	s.render(w, map[string]any{"Title": "Collections", "Account": account, "CSRF": csrf, "Body": template.HTML(body.String())})
 }
 
 func (s *Server) adminActor(w http.ResponseWriter, r *http.Request, managerOK bool) (auth.Account, bool) {
@@ -2188,6 +2750,58 @@ func (s *Server) adminCreateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": account.ID, "username": account.Username, "role": account.Role})
+}
+
+func (s *Server) adminCreateCollection(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	var input struct {
+		Name string `json:"name"`
+		Root string `json:"root"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil || strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Root) == "" {
+		http.Error(w, "name and root are required", http.StatusBadRequest)
+		return
+	}
+	collectionID, err := media.NewStore(s.db).CreateCollection(r.Context(), strings.TrimSpace(input.Name), strings.TrimSpace(input.Root))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: actor.ID, Action: "collection-create", EntityType: "collection", EntityID: collectionID, New: map[string]any{"name": input.Name, "root": input.Root}}); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": collectionID, "name": input.Name})
+}
+
+func (s *Server) adminCreatePipeline(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.adminActor(w, r, false)
+	if !ok {
+		return
+	}
+	var input struct {
+		ModelFamily  string `json:"model_family"`
+		ModelVersion string `json:"model_version"`
+		Provider     string `json:"provider"`
+		Dimension    int    `json:"dimension"`
+	}
+	if json.NewDecoder(r.Body).Decode(&input) != nil || input.ModelFamily == "" || input.ModelVersion == "" || input.Provider == "" || input.Dimension <= 0 {
+		http.Error(w, "model family, version, provider, and positive dimension are required", 400)
+		return
+	}
+	pipelineID, err := analysis.NewStore(s.db).RegisterPipeline(r.Context(), analysis.Pipeline{ModelFamily: input.ModelFamily, ModelVersion: input.ModelVersion, ModelChecksums: map[string]string{}, DetectorConfig: map[string]any{}, PreprocessingConfig: map[string]any{}, EmbeddingDimension: input.Dimension, EmbeddingDType: "float32", Normalization: "l2", ExecutionProvider: input.Provider, DependencyVersions: map[string]string{}})
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: actor.ID, Action: "pipeline-create", EntityType: "pipeline", EntityID: pipelineID}); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": pipelineID})
 }
 
 func (s *Server) adminResetPassword(w http.ResponseWriter, r *http.Request) {

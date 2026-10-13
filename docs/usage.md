@@ -198,10 +198,35 @@ Clustering can be re run by the worker, or explicitly for an investigation:
 
 ```sh
 "$APP" --config "$CONFIG" cluster run \
-  --collection-id "$COLLECTION_ID" --scope unresolved-only
+  --collection-id "$COLLECTION_ID" --scope all
+"$APP" --config "$CONFIG" cluster run list
+"$APP" --config "$CONFIG" cluster run get --run-id RUN_ID
+"$APP" --config "$CONFIG" cluster run status --run-id RUN_ID
 "$APP" --config "$CONFIG" cluster list
 "$APP" --config "$CONFIG" cluster get --cluster-id CLUSTER_ID
 ```
+
+`cluster run` returns a clustering-run ID. Use the `cluster run` commands to
+inspect that run; it is different from the cluster IDs returned by
+`cluster list --run-id RUN_ID`.
+
+## 7. Administration dashboard
+
+System administrators can open the web dashboard at `/admin`. It provides
+paginated, filterable, and sortable views of jobs, clustering runs, scans,
+audit events, pipelines, accounts, and collections. Selecting an item opens
+a detail table containing the stored fields for that object.
+
+The account detail page supports password resets, account disablement, and
+collection permission changes. Accounts, collections, and pipeline records
+can be added from their respective pages. Jobs, scans, and clustering runs
+are operational records and are created by their normal CLI or worker
+commands; the dashboard links to their results rather than allowing invalid
+rows to be entered manually.
+
+The dashboard also includes `/admin/status` and `/admin/setup-check`, which
+show the status and setup-check snapshots captured when the web service
+starts.
 
 Create a named person before confirming assignments:
 

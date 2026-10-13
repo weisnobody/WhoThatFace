@@ -171,7 +171,7 @@ func commandIsReadOnly(command string, args []string) bool {
 	case "face":
 		return subcommand == "get" || subcommand == "list"
 	case "cluster":
-		return subcommand == "get" || subcommand == "list"
+		return subcommand == "get" || subcommand == "list" || (subcommand == "run" && len(args) > 1 && (args[1] == "get" || args[1] == "list" || args[1] == "status"))
 	case "audit":
 		return subcommand == "list"
 	case "search":
@@ -805,11 +805,17 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		if *personID == "" {
 			return fmt.Errorf("job reference-reprocess requires --person-id")
 		}
-		job, err := store.Enqueue(ctx, "reference-reprocess", 1, map[string]string{"person_id": *personID})
+		job, queued, err := store.EnqueueReferenceReprocess(ctx, *personID)
 		if err != nil {
 			return err
 		}
-		return writeCommandResult(stdout, jsonOutput, "job reference-reprocess", map[string]any{"id": job.ID, "kind": job.Kind, "person_id": *personID, "status": job.Status})
+		result := map[string]any{"person_id": *personID, "queued": queued}
+		if queued {
+			result["id"], result["kind"], result["status"] = job.ID, job.Kind, job.Status
+		} else {
+			result["status"] = "skipped-no-approved-references"
+		}
+		return writeCommandResult(stdout, jsonOutput, "job reference-reprocess", result)
 	}
 	if args[0] == "reference-discovery" {
 		flags := flag.NewFlagSet("job reference-discovery", flag.ContinueOnError)
@@ -1510,11 +1516,150 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 	}
 }
 
+type clusteringRunInfo struct {
+	ID                   string  `json:"id"`
+	Algorithm            string  `json:"algorithm"`
+	AlgorithmVersion     string  `json:"algorithm_version"`
+	K                    int     `json:"k"`
+	SimilarityThreshold  float64 `json:"similarity_threshold"`
+	NeighborSearchMethod string  `json:"neighbor_search_method"`
+	MutualEdgePolicy     string  `json:"mutual_edge_policy"`
+	CandidateScope       string  `json:"candidate_scope"`
+	InputFaces           int     `json:"input_faces"`
+	Status               string  `json:"status"`
+	StartedAt            string  `json:"started_at,omitempty"`
+	CompletedAt          string  `json:"completed_at,omitempty"`
+	AcceptedAt           string  `json:"accepted_at,omitempty"`
+	SupersededBy         string  `json:"superseded_by,omitempty"`
+	CreatedAt            string  `json:"created_at"`
+	Clusters             int     `json:"clusters"`
+	ClusterFaces         int     `json:"cluster_faces"`
+	MixedClusters        int     `json:"mixed_clusters"`
+}
+
+func loadClusteringRun(ctx context.Context, database *sql.DB, runID string) (clusteringRunInfo, error) {
+	var run clusteringRunInfo
+	var inputJSON, startedAt, completedAt, acceptedAt, supersededBy string
+	var inputFaces int
+	err := database.QueryRowContext(ctx, `
+		SELECT r.id, r.algorithm, r.algorithm_version, r.k, r.similarity_threshold,
+		       r.neighbor_search_method, r.mutual_edge_policy, r.candidate_scope,
+		       r.input_face_set_json, r.status, COALESCE(r.started_at, ''),
+		       COALESCE(r.completed_at, ''), COALESCE(r.accepted_at, ''),
+		       COALESCE(r.superseded_by, ''), r.created_at,
+		       (SELECT COUNT(*) FROM clusters c WHERE c.clustering_run_id = r.id),
+		       (SELECT COUNT(*) FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id WHERE c.clustering_run_id = r.id),
+		       (SELECT COUNT(*) FROM clusters c WHERE c.clustering_run_id = r.id AND c.is_mixed = 1)
+		FROM clustering_runs r WHERE r.id = ?`, runID).Scan(
+		&run.ID, &run.Algorithm, &run.AlgorithmVersion, &run.K, &run.SimilarityThreshold,
+		&run.NeighborSearchMethod, &run.MutualEdgePolicy, &run.CandidateScope,
+		&inputJSON, &run.Status, &startedAt, &completedAt, &acceptedAt, &supersededBy,
+		&run.CreatedAt, &run.Clusters, &run.ClusterFaces, &run.MixedClusters)
+	if err != nil {
+		return clusteringRunInfo{}, err
+	}
+	var faceIDs []string
+	if err := json.Unmarshal([]byte(inputJSON), &faceIDs); err == nil {
+		inputFaces = len(faceIDs)
+	}
+	run.InputFaces = inputFaces
+	run.StartedAt = startedAt
+	run.CompletedAt = completedAt
+	run.AcceptedAt = acceptedAt
+	run.SupersededBy = supersededBy
+	return run, nil
+}
+
+func printClusteringRun(stdout io.Writer, run clusteringRunInfo) {
+	fmt.Fprintf(stdout, "id\tstatus\talgorithm\tversion\tk\tsimilarity\tinput_faces\tclusters\tmixed_clusters\tcreated_at\tcompleted_at\n")
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%.3f\t%d\t%d\t%d\t%s\t%s\n", run.ID, run.Status, run.Algorithm, run.AlgorithmVersion, run.K, run.SimilarityThreshold, run.InputFaces, run.Clusters, run.MixedClusters, run.CreatedAt, run.CompletedAt)
+}
+
+func clusterRunCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("cluster run requires get, list, status, or execution flags")
+	}
+	subcommand := args[0]
+	if subcommand != "get" && subcommand != "list" && subcommand != "status" {
+		return fmt.Errorf("unknown cluster run command %q", subcommand)
+	}
+	flags := flag.NewFlagSet("cluster run "+subcommand, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	runID := flags.String("run-id", "", "clustering run ID")
+	if subcommand == "list" {
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination("SELECT id FROM clustering_runs ORDER BY created_at DESC, id DESC", nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var result []clusteringRunInfo
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			run, err := loadClusteringRun(ctx, application.DB, id)
+			if err != nil {
+				return err
+			}
+			result = append(result, run)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("cluster run list", result))
+		}
+		fmt.Fprintln(stdout, "id\tstatus\talgorithm\tversion\tk\tsimilarity\tinput_faces\tclusters\tmixed_clusters\tcreated_at\tcompleted_at")
+		for _, run := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%.3f\t%d\t%d\t%d\t%s\t%s\n", run.ID, run.Status, run.Algorithm, run.AlgorithmVersion, run.K, run.SimilarityThreshold, run.InputFaces, run.Clusters, run.MixedClusters, run.CreatedAt, run.CompletedAt)
+		}
+		return nil
+	}
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return fmt.Errorf("cluster run %s requires --run-id", subcommand)
+	}
+	run, err := loadClusteringRun(ctx, application.DB, *runID)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("cluster run "+subcommand, run))
+	}
+	if subcommand == "get" {
+		fmt.Fprintf(stdout, "Run:                         %s\nAlgorithm:                   %s\nAlgorithm version:           %s\nk:                           %d\nSimilarity threshold:        %.3f\nNeighbor search method:      %s\nMutual edge policy:           %s\nCandidate scope:              %s\nInput faces:                  %d\nStatus:                      %s\nClusters:                    %d\nCluster faces:               %d\nMixed clusters:              %d\nCreated:                     %s\nStarted:                     %s\nCompleted:                   %s\nAccepted:                    %s\nSuperseded by:               %s\n", run.ID, run.Algorithm, run.AlgorithmVersion, run.K, run.SimilarityThreshold, run.NeighborSearchMethod, run.MutualEdgePolicy, run.CandidateScope, run.InputFaces, run.Status, run.Clusters, run.ClusterFaces, run.MixedClusters, run.CreatedAt, run.StartedAt, run.CompletedAt, run.AcceptedAt, run.SupersededBy)
+		return nil
+	}
+	percentage := 0.0
+	if run.InputFaces > 0 {
+		percentage = float64(run.ClusterFaces) * 100 / float64(run.InputFaces)
+	}
+	if run.Status == "completed" || run.Status == "active" || run.Status == "superseded" {
+		percentage = 100
+	}
+	fmt.Fprintf(stdout, "Run:                         %s\nStatus:                      %s\nInput faces:                 %d\nClustered faces:             %d\nClusters:                    %d\nMixed clusters:              %d\nPercentage complete:         %.1f%%\nTime started:                %s\nTime completed:              %s\n", run.ID, run.Status, run.InputFaces, run.ClusterFaces, run.Clusters, run.MixedClusters, percentage, run.StartedAt, run.CompletedAt)
+	return nil
+}
+
 func clusterCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return fmt.Errorf("cluster requires run, get, list, or review")
 	}
 	if args[0] == "run" {
+		if len(args) > 1 && (args[1] == "get" || args[1] == "list" || args[1] == "status") {
+			return clusterRunCommand(ctx, application, args[1:], jsonOutput, stdout, stderr)
+		}
 		flags := flag.NewFlagSet("cluster run", flag.ContinueOnError)
 		flags.SetOutput(stderr)
 		collectionID := flags.String("collection-id", "", "collection ID used for the per-collection search method")
@@ -1831,7 +1976,20 @@ func serveCommand(ctx context.Context, application *app.App, args []string, stdo
 	if _, err := auth.NewStore(application.DB).EnsureBootstrapAdmin(ctx); err != nil {
 		return err
 	}
-	server, err := web.NewServerWithPython(auth.NewStore(application.DB), application.DB, application.Config.PythonPath)
+	status, err := application.Status(ctx)
+	if err != nil {
+		return err
+	}
+	setupReport := setup.Validate(ctx, application.Config.PythonPath, "", application.Config.ModelRoot)
+	statusJSON, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return err
+	}
+	setupJSON, err := json.MarshalIndent(setupReport, "", "  ")
+	if err != nil {
+		return err
+	}
+	server, err := web.NewServerWithDiagnostics(auth.NewStore(application.DB), application.DB, application.Config.PythonPath, statusJSON, setupJSON)
 	if err != nil {
 		return err
 	}

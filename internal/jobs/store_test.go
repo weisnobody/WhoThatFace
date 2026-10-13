@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/pjg/face_me_bro/internal/db"
 )
@@ -37,6 +38,41 @@ func TestStoreEnqueueClaimAndComplete(t *testing.T) {
 	}
 	if finished.Status != Completed || finished.CompletedAt == nil {
 		t.Fatalf("finished = %+v", finished)
+	}
+}
+
+func TestReferenceReprocessRequiresApprovedReferenceAndHonorsDelay(t *testing.T) {
+	database, err := db.Open(context.Background(), t.TempDir()+"/reference-reprocess.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewStore(database)
+	if _, queued, err := store.EnqueueReferenceReprocess(context.Background(), "person-without-references"); err != nil {
+		t.Fatal(err)
+	} else if queued {
+		t.Fatal("reference reprocess was queued without an approved reference")
+	}
+	job, err := store.enqueueAt(context.Background(), "reference-reprocess", 1, map[string]string{"person_id": "person"}, time.Now().UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.Claim(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed != nil {
+		t.Fatalf("delayed job was claimed early: %s", claimed.ID)
+	}
+	if job.AvailableAt == nil || !job.AvailableAt.After(time.Now().UTC()) {
+		t.Fatalf("available_at = %v, want future time", job.AvailableAt)
+	}
+	loaded, err := store.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AvailableAt == nil || !loaded.AvailableAt.After(time.Now().UTC()) {
+		t.Fatalf("available_at = %v, want future time", loaded.AvailableAt)
 	}
 }
 

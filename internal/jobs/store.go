@@ -35,6 +35,7 @@ type Job struct {
 	Error       string          `json:"error,omitempty"`
 	Summary     json.RawMessage `json:"summary,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
+	AvailableAt *time.Time      `json:"available_at,omitempty"`
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
 	Attempts    int             `json:"attempts"`
@@ -57,6 +58,10 @@ type Store struct{ db *sql.DB }
 func NewStore(database *sql.DB) Store { return Store{db: database} }
 
 func (s Store) Enqueue(ctx context.Context, kind string, priority int, payload any) (Job, error) {
+	return s.enqueueAt(ctx, kind, priority, payload, time.Now().UTC())
+}
+
+func (s Store) enqueueAt(ctx context.Context, kind string, priority int, payload any, availableAt time.Time) (Job, error) {
 	jobID, err := id.NewUUIDv7()
 	if err != nil {
 		return Job{}, err
@@ -67,12 +72,42 @@ func (s Store) Enqueue(ctx context.Context, kind string, priority int, payload a
 	}
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO jobs (id, kind, priority, status, payload_json, attempts, max_attempts, created_at)
-		VALUES (?, ?, ?, ?, ?, 0, 3, ?)`, jobID, kind, priority, Pending, payloadJSON, now.Format(time.RFC3339Nano))
+		INSERT INTO jobs (id, kind, priority, status, payload_json, attempts, max_attempts, created_at, available_at)
+		VALUES (?, ?, ?, ?, ?, 0, 3, ?, ?)`, jobID, kind, priority, Pending, payloadJSON, now.Format(time.RFC3339Nano), availableAt.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return Job{}, fmt.Errorf("enqueue job: %w", err)
 	}
 	return s.Get(ctx, jobID)
+}
+
+// EnqueueReferenceReprocess queues one delayed reprocess for a person. A
+// pending job for the same person absorbs subsequent reference changes during
+// the debounce window. No job is created until the person has at least one
+// approved reference face, which is the minimum needed for matching.
+func (s Store) EnqueueReferenceReprocess(ctx context.Context, personID string) (Job, bool, error) {
+	var references int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM current_face_references WHERE person_id = ? AND reference = 1`, personID).Scan(&references); err != nil {
+		return Job{}, false, err
+	}
+	if references == 0 {
+		return Job{}, false, nil
+	}
+	var existingID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id FROM jobs
+		WHERE kind = 'reference-reprocess'
+		  AND status = 'pending'
+		  AND json_extract(payload_json, '$.person_id') = ?
+		ORDER BY created_at DESC, id DESC LIMIT 1`, personID).Scan(&existingID)
+	if err == nil {
+		job, getErr := s.Get(ctx, existingID)
+		return job, true, getErr
+	}
+	if err != sql.ErrNoRows {
+		return Job{}, false, err
+	}
+	job, err := s.enqueueAt(ctx, "reference-reprocess", 1, map[string]string{"person_id": personID}, time.Now().UTC().Add(time.Minute))
+	return job, true, err
 }
 
 func (s Store) Get(ctx context.Context, jobID string) (Job, error) {
@@ -99,6 +134,14 @@ func (s Store) Get(ctx context.Context, jobID string) (Job, error) {
 	}
 	if job.CreatedAt, err = time.Parse(time.RFC3339Nano, created); err != nil {
 		return Job{}, fmt.Errorf("parse job created_at: %w", err)
+	}
+	var available string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(available_at, '') FROM jobs WHERE id = ?`, jobID).Scan(&available); err == nil && available != "" {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, available)
+		if parseErr != nil {
+			return Job{}, fmt.Errorf("parse job available_at: %w", parseErr)
+		}
+		job.AvailableAt = &parsed
 	}
 	job.StartedAt, err = parseNullableTime(started)
 	if err != nil {
@@ -243,9 +286,9 @@ func (s Store) Claim(ctx context.Context) (*Job, error) {
 	var jobID string
 	err = tx.QueryRowContext(ctx, `
 		SELECT id FROM jobs
-		WHERE status = ?
+		WHERE status = ? AND (available_at IS NULL OR available_at <= ?)
 		ORDER BY priority ASC, created_at ASC, id ASC
-		LIMIT 1`, Pending).Scan(&jobID)
+		LIMIT 1`, Pending, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&jobID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

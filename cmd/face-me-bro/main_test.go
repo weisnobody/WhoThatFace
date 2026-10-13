@@ -337,6 +337,7 @@ func TestReadOnlyListCommands(t *testing.T) {
 		{"people", "list"},
 		{"face", "list"},
 		{"cluster", "list"},
+		{"cluster", "run", "list"},
 		{"audit", "list"},
 	}
 	for _, command := range commands {
