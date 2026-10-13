@@ -552,16 +552,17 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	track := r.URL.Query().Get("track")
+	includeDontTrack := r.URL.Query().Get("include_dont_track") == "true"
+	includePossibles := r.URL.Query().Get("include_possibles") != "false"
 	filtered := people[:0]
 	for _, person := range people {
 		if q != "" && !strings.Contains(strings.ToLower(person.Name), q) {
 			continue
 		}
-		if track == "tracked" && person.DontTrack != 0 {
+		if !includeDontTrack && person.DontTrack != 0 {
 			continue
 		}
-		if track == "dont-track" && person.DontTrack == 0 {
+		if !includePossibles && person.Possibles > 0 {
 			continue
 		}
 		filtered = append(filtered, person)
@@ -643,20 +644,20 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		return "/review/people?" + values.Encode()
 	}
 	var body strings.Builder
-	body.WriteString(`<h1>People (` + fmt.Sprint(len(pagePeople)) + `/` + fmt.Sprint(total) + `)</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><form id="people-controls" method="get"><input name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `" placeholder="Filter name"><select name="track"><option value="">All</option><option value="tracked"` + selectedAttr("tracked", track) + `>Tracked</option><option value="dont-track"` + selectedAttr("dont-track", track) + `>Don't track</option></select><label><input type="checkbox" name="include_no_faces" value="true"` + checkedAttr(includeNoFaces) + `> Include No Faces</label><label>Sort <select name="sort">`)
+	body.WriteString(`<h1>People (` + fmt.Sprint(len(pagePeople)) + `/` + fmt.Sprint(total) + `)</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><form id="people-controls" method="get"><strong>Filter</strong> <input name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `" placeholder="Filter name"><strong>Include:</strong> <label><input type="checkbox" name="include_possibles" value="true"` + checkedAttr(includePossibles) + `> Possibles</label><label><input type="checkbox" name="include_no_faces" value="true"` + checkedAttr(includeNoFaces) + `> No Faces</label><label><input type="checkbox" name="include_dont_track" value="true"` + checkedAttr(includeDontTrack) + `> Don't Track</label><label><strong>Sort</strong> <select name="sort">`)
 	for _, option := range []struct{ Value, Label string }{{"name", "Name"}, {"faces", "Faces"}, {"user", "User"}, {"system", "System"}, {"provisional", "Provisional"}} {
 		body.WriteString(`<option value="` + option.Value + `"` + selectedAttr(option.Value, sortKey) + `>` + option.Label + `</option>`)
 	}
-	body.WriteString(`</select></label><label>Direction <select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select></label><label>Per page <select name="per_page" onchange="this.form.submit()">`)
+	body.WriteString(`</select></label><label><strong>Direction</strong> <select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select></label><label><strong>Per Page</strong> <select name="per_page" onchange="this.form.submit()">`)
 	for _, size := range []int{10, 20, 25, 50, 100} {
 		body.WriteString(`<option value="` + fmt.Sprint(size) + `"` + selectedAttr(fmt.Sprint(size), fmt.Sprint(perPage)) + `>` + fmt.Sprint(size) + `</option>`)
 	}
 	body.WriteString(`</select></label><button>Filter</button></form>`)
 	renderPager := func() {
-		body.WriteString(`<nav class="pager people-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="track" value="` + template.HTMLEscapeString(track) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_no_faces")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
+		body.WriteString(`<nav class="pager people-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="include_possibles" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_possibles")) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_no_faces")) + `"><input type="hidden" name="include_dont_track" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_dont_track")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
 	}
 	renderPager()
-	body.WriteString(`<table class="people-table"><tr><th>Name</th><th>Faces</th><th>User</th><th>System</th><th>Provisional</th><th>References</th><th>Recommended References</th><th>Don't track</th><th>Possibles</th></tr>`)
+	body.WriteString(`<table class="people-table"><tr><th>Name</th><th>Faces</th><th>User</th><th>System</th><th>Provisional</th><th>References</th><th>Ref Recs</th><th>Don't track</th><th>Possibles</th></tr>`)
 	for _, person := range pagePeople {
 		dontTrack := ""
 		if person.DontTrack != 0 {
