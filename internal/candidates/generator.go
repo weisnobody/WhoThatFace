@@ -15,6 +15,13 @@ type Request struct {
 	ScopeID string
 }
 
+type JobPayload struct {
+	Scope               string `json:"scope"`
+	ScopeID             string `json:"scope_id,omitempty"`
+	ReferenceSetVersion string `json:"reference_set_version"`
+	Policy              Config `json:"policy"`
+}
+
 type targetFace struct {
 	ID        string
 	Embedding []float32
@@ -38,7 +45,7 @@ func (g Generator) Run(ctx context.Context, request Request) (Run, error) {
 	if request.Scope != "person" && request.Scope != "collection" && request.Scope != "all" {
 		return Run{}, fmt.Errorf("invalid possible-candidate scope %q", request.Scope)
 	}
-	version, err := g.referenceSetVersion(ctx)
+	version, err := ReferenceSetVersion(ctx, g.db)
 	if err != nil {
 		return Run{}, err
 	}
@@ -47,6 +54,10 @@ func (g Generator) Run(ctx context.Context, request Request) (Run, error) {
 		return Run{}, err
 	}
 	if err := g.store.StartRun(ctx, run.ID); err != nil {
+		return Run{}, err
+	}
+	if err := g.store.MarkRowsStaleForProvenance(ctx, version, g.pipelineID, g.config); err != nil {
+		_ = g.store.FinishRun(context.Background(), run.ID, "failed", 0, 0, 0, err.Error())
 		return Run{}, err
 	}
 	targets, err := g.loadTargets(ctx, request)
@@ -199,10 +210,10 @@ func (g Generator) loadReferences(ctx context.Context) (map[string][][]float32, 
 	return result, rows.Err()
 }
 
-func (g Generator) referenceSetVersion(ctx context.Context) (string, error) {
+func ReferenceSetVersion(ctx context.Context, database *sql.DB) (string, error) {
 	var count int
 	var updated string
-	if err := g.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM current_face_references WHERE reference = 1`).Scan(&count, &updated); err != nil {
+	if err := database.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM current_face_references WHERE reference = 1`).Scan(&count, &updated); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%d:%s", count, updated), nil

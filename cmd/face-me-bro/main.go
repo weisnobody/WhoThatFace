@@ -21,6 +21,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/app"
 	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
+	"github.com/pjg/face_me_bro/internal/candidates"
 	"github.com/pjg/face_me_bro/internal/clustering"
 	"github.com/pjg/face_me_bro/internal/config"
 	"github.com/pjg/face_me_bro/internal/db"
@@ -169,9 +170,11 @@ func commandIsReadOnly(command string, args []string) bool {
 	case "people":
 		return subcommand == "list" || subcommand == "get"
 	case "face":
-		return subcommand == "get" || subcommand == "list"
+		return subcommand == "get" || subcommand == "list" || subcommand == "candidates"
 	case "cluster":
 		return subcommand == "get" || subcommand == "list" || (subcommand == "run" && len(args) > 1 && (args[1] == "get" || args[1] == "list" || args[1] == "status"))
+	case "candidate":
+		return true
 	case "audit":
 		return subcommand == "list"
 	case "search":
@@ -225,6 +228,8 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return faceCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "cluster":
 		return clusterCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "candidate":
+		return candidateCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "search":
 		return searchCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "audit":
@@ -250,7 +255,7 @@ var commandHelp = map[string]helpTopic{
 	"status":     {Usage: "face-me-bro [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
 	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
 	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
-	"job":        {Usage: "face-me-bro job <list|get|status|reference-reprocess|reference-discovery|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; controls use JOB_ID"},
+	"job":        {Usage: "face-me-bro job <list|get|status|reference-reprocess|reference-discovery|possible-candidates|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; possible-candidates: --person-id ID or --collection-id ID or --all; controls use JOB_ID"},
 	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
 	"setup":      {Usage: "face-me-bro setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
 	"serve":      {Usage: "face-me-bro serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
@@ -258,8 +263,9 @@ var commandHelp = map[string]helpTopic{
 	"config":     {Usage: "face-me-bro config <show|set-search> [options]", Description: "Show or change global application configuration.", Options: "set-search: --method exact|ann"},
 	"worker":     {Usage: "face-me-bro worker", Description: "Run the background worker loop for queued analysis and recognition jobs."},
 	"people":     {Usage: "face-me-bro people <get|list|create|representative> [options]", Description: "Inspect, list, or create people records and representative images.", Options: "get: --person-id; list: --limit N --page N; create: --name NAME [--provisional]; representative: --person-id ID [--face-id ID|--clear] --yes"},
-	"face":       {Usage: "face-me-bro face <get|list|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, dispositions, and reference status; list faces with their current state.", Options: "get: --face-id; list: --limit N --page N; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
+	"face":       {Usage: "face-me-bro face <get|list|candidates|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, possible candidates, dispositions, and reference status.", Options: "get: --face-id; list: --limit N --page N; candidates: --face-id ID; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
 	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
+	"candidate":  {Usage: "face-me-bro candidate run <get|list|status> [options]", Description: "Inspect possible face-candidate discovery runs.", Options: "list: --limit N --page N; get/status: --run-id ID"},
 	"search":     {Usage: "face-me-bro search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
 	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
 	"backup":     {Usage: "face-me-bro backup create", Description: "Create a database backup in the configured backup directory."},
@@ -780,7 +786,7 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 
 func jobCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, pause, resume, cancel, or retry")
+		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, possible-candidates, pause, resume, cancel, or retry")
 	}
 	store := jobs.NewStore(application.DB)
 	if args[0] == "throttle" {
@@ -846,6 +852,60 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 			return err
 		}
 		return writeCommandResult(stdout, jsonOutput, "job reference-discovery", map[string]any{"id": job.ID, "kind": job.Kind, "person_id": *personID, "status": job.Status, "since": *since, "since_last": *sinceLast})
+	}
+	if args[0] == "possible-candidates" {
+		flags := flag.NewFlagSet("job possible-candidates", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "limit targets to a provisional person")
+		collectionID := flags.String("collection-id", "", "limit targets to a collection")
+		all := flags.Bool("all", false, "evaluate all accessible targets")
+		maxProvisional := flags.Int("max-provisional-faces", application.Config.PossibleCandidates.MaxProvisionalFaces, "maximum provisional faces per target person")
+		maxCandidates := flags.Int("max-candidates", application.Config.PossibleCandidates.MaxCandidates, "maximum candidates retained per face")
+		minSimilarity := flags.Float64("min-similarity", float64(application.Config.PossibleCandidates.MinSimilarity), "minimum similarity floor")
+		includeAssignedSystem := flags.Bool("include-assigned-system", application.Config.PossibleCandidates.IncludeAssignedSystem, "include assigned-system faces")
+		includeDontTrack := flags.Bool("include-dont-track", application.Config.PossibleCandidates.IncludeDontTrack, "include don't-track faces")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		scope, scopeID := "", ""
+		if *personID != "" {
+			scope, scopeID = "person", *personID
+		}
+		if *collectionID != "" {
+			if scope != "" {
+				return fmt.Errorf("job possible-candidates accepts only one scope")
+			}
+			scope, scopeID = "collection", *collectionID
+		}
+		if *all {
+			if scope != "" {
+				return fmt.Errorf("job possible-candidates accepts only one scope")
+			}
+			scope = "all"
+		}
+		if scope == "" {
+			return fmt.Errorf("job possible-candidates requires --person-id, --collection-id, or --all")
+		}
+		if *maxProvisional < 1 || *maxCandidates < 1 || *minSimilarity < 0 || *minSimilarity > 1 {
+			return fmt.Errorf("job possible-candidates has invalid candidate settings")
+		}
+		version, err := candidates.ReferenceSetVersion(ctx, application.DB)
+		if err != nil {
+			return err
+		}
+		payload := candidates.JobPayload{Scope: scope, ScopeID: scopeID, ReferenceSetVersion: version, Policy: candidates.Config{
+			MaxProvisionalFaces: *maxProvisional, MaxCandidates: *maxCandidates,
+			MinSimilarity: float32(*minSimilarity), IncludeAssignedSystem: *includeAssignedSystem, IncludeDontTrack: *includeDontTrack,
+		}}
+		job, queued, err := store.EnqueuePossibleCandidates(ctx, payload)
+		if err != nil {
+			return err
+		}
+		result := map[string]any{"scope": scope, "scope_id": scopeID, "queued": queued}
+		if queued {
+			result["id"], result["kind"], result["status"] = job.ID, job.Kind, job.Status
+		}
+		return writeCommandResult(stdout, jsonOutput, "job possible-candidates", result)
 	}
 	if args[0] == "status" {
 		flags := flag.NewFlagSet("job status", flag.ContinueOnError)
@@ -923,7 +983,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		return nil
 	}
 	if len(args) == 0 || args[0] != "list" {
-		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, pause, resume, cancel, or retry")
+		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, possible-candidates, pause, resume, cancel, or retry")
 	}
 	flags := flag.NewFlagSet("job list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -1397,7 +1457,7 @@ func configCommand(application *app.App, args []string, jsonOutput bool, stdout,
 
 func faceCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("face requires get, assign, disposition, or reference")
+		return fmt.Errorf("face requires get, list, candidates, assign, disposition, or reference")
 	}
 	flags := flag.NewFlagSet("face "+args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -1410,6 +1470,56 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 	limit, page := paginationFlags(flags)
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
+	}
+	if args[0] == "candidates" {
+		if *faceID == "" {
+			return fmt.Errorf("face candidates requires --face-id")
+		}
+		rows, err := application.DB.QueryContext(ctx, `
+			SELECT pc.id, pc.run_id, pc.person_id,
+			       COALESCE(NULLIF(p.name, ''), substr(p.id, -8), p.id),
+			       pc.rank, pc.similarity, pc.margin, pc.support_count,
+			       pc.quality, pc.detection_confidence, pc.evidence,
+			       pc.retention_reason, pc.is_current, pc.created_at
+			FROM possible_face_candidates pc
+			JOIN people p ON p.id = pc.person_id
+			WHERE pc.face_id = ? AND pc.is_current = 1
+			ORDER BY pc.rank`, *faceID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type candidate struct {
+			ID, RunID, PersonID, PersonName string
+			Rank                            int
+			Similarity, Margin              float64
+			Support                         int
+			Quality, Detection              float64
+			Evidence, RetentionReason       string
+			Current                         bool
+			CreatedAt                       string
+		}
+		var result []candidate
+		for rows.Next() {
+			var item candidate
+			var current int
+			if err := rows.Scan(&item.ID, &item.RunID, &item.PersonID, &item.PersonName, &item.Rank, &item.Similarity, &item.Margin, &item.Support, &item.Quality, &item.Detection, &item.Evidence, &item.RetentionReason, &current, &item.CreatedAt); err != nil {
+				return err
+			}
+			item.Current = current == 1
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("face candidates", result))
+		}
+		fmt.Fprintln(stdout, "rank\tperson\tsimilarity\tmargin\tsupport\tquality\tdetection\tevidence\tretention_reason\trun_id")
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%d\t%s\t%.4f\t%.4f\t%d\t%.4f\t%.4f\t%s\t%s\t%s\n", item.Rank, item.PersonName, item.Similarity, item.Margin, item.Support, item.Quality, item.Detection, item.Evidence, item.RetentionReason, item.RunID)
+		}
+		return nil
 	}
 	if args[0] == "list" {
 		query := `SELECT f.id, f.analysis_id, f.face_index, f.detection_confidence, f.quality, COALESCE(a.state, 'unassigned'), COALESCE(a.person_id, ''), COALESCE(NULLIF(p.name, ''), substr(p.id, -8), '')
@@ -1514,6 +1624,86 @@ func faceCommand(ctx context.Context, application *app.App, args []string, jsonO
 	default:
 		return fmt.Errorf("unknown face command %q", args[0])
 	}
+}
+
+func candidateCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) < 2 || args[0] != "run" {
+		return fmt.Errorf("candidate requires run get, list, or status")
+	}
+	store := candidates.NewStore(application.DB)
+	subcommand := args[1]
+	if subcommand == "list" {
+		flags := flag.NewFlagSet("candidate run list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[2:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination(`
+			SELECT id, scope, COALESCE(scope_id, ''), status, target_count,
+			       candidate_count, skipped_count, created_at
+			FROM possible_candidate_runs ORDER BY created_at DESC, id DESC`, nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type item struct {
+			ID, Scope, ScopeID, Status, CreatedAt string
+			Targets, Candidates, Skipped          int
+		}
+		var result []item
+		for rows.Next() {
+			var value item
+			if err := rows.Scan(&value.ID, &value.Scope, &value.ScopeID, &value.Status, &value.Targets, &value.Candidates, &value.Skipped, &value.CreatedAt); err != nil {
+				return err
+			}
+			result = append(result, value)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("candidate run list", result))
+		}
+		fmt.Fprintln(stdout, "id\tscope\tscope_id\tstatus\ttargets\tcandidates\tskipped\tcreated_at")
+		for _, value := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n", value.ID, value.Scope, value.ScopeID, value.Status, value.Targets, value.Candidates, value.Skipped, value.CreatedAt)
+		}
+		return nil
+	}
+	if subcommand != "get" && subcommand != "status" {
+		return fmt.Errorf("candidate run requires get, list, or status")
+	}
+	flags := flag.NewFlagSet("candidate run "+subcommand, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	runID := flags.String("run-id", "", "possible-candidate run ID")
+	if err := flags.Parse(args[2:]); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return fmt.Errorf("candidate run %s requires --run-id", subcommand)
+	}
+	run, err := store.GetRun(ctx, *runID)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("candidate run "+subcommand, run))
+	}
+	if subcommand == "status" {
+		fmt.Fprintf(stdout, "Run:              %s\nScope:             %s\nScope ID:          %s\nStatus:            %s\nTarget faces:      %d\nCandidates:        %d\nSkipped:           %d\nReference version: %s\nCreated:           %s\n", run.ID, run.Scope, run.ScopeID, run.Status, run.TargetCount, run.CandidateCount, run.SkippedCount, run.ReferenceSetVersion, run.CreatedAt.Format(time.RFC3339Nano))
+		return nil
+	}
+	data, err := json.MarshalIndent(run, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, string(data))
+	return err
 }
 
 type clusteringRunInfo struct {
@@ -2251,6 +2441,29 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			_, err = jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"})
 			return err
 		},
+		"possible-candidates": func(jobContext context.Context, job jobs.Job) error {
+			var payload candidates.JobPayload
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.Scope == "" {
+				return fmt.Errorf("possible-candidates job has no scope")
+			}
+			policy := payload.Policy
+			if policy.MaxProvisionalFaces == 0 {
+				policy = application.Config.PossibleCandidates
+			}
+			generator := candidates.NewGenerator(application.DB, policy, application.Config.RecognitionThresholds, *pipelineID)
+			run, err := generator.Run(jobContext, candidates.Request{Scope: payload.Scope, ScopeID: payload.ScopeID})
+			if err != nil {
+				return err
+			}
+			return jobStore.UpdateProgress(jobContext, job.ID, map[string]any{
+				"phase": "possible-candidates", "run_id": run.ID,
+				"targets": run.TargetCount, "candidates": run.CandidateCount,
+				"skipped": run.SkippedCount,
+			})
+		},
 		"reference-reprocess": func(jobContext context.Context, job jobs.Job) error {
 			var payload struct {
 				PersonID string `json:"person_id"`
@@ -2307,7 +2520,17 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 					return err
 				}
 			}
-			return recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID)
+			if err := recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID); err != nil {
+				return err
+			}
+			version, err := candidates.ReferenceSetVersion(jobContext, application.DB)
+			if err != nil {
+				return err
+			}
+			_, _, err = jobStore.EnqueuePossibleCandidates(jobContext, candidates.JobPayload{
+				Scope: "all", ReferenceSetVersion: version, Policy: application.Config.PossibleCandidates,
+			})
+			return err
 		},
 		"reference-discovery": func(jobContext context.Context, job jobs.Job) error {
 			var payload struct {

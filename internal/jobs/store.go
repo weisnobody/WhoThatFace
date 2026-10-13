@@ -61,6 +61,29 @@ func (s Store) Enqueue(ctx context.Context, kind string, priority int, payload a
 	return s.enqueueAt(ctx, kind, priority, payload, time.Now().UTC())
 }
 
+// EnqueuePossibleCandidates coalesces identical pending discovery requests so
+// repeated reference changes do not create duplicate work.
+func (s Store) EnqueuePossibleCandidates(ctx context.Context, payload any) (Job, bool, error) {
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return Job{}, false, fmt.Errorf("marshal possible-candidate job: %w", err)
+	}
+	var existingID string
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id FROM jobs
+		WHERE kind = 'possible-candidates' AND status = 'pending' AND payload_json = ?
+		ORDER BY created_at DESC, id DESC LIMIT 1`, payloadJSON).Scan(&existingID)
+	if err == nil {
+		job, getErr := s.Get(ctx, existingID)
+		return job, true, getErr
+	}
+	if err != sql.ErrNoRows {
+		return Job{}, false, err
+	}
+	job, err := s.Enqueue(ctx, "possible-candidates", 3, payload)
+	return job, true, err
+}
+
 func (s Store) enqueueAt(ctx context.Context, kind string, priority int, payload any, availableAt time.Time) (Job, error) {
 	jobID, err := id.NewUUIDv7()
 	if err != nil {

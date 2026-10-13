@@ -76,26 +76,26 @@ changing assignments or cluster membership.
 
 ## Phase 3: Jobs and worker integration
 
- - [ ] Add a `possible-candidates` job kind and payload contract.
- - [ ] Support scopes for one person, one collection, and all accessible data.
- - [ ] Support optional inclusion of assigned-system and don't-track faces.
- - [ ] Add progress reporting for eligible faces processed, candidates retained,
+ - [x] Add a `possible-candidates` job kind and payload contract.
+ - [x] Support scopes for one person, one collection, and all accessible data.
+ - [x] Support optional inclusion of assigned-system and don't-track faces.
+ - [x] Add progress reporting for eligible faces processed, candidates retained,
    and skipped faces.
- - [ ] Coalesce duplicate pending requests for the same scope, options, pipeline,
+ - [x] Coalesce duplicate pending requests for the same scope, options, pipeline,
    and reference-set version.
- - [ ] Make retries safe and idempotent. A retry must create a new run or resume
+ - [x] Make retries safe and idempotent. A retry must create a new run or resume
    the existing run without leaving duplicate current rows.
- - [ ] Preserve the existing 60-second reference-reprocess debounce. Reference
+ - [x] Preserve the existing 60-second reference-reprocess debounce. Reference
    changes may request candidate discovery, but candidate discovery must not
    trigger clustering.
- - [ ] Mark results stale when approved references, pipeline identity, or relevant
+ - [x] Mark results stale when approved references, pipeline identity, or relevant
    policy settings change.
- - [ ] Add job summaries with target counts, candidate counts, skipped counts, and
+ - [x] Add job summaries with target counts, candidate counts, skipped counts, and
    the run ID.
 
 ## Phase 4: CLI
 
- - [ ] Add commands equivalent to:
+ - [x] Add commands equivalent to:
 
    ```text
    face-me-bro job possible-candidates --person-id PERSON_ID
@@ -104,14 +104,14 @@ changing assignments or cluster membership.
    face-me-bro face candidates --face-id FACE_ID
    ```
 
- - [ ] Add options for candidate limit, provisional-person limit, similarity floor,
+ - [x] Add options for candidate limit, provisional-person limit, similarity floor,
    include-assigned-system, and include-dont-track.
- - [ ] Add list/get/status commands for possible-candidate runs if the existing run
+ - [x] Add list/get/status commands for possible-candidate runs if the existing run
    command structure can accommodate them; otherwise add a dedicated
    `candidate-run` command group.
- - [ ] Use the standard table headers, pagination, JSON envelope, UUID suffix
+ - [x] Use the standard table headers, pagination, JSON envelope, UUID suffix
    display, and error conventions.
- - [ ] Include the run ID, scope, target count, candidate count, and stale/current
+ - [x] Include the run ID, scope, target count, candidate count, and stale/current
    state in command output.
  - [ ] Update command help, sample configuration, and usage documentation.
 
