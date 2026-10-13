@@ -118,6 +118,21 @@ func (s Store) MarkFaceRowsStale(ctx context.Context, faceIDs []string) error {
 	return nil
 }
 
+func (s Store) MarkRowsStaleForProvenance(ctx context.Context, referenceSetVersion, pipelineID string, policy Config) error {
+	policyJSON, err := json.Marshal(policy)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE possible_face_candidates
+		SET is_current = 0
+		WHERE is_current = 1 AND run_id IN (
+			SELECT id FROM possible_candidate_runs
+			WHERE reference_set_version <> ? OR COALESCE(pipeline_id, '') <> ? OR policy_json <> ?
+		)`, referenceSetVersion, pipelineID, policyJSON)
+	return err
+}
+
 func (s Store) InsertRow(ctx context.Context, row Row) error {
 	if row.ID == "" {
 		var err error

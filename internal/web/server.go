@@ -21,6 +21,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/analysis"
 	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/auth"
+	"github.com/pjg/face_me_bro/internal/candidates"
 	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
@@ -36,6 +37,45 @@ type Server struct {
 	templates  *template.Template
 	statusJSON []byte
 	setupJSON  []byte
+}
+
+type possibleCandidateView struct {
+	ID, RunID, PersonID, PersonName string
+	Rank                            int
+	Similarity, Margin              float64
+	Support                         int
+	Quality, Detection              float64
+	Evidence, RetentionReason       string
+	CreatedAt                       string
+}
+
+func (s *Server) currentPossibleCandidates(ctx context.Context, faceID string) ([]possibleCandidateView, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT pc.id, pc.run_id, pc.person_id,
+		       COALESCE(NULLIF(p.name, ''), substr(p.id, -8), p.id),
+		       pc.rank, pc.similarity, pc.margin, pc.support_count,
+		       pc.quality, pc.detection_confidence, pc.evidence,
+		       pc.retention_reason, pc.created_at
+		FROM possible_face_candidates pc
+		JOIN people p ON p.id = pc.person_id
+		WHERE pc.face_id = ? AND pc.is_current = 1
+		ORDER BY pc.rank`, faceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []possibleCandidateView
+	for rows.Next() {
+		var value possibleCandidateView
+		if err := rows.Scan(&value.ID, &value.RunID, &value.PersonID, &value.PersonName,
+			&value.Rank, &value.Similarity, &value.Margin, &value.Support,
+			&value.Quality, &value.Detection, &value.Evidence,
+			&value.RetentionReason, &value.CreatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
 }
 
 func boolInt(value bool) int {
@@ -119,6 +159,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /review/photos", s.reviewPhotos)
 	mux.HandleFunc("GET /review/people", s.reviewPeople)
 	mux.HandleFunc("GET /review/people/{personID}", s.reviewPerson)
+	mux.HandleFunc("GET /review/candidate-runs/{runID}", s.reviewCandidateRun)
 	mux.HandleFunc("GET /review/people/{personID}/references", s.reviewPersonReferences)
 	mux.HandleFunc("POST /api/people", s.createPerson)
 	mux.HandleFunc("POST /api/people/{personID}", s.renamePerson)
@@ -303,6 +344,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		State, PersonID, Person  string
 		Similarity, Margin       float64
 		Reference                bool
+		PossibleCandidates       []possibleCandidateView
 	}
 	var faces []face
 	for rows.Next() {
@@ -312,6 +354,11 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 			return
 		}
 		value.Reference = reference == 1
+		value.PossibleCandidates, err = s.currentPossibleCandidates(r.Context(), value.ID)
+		if err != nil {
+			http.Error(w, "possible candidate lookup failed", http.StatusInternalServerError)
+			return
+		}
 		body.WriteString(fmt.Sprintf(`<span class="photo-box" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span>`, percent(value.Left, width), percent(value.Top, height), percent(value.Right-value.Left, width), percent(value.Bottom-value.Top, height)))
 		faces = append(faces, value)
 	}
@@ -342,6 +389,18 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		body.WriteString(`<article class="` + boxClass + `" data-face-id="` + template.HTMLEscapeString(value.ID) + `"><strong>Face ` + fmt.Sprint(value.Index+1) + `</strong>: ` + template.HTMLEscapeString(value.State) + ` · ` + template.HTMLEscapeString(value.Person) + ` · confidence ` + formatScore(value.Similarity) + `%, margin ` + formatScore(value.Margin) + `%`)
 		if value.Reference {
 			body.WriteString(` · reference`)
+		}
+		if len(value.PossibleCandidates) > 0 {
+			body.WriteString(` · possible matches: `)
+			for index, candidate := range value.PossibleCandidates {
+				if index > 0 {
+					body.WriteString(`, `)
+				}
+				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
+				if account.Role != auth.Viewer {
+					body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(value.ID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
+				}
+			}
 		}
 		if account.Role != auth.Viewer {
 			body.WriteString(`<div class="photo-actions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Ambiguous</button><button type="button" data-action="disposition" data-disposition="false-detection" data-face-id="` + template.HTMLEscapeString(value.ID) + `">False detection</button><button type="button" data-action="disposition" data-disposition="dont-track" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Don't track</button><select data-assignment-person="` + template.HTMLEscapeString(value.ID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
@@ -539,6 +598,75 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String())})
 }
 
+func (s *Server) reviewCandidateRun(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	run, err := candidates.NewStore(s.db).GetRun(r.Context(), r.PathValue("runID"))
+	if err == sql.ErrNoRows {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "candidate run lookup failed", http.StatusInternalServerError)
+		return
+	}
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	query := `
+		SELECT pc.face_id, pp.id, pp.relative_path, pc.person_id,
+		       COALESCE(NULLIF(p.name, ''), substr(p.id, -8), p.id), pc.rank,
+		       pc.similarity, pc.margin, pc.support_count, pc.evidence,
+		       pc.retention_reason, pc.is_current, pc.created_at
+		FROM possible_face_candidates pc
+		JOIN faces f ON f.id = pc.face_id
+		JOIN analyses a ON a.id = f.analysis_id
+		JOIN photo_paths pp ON pp.asset_id = a.asset_id
+		JOIN people p ON p.id = pc.person_id
+		WHERE pc.run_id = ?`
+	args := []any{run.ID}
+	if allowed != nil {
+		if len(allowed) == 0 {
+			s.render(w, map[string]any{"Title": "Candidate run", "Account": account, "Body": template.HTML(`<h1>Candidate run</h1><p>No collections are assigned to this account.</p>`)})
+			return
+		}
+		query += ` AND pp.collection_id IN (` + strings.TrimRight(strings.Repeat("?,", len(allowed)), ",") + `)`
+		for _, collectionID := range allowed {
+			args = append(args, collectionID)
+		}
+	}
+	query += ` ORDER BY pc.face_id, pc.rank`
+	rows, err := s.db.QueryContext(r.Context(), query, args...)
+	if err != nil {
+		http.Error(w, "candidate lookup failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	var body strings.Builder
+	body.WriteString(`<h1>Possible candidate run ` + template.HTMLEscapeString(idSuffix(run.ID)) + `</h1><p>Status: ` + template.HTMLEscapeString(run.Status) + `; scope: ` + template.HTMLEscapeString(run.Scope) + `; targets: ` + fmt.Sprint(run.TargetCount) + `; candidates: ` + fmt.Sprint(run.CandidateCount) + `</p><table><tr><th>Face</th><th>Photo</th><th>Candidate</th><th>Rank</th><th>Similarity</th><th>Margin</th><th>Support</th><th>Evidence</th><th>Reason</th><th>Row state</th><th>Generated</th></tr>`)
+	for rows.Next() {
+		var faceID, pathID, relative, personID, personName, evidence, reason, createdAt string
+		var rank, support int
+		var current int
+		var similarity, margin float64
+		if err := rows.Scan(&faceID, &pathID, &relative, &personID, &personName, &rank, &similarity, &margin, &support, &evidence, &reason, &current, &createdAt); err != nil {
+			http.Error(w, "candidate lookup failed", http.StatusInternalServerError)
+			return
+		}
+		state := "stale"
+		if current == 1 {
+			state = "current"
+		}
+		body.WriteString(`<tr><td>` + template.HTMLEscapeString(idSuffix(faceID)) + `</td><td><a href="/review/photos?path_id=` + template.HTMLEscapeString(pathID) + `">` + template.HTMLEscapeString(relative) + `</a></td><td><a href="/review/people/` + template.HTMLEscapeString(personID) + `">` + template.HTMLEscapeString(personName) + `</a></td><td>` + fmt.Sprint(rank) + `</td><td>` + formatScore(similarity) + `%</td><td>` + formatScore(margin) + `%</td><td>` + fmt.Sprint(support) + `</td><td>` + template.HTMLEscapeString(evidence) + `</td><td>` + template.HTMLEscapeString(reason) + `</td><td>` + state + `</td><td>` + template.HTMLEscapeString(createdAt) + `</td></tr>`)
+	}
+	body.WriteString(`</table>`)
+	s.render(w, map[string]any{"Title": "Possible candidate run", "Account": account, "Body": template.HTML(body.String())})
+}
+
 func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	account, ok := s.requireAccount(w, r)
 	if !ok {
@@ -609,6 +737,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		Representative               bool
 		Cluster                      *personCluster
 		Candidates                   []personCandidate
+		PossibleCandidates           []possibleCandidateView
 	}
 	var faces []personFace
 	referenceCount := 0
@@ -708,6 +837,11 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			}
 			face.Cluster = &cluster
 		}
+		face.PossibleCandidates, err = s.currentPossibleCandidates(r.Context(), face.FaceID)
+		if err != nil {
+			http.Error(w, "possible candidate lookup failed", http.StatusInternalServerError)
+			return
+		}
 		if face.Reference {
 			referenceCount++
 		}
@@ -719,10 +853,41 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	}
 	totalFaceCount := len(faces)
 	faceFilter := r.URL.Query().Get("state")
+	possibleFilter := r.URL.Query().Get("possible")
+	candidatePersonFilter := strings.TrimSpace(r.URL.Query().Get("candidate_person"))
+	evidenceFilter := strings.TrimSpace(r.URL.Query().Get("evidence"))
 	if faceFilter != "" {
 		filtered := faces[:0]
 		for _, face := range faces {
 			if face.State == faceFilter {
+				filtered = append(filtered, face)
+			}
+		}
+		faces = filtered
+	}
+	if possibleFilter == "true" || candidatePersonFilter != "" || evidenceFilter != "" {
+		filtered := faces[:0]
+		for _, face := range faces {
+			matched := possibleFilter != "true" || len(face.PossibleCandidates) > 0
+			if matched && candidatePersonFilter != "" {
+				matched = false
+				for _, candidate := range face.PossibleCandidates {
+					if candidate.PersonID == candidatePersonFilter || strings.EqualFold(candidate.PersonName, candidatePersonFilter) {
+						matched = true
+						break
+					}
+				}
+			}
+			if matched && evidenceFilter != "" {
+				matched = false
+				for _, candidate := range face.PossibleCandidates {
+					if candidate.Evidence == evidenceFilter {
+						matched = true
+						break
+					}
+				}
+			}
+			if matched {
 				filtered = append(filtered, face)
 			}
 		}
@@ -903,6 +1068,10 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	for _, state := range []string{"provisional", "assigned-user", "assigned-system", "unknown", "ambiguous", "unassigned"} {
 		body.WriteString(`<option value="` + state + `"` + selectedAttr(state, faceFilter) + `>` + state + `</option>`)
 	}
+	body.WriteString(`</select></label> <label>Possible <select name="possible"><option value="">All</option><option value="true"` + selectedAttr("true", possibleFilter) + `>With possible candidates</option></select></label> <label>Candidate <input name="candidate_person" value="` + template.HTMLEscapeString(candidatePersonFilter) + `" placeholder="name or ID"></label> <label>Evidence <select name="evidence"><option value="">All</option>`)
+	for _, evidence := range []string{"high", "medium", "low", "manual-review"} {
+		body.WriteString(`<option value="` + evidence + `"` + selectedAttr(evidence, evidenceFilter) + `>` + evidence + `</option>`)
+	}
 	body.WriteString(`</select></label> <label>Sort <select name="sort">`)
 	for _, option := range []string{"path", "confidence", "quality", "detection"} {
 		body.WriteString(`<option value="` + option + `"` + selectedAttr(option, faceSort) + `>` + option + `</option>`)
@@ -968,6 +1137,19 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 					body.WriteString(template.HTMLEscapeString(candidate.Name))
 				}
 				body.WriteString(` (` + formatScore(candidate.Similarity) + `%)`)
+			}
+			body.WriteString(`</div>`)
+		}
+		if len(face.PossibleCandidates) > 0 {
+			body.WriteString(`<div class="person-candidates possible-candidates"><strong>Possible matches:</strong> `)
+			for index, candidate := range face.PossibleCandidates {
+				if index > 0 {
+					body.WriteString(`, `)
+				}
+				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
+				if canModify {
+					body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
+				}
 			}
 			body.WriteString(`</div>`)
 		}
@@ -1299,6 +1481,11 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
       send(faceID, '/api/faces/' + encodeURIComponent(faceID) + '/assignment', payload);
     };
   });
+  document.querySelectorAll('[data-action="assign-candidate"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId,
+      '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment',
+      {person_id: button.dataset.personId, state: 'assigned-user', candidate_id: button.dataset.candidateId});
+  });
   document.querySelectorAll('[data-action="role"]').forEach((button) => {
     button.onclick = () => send(button.dataset.faceId,
       '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/reference',
@@ -1369,6 +1556,9 @@ func (s *Server) photoScript(w http.ResponseWriter, _ *http.Request) {
       const state = person === '__ambiguous__' ? 'ambiguous' : (person ? 'assigned-user' : 'unknown');
       send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment', {person_id:person === '__ambiguous__' ? '' : person, state:state});
     };
+  });
+  document.querySelectorAll('[data-action="assign-candidate"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment', {person_id:button.dataset.personId, state:'assigned-user', candidate_id:button.dataset.candidateId});
   });
   document.querySelectorAll('[data-action="role"]').forEach((button) => {
     button.onclick = () => send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/reference', {person_id:button.dataset.personId, reference:button.dataset.reference !== 'true'});
@@ -2007,13 +2197,21 @@ func (s *Server) assignFace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		PersonID string                 `json:"person_id"`
-		State    review.AssignmentState `json:"state"`
-		Reject   bool                   `json:"reject"`
+		PersonID    string                 `json:"person_id"`
+		State       review.AssignmentState `json:"state"`
+		Reject      bool                   `json:"reject"`
+		CandidateID string                 `json:"candidate_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		http.Error(w, "invalid assignment", http.StatusBadRequest)
 		return
+	}
+	if input.CandidateID != "" && !input.Reject {
+		var candidateFace, candidatePerson string
+		if err := s.db.QueryRowContext(r.Context(), `SELECT face_id, person_id FROM possible_face_candidates WHERE id = ?`, input.CandidateID).Scan(&candidateFace, &candidatePerson); err != nil || candidateFace != faceID || candidatePerson != input.PersonID {
+			http.Error(w, "invalid candidate", http.StatusBadRequest)
+			return
+		}
 	}
 	store := review.NewStore(s.db)
 	var assignment review.Assignment
@@ -2025,6 +2223,12 @@ func (s *Server) assignFace(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if input.CandidateID != "" && !input.Reject {
+		if err := audit.NewStore(s.db).Record(r.Context(), audit.Event{AccountID: account.ID, TargetEventID: assignment.EventID, Action: "possible-candidate-assignment", EntityType: "face", EntityID: faceID, New: map[string]any{"candidate_id": input.CandidateID, "person_id": input.PersonID}}); err != nil {
+			http.Error(w, "audit failed", http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, assignment)
 }

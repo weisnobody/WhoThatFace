@@ -152,6 +152,23 @@ Monitor or control jobs from another terminal:
 The worker can be stopped with `worker stop`. Failed item details are
 available through `job get JOB_ID` and the review service.
 
+To look for possible matches for unresolved faces, run the separate candidate
+discovery job. It compares eligible faces with approved reference faces and
+never changes assignments or cluster membership:
+
+```sh
+JOB_JSON=$($APP --config "$CONFIG" job possible-candidates --all)
+"$APP" --config "$CONFIG" job list
+"$APP" --config "$CONFIG" candidate run list
+"$APP" --config "$CONFIG" face candidates --face-id FACE_ID
+```
+
+Use `--person-id PERSON_ID` or `--collection-id COLLECTION_ID` instead of
+`--all` for a narrower run. Candidate runs have their own IDs and detail/status
+commands. Candidate rows are shown on photo and person review pages, where a
+reviewer can inspect the scores and explicitly assign a selected candidate.
+The candidate job does not automatically promote a candidate to an assignment.
+
 ## 5. Start the review service
 
 Start the authenticated local web service in another terminal:

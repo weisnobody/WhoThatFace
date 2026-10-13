@@ -113,31 +113,31 @@ changing assignments or cluster membership.
    display, and error conventions.
  - [x] Include the run ID, scope, target count, candidate count, and stale/current
    state in command output.
- - [ ] Update command help, sample configuration, and usage documentation.
+ - [x] Update command help, sample configuration, and usage documentation.
 
 ## Phase 5: Review web interface
 
- - [ ] Add current possible candidates to face-card data and rendering.
- - [ ] Display candidate name/link, rank, similarity, margin, support, quality,
+ - [x] Add current possible candidates to face-card data and rendering.
+ - [x] Display candidate name/link, rank, similarity, margin, support, quality,
    detection, evidence, and generated time.
- - [ ] Add filters for:
+ - [x] Add filters for:
    - faces with possible candidates;
    - candidate person;
    - evidence level;
    - stale versus current results;
    - unknown, ambiguous, unassigned, and provisional target states.
- - [ ] Add provisional-person-page support for showing candidates on each face and
+ - [x] Add provisional-person-page support for showing candidates on each face and
    filtering to small provisional groups.
- - [ ] Add unknown/ambiguous review pages or extend the existing face review page
+ - [x] Add unknown/ambiguous review pages or extend the existing face review page
    to show possible candidates.
- - [ ] Link candidate people to their person pages and candidate runs to run-detail
+ - [x] Link candidate people to their person pages and candidate runs to run-detail
    pages.
- - [ ] Add actions to assign a face to a selected candidate as `assigned-user`,
+ - [x] Add actions to assign a face to a selected candidate as `assigned-user`,
    reject/leave unchanged, mark unknown, mark ambiguous, or assign another
    person.
- - [ ] Require normal CSRF, collection authorization, audit logging, and existing
+ - [x] Require normal CSRF, collection authorization, audit logging, and existing
    bulk-assignment safeguards.
- - [ ] Clearly label the result as a possible candidate and not a confirmed or
+ - [x] Clearly label the result as a possible candidate and not a confirmed or
    automatic assignment.
 
 ## Phase 6: Audit, stale results, and operational behavior

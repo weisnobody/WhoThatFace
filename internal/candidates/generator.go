@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/pjg/face_me_bro/internal/audit"
 	"github.com/pjg/face_me_bro/internal/recognition"
 )
 
@@ -41,7 +42,7 @@ func NewGenerator(database *sql.DB, config Config, thresholds recognition.Thresh
 	return Generator{db: database, store: NewStore(database), config: config, thresholds: thresholds, pipelineID: pipelineID}
 }
 
-func (g Generator) Run(ctx context.Context, request Request) (Run, error) {
+func (g Generator) Run(ctx context.Context, request Request) (result Run, err error) {
 	if request.Scope != "person" && request.Scope != "collection" && request.Scope != "all" {
 		return Run{}, fmt.Errorf("invalid possible-candidate scope %q", request.Scope)
 	}
@@ -56,6 +57,25 @@ func (g Generator) Run(ctx context.Context, request Request) (Run, error) {
 	if err := g.store.StartRun(ctx, run.ID); err != nil {
 		return Run{}, err
 	}
+	if err := audit.NewStore(g.db).Record(ctx, audit.Event{Action: "possible-candidate-run", EntityType: "candidate-run", EntityID: run.ID, New: map[string]any{
+		"status": "running", "scope": request.Scope, "scope_id": request.ScopeID,
+	}}); err != nil {
+		return Run{}, err
+	}
+	finished := false
+	defer func() {
+		if finished || run.ID == "" {
+			return
+		}
+		message := "possible-candidate generation failed"
+		if err != nil {
+			message = err.Error()
+		}
+		_ = g.store.FinishRun(context.Background(), run.ID, "failed", 0, 0, 0, message)
+		_ = audit.NewStore(g.db).Record(context.Background(), audit.Event{Action: "possible-candidate-run", EntityType: "candidate-run", EntityID: run.ID, New: map[string]any{
+			"status": "failed", "error": message,
+		}})
+	}()
 	if err := g.store.MarkRowsStaleForProvenance(ctx, version, g.pipelineID, g.config); err != nil {
 		_ = g.store.FinishRun(context.Background(), run.ID, "failed", 0, 0, 0, err.Error())
 		return Run{}, err
@@ -116,6 +136,12 @@ func (g Generator) Run(ctx context.Context, request Request) (Run, error) {
 		}
 	}
 	if err := g.store.FinishRun(ctx, run.ID, "completed", len(targets), candidateCount, skippedCount, ""); err != nil {
+		return Run{}, err
+	}
+	finished = true
+	if err := audit.NewStore(g.db).Record(ctx, audit.Event{Action: "possible-candidate-run", EntityType: "candidate-run", EntityID: run.ID, New: map[string]any{
+		"status": "completed", "targets": len(targets), "candidates": candidateCount, "skipped": skippedCount,
+	}}); err != nil {
 		return Run{}, err
 	}
 	return g.store.GetRun(ctx, run.ID)
