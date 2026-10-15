@@ -4,73 +4,73 @@
 
 - [ ] Align `/review/clusters` and `/review/clusters/<id>` with the people review UI.
 - [ ] Preserve cluster-specific mixed-cluster behavior and review safeguards.
-- [ ] Expose all persisted clustering run statuses, with active runs selected by default.
-- [ ] Mark all non-active runs visibly and make them read-only.
-- [ ] For multi-person clusters, show accessible assigned people ordered by assigned-face count and display `Multiple` when applicable.
+- [x] Expose all persisted clustering run statuses, with active runs selected by default.
+- [x] Mark all non-active runs visibly and make them read-only.
+- [x] For multi-person clusters, show accessible assigned people ordered by assigned-face count and display `Multiple` when applicable.
 
 ## Shared review UI
 
 - [ ] Refactor shared helpers for filter/control rendering.
 - [ ] Refactor shared helpers for selected options and checkbox state.
 - [ ] Refactor shared helpers for pagination and query-parameter preservation.
-- [ ] Reuse score and unavailable-value formatting.
+- [x] Reuse score and unavailable-value formatting.
 - [ ] Establish shared CSS classes for controls, tables, cards, alerts, metadata, and empty states.
 - [ ] Preserve CSRF, account-role, collection-permission, optimistic-version, mixed-cluster, and historical-run safeguards.
 
 ## Cluster list data and behavior
 
-- [ ] Scope rows, counts, candidates, filters, and sorting to accessible faces.
-- [ ] Hide clusters with no accessible faces.
-- [ ] Add mixed/pure filtering.
-- [ ] Add review-status filtering.
-- [ ] Add clustering-run status filtering.
-- [ ] Add rating filtering.
-- [ ] Preserve the Include Don’t Track filter.
-- [ ] Preserve minimum and maximum face-count filters.
-- [ ] Add minimum and maximum consistency filters.
-- [ ] Add cluster/person text search covering cluster ID, cluster key, person ID, and person name.
-- [ ] Render all submitted filter values after reload.
-- [ ] Use human-readable filter labels.
-- [ ] Count current recognition candidates with similarity `>= 0.015`.
-- [ ] Render candidate count as `N/A` when every accessible face is assigned-user or assigned-system.
-- [ ] Calculate the To Assign count.
-- [ ] Calculate Assigned Match against the cluster proposed person.
-- [ ] Aggregate accessible assigned people by face count.
-- [ ] Add sorting by Mixed.
-- [ ] Add sorting by Face count.
-- [ ] Add sorting by Candidate count.
-- [ ] Add sorting by Person.
-- [ ] Add sorting by Rating.
-- [ ] Add sorting by Review status, using unassigned-face count as the secondary key.
-- [ ] Add sorting by To Be Assigned.
-- [ ] Add sorting by Cluster key.
-- [ ] Preserve selected sort and direction.
-- [ ] Add stable cluster ID tie-breaking.
-- [ ] Classify rows as Active, Superseded, or Historical.
+- [x] Scope rows, counts, candidates, filters, and sorting to accessible faces.
+- [x] Hide clusters with no accessible faces.
+- [x] Add mixed/pure filtering.
+- [x] Add review-status filtering.
+- [x] Add clustering-run status filtering.
+- [x] Add rating filtering.
+- [x] Preserve the Include Don’t Track filter.
+- [x] Preserve minimum and maximum face-count filters.
+- [x] Add minimum and maximum consistency filters.
+- [x] Add cluster/person text search covering cluster ID, cluster key, person ID, and person name.
+- [x] Render all submitted filter values after reload.
+- [x] Use human-readable filter labels.
+- [x] Count current recognition candidates with similarity `>= 0.015`.
+- [x] Render candidate count as `N/A` when every accessible face is assigned-user or assigned-system.
+- [x] Calculate the To Assign count.
+- [x] Calculate Assigned Match against the cluster proposed person.
+- [x] Aggregate accessible assigned people by face count.
+- [x] Add sorting by Mixed.
+- [x] Add sorting by Face count.
+- [x] Add sorting by Candidate count.
+- [x] Add sorting by Person.
+- [x] Add sorting by Rating.
+- [x] Add sorting by Review status, using unassigned-face count as the secondary key.
+- [x] Add sorting by To Be Assigned.
+- [x] Add sorting by Cluster key.
+- [x] Preserve selected sort and direction.
+- [x] Add stable cluster ID tie-breaking.
+- [x] Classify rows as Active, Superseded, or Historical.
 
 ## Cluster list presentation
 
-- [ ] Add a people-style heading with visible and total counts.
-- [ ] Give the controls form a dedicated ID.
-- [ ] Match people-page control spacing, wrapping, responsive behavior, and Apply-button treatment.
-- [ ] Put sorting controls on a separate row below primary filters.
-- [ ] Add per-page selection.
-- [ ] Add First, Previous, page number, Next, and Last links.
-- [ ] Add a page-jump input.
-- [ ] Clamp invalid and out-of-range page values consistently with the people page.
-- [ ] Preserve every filter, sort, direction, and pagination parameter in pager links and jump forms.
-- [ ] Add a dedicated cluster table class.
-- [ ] Match people-page cell padding, borders, widths, and whitespace behavior.
-- [ ] Keep the cluster key as the primary row link.
-- [ ] Link proposed people to `/review/people/<id>`.
-- [ ] Add representative images before person names.
-- [ ] Use the person representative when available.
-- [ ] Fall back to the highest-quality eligible face when needed.
-- [ ] Keep representative images accessible independently of source-photo permissions.
-- [ ] Show `Unassigned` when no proposed person exists.
-- [ ] Render Face count, Candidate count, To Assign, Assigned Match, Consistency, Purity, Connectivity, Mixed, Review, and Type columns.
-- [ ] Render `X` for mixed clusters and an empty cell otherwise.
-- [ ] Show Active, Superseded, or Historical in the Type column.
+- [x] Add a people-style heading with visible and total counts.
+- [x] Give the controls form a dedicated ID.
+- [x] Match people-page control spacing, wrapping, responsive behavior, and Apply-button treatment.
+- [x] Put sorting controls on a separate row below primary filters.
+- [x] Add per-page selection.
+- [x] Add First, Previous, page number, Next, and Last links.
+- [x] Add a page-jump input.
+- [x] Clamp invalid and out-of-range page values consistently with the people page.
+- [x] Preserve every filter, sort, direction, and pagination parameter in pager links and jump forms.
+- [x] Add a dedicated cluster table class.
+- [x] Match people-page cell padding, borders, widths, and whitespace behavior.
+- [x] Keep the cluster key as the primary row link.
+- [x] Link proposed people to `/review/people/<id>`.
+- [x] Add representative images before person names.
+- [x] Use the person representative when available.
+- [x] Fall back to the highest-quality eligible face when needed.
+- [x] Keep representative images accessible independently of source-photo permissions.
+- [x] Show `Unassigned` when no proposed person exists.
+- [x] Render Face count, Candidate count, To Assign, Assigned Match, Consistency, Purity, Connectivity, Mixed, Review, and Type columns.
+- [x] Render `X` for mixed clusters and an empty cell otherwise.
+- [x] Show Active, Superseded, or Historical in the Type column.
 
 ## Cluster detail data and behavior
 
@@ -148,25 +148,25 @@
 
 ## Tests
 
-- [ ] Verify cluster list heading and count.
-- [ ] Verify all list filters render.
-- [ ] Verify submitted filters remain selected or populated.
-- [ ] Verify Apply-button treatment and layout break behavior.
-- [ ] Verify every list sort option renders.
-- [ ] Verify selected sort and direction are preserved.
-- [ ] Verify ascending and descending sorting for every supported sort.
-- [ ] Verify stable tie-breaking.
-- [ ] Verify face-count bounds.
-- [ ] Verify mixed/pure filtering.
-- [ ] Verify review-status and run-status filtering.
-- [ ] Verify rating filtering.
-- [ ] Verify Don’t Track filtering.
-- [ ] Verify cluster/person search.
-- [ ] Verify candidate threshold and N/A behavior.
-- [ ] Verify accessible-face rows, counts, and candidates.
-- [ ] Verify clusters with no accessible faces are hidden.
-- [ ] Verify representative-image access and fallback behavior.
-- [ ] Verify pagination, clamping, page jump, and parameter preservation.
+- [x] Verify cluster list heading and count.
+- [x] Verify all list filters render.
+- [x] Verify submitted filters remain selected or populated.
+- [x] Verify Apply-button treatment and layout break behavior.
+- [x] Verify every list sort option renders.
+- [x] Verify selected sort and direction are preserved.
+- [x] Verify ascending and descending sorting for every supported sort.
+- [x] Verify stable tie-breaking.
+- [x] Verify face-count bounds.
+- [x] Verify mixed/pure filtering.
+- [x] Verify review-status and run-status filtering.
+- [x] Verify rating filtering.
+- [x] Verify Don’t Track filtering.
+- [x] Verify cluster/person search.
+- [x] Verify candidate threshold and N/A behavior.
+- [x] Verify accessible-face rows, counts, and candidates.
+- [x] Verify clusters with no accessible faces are hidden.
+- [x] Verify representative-image access and fallback behavior.
+- [x] Verify pagination, clamping, page jump, and parameter preservation.
 - [ ] Verify detail header and summary fields.
 - [ ] Verify proposed-person, person, photo, cluster, and candidate links.
 - [ ] Verify mixed-cluster warnings and disabled default assignment.

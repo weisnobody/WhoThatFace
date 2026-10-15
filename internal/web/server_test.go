@@ -420,7 +420,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	clusterListRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
 	clusterListResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(clusterListResponse, clusterListRequest)
-	if clusterListResponse.Code != http.StatusOK || !strings.Contains(clusterListResponse.Body.String(), ">1</td><td>2</td><td>1") {
+	if clusterListResponse.Code != http.StatusOK || !strings.Contains(clusterListResponse.Body.String(), ">1</td><td>N/A</td><td>0</td><td>1</td>") {
 		t.Fatalf("cluster list did not count latest candidates only: status=%d body=%s", clusterListResponse.Code, clusterListResponse.Body.String())
 	}
 	bulkRequest := httptest.NewRequest(http.MethodPost, "/api/faces/assignments", strings.NewReader(`{"face_ids":["face-1"],"person_id":"person-1","state":"assigned-user"}`))

@@ -1929,7 +1929,7 @@ func (s *Server) adminScript(w http.ResponseWriter, _ *http.Request) {
 `))
 }
 
-func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
+func (s *Server) reviewClustersLegacy(w http.ResponseWriter, r *http.Request) {
 	account, ok := s.requireAccount(w, r)
 	if !ok {
 		return
