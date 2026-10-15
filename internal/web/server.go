@@ -2073,6 +2073,23 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	visibleFaceCount := membershipCount
+	visibleCandidateCount := 0
+	countQuery := `SELECT COUNT(DISTINCT cm.face_id), COUNT(DISTINCT CASE WHEN rc.similarity >= 0.015 THEN cm.face_id END) FROM cluster_memberships cm JOIN faces cf ON cf.id = cm.face_id JOIN analyses caa ON caa.id = cf.analysis_id JOIN photo_assets cpa ON cpa.id = caa.asset_id JOIN photo_paths cpp ON cpp.asset_id = cpa.id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id AND rc.created_at = (SELECT MAX(rc2.created_at) FROM recognition_candidates rc2 WHERE rc2.face_id = cm.face_id) WHERE cm.cluster_id = ? AND cpp.missing_at IS NULL`
+	countArgs := []any{clusterID}
+	if accessibleCollections != nil {
+		countQuery += ` AND cpp.collection_id IN (` + placeholders(len(accessibleCollections)) + `)`
+		for _, id := range accessibleCollections {
+			countArgs = append(countArgs, id)
+		}
+	} else {
+		countQuery += ` AND cpp.collection_id = ?`
+		countArgs = append(countArgs, collectionID)
+	}
+	if err := s.db.QueryRowContext(r.Context(), countQuery, countArgs...).Scan(&visibleFaceCount, &visibleCandidateCount); err != nil {
+		http.Error(w, "cluster face count failed", http.StatusInternalServerError)
+		return
+	}
 	peopleRows, err := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8))), id`)
 	if err != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
@@ -2168,7 +2185,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		}
 		faceQuery += ` AND ` + possibleExists
 	}
-	orderBy := map[string]string{"path": "pp.relative_path", "person": "LOWER(COALESCE(ca.person_id, ''))", "assignment_state": "COALESCE(ca.state, 'unassigned')", "disposition": "COALESCE((SELECT disposition FROM current_face_dispositions WHERE face_id = cm.face_id), '')", "quality": "f.quality", "detection": "f.detection_confidence", "confidence": "COALESCE(ae.similarity, 0)"}[detailQuery.Get("sort")]
+	orderBy := map[string]string{"path": "pp.relative_path", "person": "LOWER(COALESCE(ca.person_id, ''))", "assignment_state": "COALESCE(ca.state, 'unassigned')", "disposition": "COALESCE((SELECT disposition FROM current_face_dispositions WHERE face_id = cm.face_id), '')", "consistency": "(SELECT consistency FROM clusters WHERE id = cm.cluster_id)", "quality": "f.quality", "detection": "f.detection_confidence", "confidence": "COALESCE(ae.similarity, 0)"}[detailQuery.Get("sort")]
 	if orderBy == "" {
 		orderBy = "pp.relative_path"
 	}
@@ -2190,7 +2207,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		disabledAttr = ` disabled`
 	}
 	pageStyle := template.CSS(`#cluster-page{max-width:100%}.cluster-grid{display:flex;flex-wrap:wrap;gap:18px}.cluster-face{width:min(420px,45vw);border:4px solid;padding:10px}.cluster-face.assigned{border-color:#2a9d50}.cluster-face.provisional{border-color:#d6a800}.cluster-face.needs-attention{border-color:#c62828}.photo-frame{position:relative;display:inline-block;max-width:100%}.photo-frame img{max-width:100%;max-height:55vh;display:block}.face-box{position:absolute;border:2px solid #f00;box-sizing:border-box;pointer-events:none}.cluster-face select{max-width:100%}.candidate{font-size:.9rem;margin-top:6px}.cluster-controls{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.cluster-alert{border:1px solid #c62828;background:#fff1f1;padding:.75rem;margin:.75rem 0}.cluster-summary{display:flex;flex-wrap:wrap;gap:.75rem}.cluster-summary div{min-width:7rem}.cluster-summary dt{font-size:.8rem;color:#666}.cluster-summary dd{margin:.15rem 0 0;font-weight:600}`)
-	body.WriteString(`<div id="cluster-page" data-cluster-id="` + template.HTMLEscapeString(clusterID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-version="` + fmt.Sprint(reviewVersion) + `"><p><a href="/review/clusters">← Clusters</a></p><header class="cluster-header"><h1>Cluster ` + template.HTMLEscapeString(idSuffix(clusterID)) + ` <small>(` + template.HTMLEscapeString(clusterID) + `)</small></h1><dl class="cluster-summary"><div><dt>Review</dt><dd>` + template.HTMLEscapeString(reviewStatus) + `</dd></div><div><dt>Cluster</dt><dd>` + template.HTMLEscapeString(humanRunStatus(runStatus)) + `</dd></div><div><dt>Proposed person</dt><dd>`)
+	body.WriteString(`<div id="cluster-page" data-cluster-id="` + template.HTMLEscapeString(clusterID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-version="` + fmt.Sprint(reviewVersion) + `"><p><a href="/review/clusters">← Clusters</a></p><header class="cluster-header"><h1>Cluster ` + template.HTMLEscapeString(idSuffix(clusterID)) + ` <small>(` + template.HTMLEscapeString(clusterID) + `)</small></h1><dl class="cluster-summary"><div><dt>Faces</dt><dd>` + fmt.Sprint(visibleFaceCount) + `</dd></div><div><dt>Candidates</dt><dd>` + fmt.Sprint(visibleCandidateCount) + `</dd></div><div><dt>Review</dt><dd>` + template.HTMLEscapeString(reviewStatus) + `</dd></div><div><dt>Cluster</dt><dd>` + template.HTMLEscapeString(humanRunStatus(runStatus)) + `</dd></div><div><dt>Proposed person</dt><dd>`)
 	if proposedPersonID == "" {
 		body.WriteString(`Unassigned`)
 	} else {
