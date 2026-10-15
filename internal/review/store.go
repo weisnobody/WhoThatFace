@@ -104,6 +104,51 @@ func (s Store) Assign(ctx context.Context, faceID, personID string, state Assign
 	return s.setAssignment(ctx, faceID, personID, state, actor, evidence, "assignment", reason)
 }
 
+// AssignMany changes multiple current face states in one transaction. Audit
+// events are recorded only after all projections and assignment events commit.
+func (s Store) AssignMany(ctx context.Context, faceIDs []string, personID string, state AssignmentState, actor Actor, evidence Evidence, reason string) ([]Assignment, error) {
+	if len(faceIDs) == 0 {
+		return nil, fmt.Errorf("at least one face is required")
+	}
+	if err := validateAssignment(state, personID); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(faceIDs))
+	for _, faceID := range faceIDs {
+		if faceID == "" {
+			return nil, fmt.Errorf("face ID cannot be empty")
+		}
+		if _, exists := seen[faceID]; exists {
+			return nil, fmt.Errorf("duplicate face ID %q", faceID)
+		}
+		seen[faceID] = struct{}{}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	assignments := make([]Assignment, 0, len(faceIDs))
+	auditEvents := make([]audit.Event, 0, len(faceIDs))
+	for _, faceID := range faceIDs {
+		assignment, auditEvent, err := s.setAssignmentInTx(ctx, tx, faceID, personID, state, actor, evidence, "assignment", reason)
+		if err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, assignment)
+		auditEvents = append(auditEvents, auditEvent)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, auditEvent := range auditEvents {
+		if err := audit.NewStore(s.db).Record(ctx, auditEvent); err != nil {
+			return nil, fmt.Errorf("record assignment audit event: %w", err)
+		}
+	}
+	return assignments, nil
+}
+
 // Reject restores the previous state recorded by the current event, or starts
 // an unassigned state when there is no prior event.
 func (s Store) Reject(ctx context.Context, faceID string, actor Actor, reason string) (Assignment, error) {

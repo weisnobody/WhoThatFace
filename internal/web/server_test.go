@@ -139,6 +139,7 @@ func TestEveryMutatingRouteRequiresSession(t *testing.T) {
 	}
 	for _, path := range []string{
 		"/api/faces/face/assignment",
+		"/api/faces/assignments",
 		"/api/faces/face/disposition",
 		"/api/faces/face/reference",
 		"/api/people",
@@ -362,8 +363,17 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 		INSERT INTO faces (id, analysis_id, face_index, box_left, box_top, box_right, box_bottom, detection_confidence, quality, created_at) VALUES ('face-1', 'analysis-1', 0, 100, 80, 300, 320, 0.99, 0.90, CURRENT_TIMESTAMP);
 		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person-1', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person-2', 'Second Person', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person-3', 'Stale Candidate', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-1', 'face-1', 'person-1', 1, 0.91, 0.12, 4, 0.90, 0.99, 'high', CURRENT_TIMESTAMP);
-		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-2', 'face-1', 'person-2', 2, 0.79, 0.03, 2, 0.90, 0.99, 'medium', CURRENT_TIMESTAMP)`); err != nil {
+		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-2', 'face-1', 'person-2', 2, 0.79, 0.03, 2, 0.90, 0.99, 'medium', CURRENT_TIMESTAMP);
+		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-old', 'face-1', 'person-1', 1, 0.80, 0.10, 1, 0.90, 0.99, 'medium', '2020-01-01T00:00:00Z');
+		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-stale', 'face-1', 'person-3', 3, 0.70, 0.05, 1, 0.90, 0.99, 'medium', '2020-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, `
+		INSERT INTO clustering_runs (id, algorithm, algorithm_version, k, similarity_threshold, neighbor_search_method, mutual_edge_policy, candidate_scope, input_face_set_json, status, accepted_at, created_at) VALUES ('run-active', 'test', '1', 1, .45, 'exact', 'mutual', 'all', '[]', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO clusters (id, clustering_run_id, cluster_key, proposed_person_id, purity, connectivity, is_mixed, review_status, created_at) VALUES ('cluster-active', 'run-active', 'face-1', 'person-1', 1, 1, 0, 'unreviewed', CURRENT_TIMESTAMP);
+		INSERT INTO cluster_memberships (cluster_id, face_id) VALUES ('cluster-active', 'face-1')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := authStore.SetCollectionPermission(ctx, account.ID, "collection-1", true, true, true); err != nil {
@@ -399,6 +409,30 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 			t.Fatalf("people filter %q: status=%d body=%s", testCase.query, filteredResponse.Code, filteredResponse.Body.String())
 		}
 	}
+	clusterRequest := httptest.NewRequest(http.MethodGet, "/review/clusters/cluster-active", nil)
+	clusterRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	clusterResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(clusterResponse, clusterRequest)
+	if clusterResponse.Code != http.StatusOK || !strings.Contains(clusterResponse.Body.String(), "support 4") || strings.Contains(clusterResponse.Body.String(), "support 1") {
+		t.Fatalf("cluster detail did not restrict candidates to the latest batch: status=%d body=%s", clusterResponse.Code, clusterResponse.Body.String())
+	}
+	clusterListRequest := httptest.NewRequest(http.MethodGet, "/review/clusters", nil)
+	clusterListRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	clusterListResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(clusterListResponse, clusterListRequest)
+	if clusterListResponse.Code != http.StatusOK || !strings.Contains(clusterListResponse.Body.String(), ">1</td><td>2</td><td>1") {
+		t.Fatalf("cluster list did not count latest candidates only: status=%d body=%s", clusterListResponse.Code, clusterListResponse.Body.String())
+	}
+	bulkRequest := httptest.NewRequest(http.MethodPost, "/api/faces/assignments", strings.NewReader(`{"face_ids":["face-1"],"person_id":"person-1","state":"assigned-user"}`))
+	bulkRequest.Header.Set("Content-Type", "application/json")
+	bulkRequest.Header.Set("X-CSRF-Token", "csrf-token")
+	bulkRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	bulkRequest.AddCookie(&http.Cookie{Name: "csrf", Value: "csrf-token"})
+	bulkResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(bulkResponse, bulkRequest)
+	if bulkResponse.Code != http.StatusOK || !strings.Contains(bulkResponse.Body.String(), `"assignments"`) {
+		t.Fatalf("bulk assignment status=%d body=%s", bulkResponse.Code, bulkResponse.Body.String())
+	}
 	request := httptest.NewRequest(http.MethodGet, "/review/people/person-1", nil)
 	request.AddCookie(&http.Cookie{Name: "session", Value: token})
 	request.AddCookie(&http.Cookie{Name: "csrf", Value: "csrf-token"})
@@ -410,7 +444,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("CSP does not allow the page styles: %s", policy)
 	}
-	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card assigned\"", "class=\"grid\"", "dark green indicates", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:", "All non-assigned", "id=\"page-assignment-state\"", `data-person-filter="assignment-options-face-1"`, `value="person-1" selected`, `value="collection"`, `>Collection</option>`, `value="cluster"`, `>Cluster</option>`, `value="consistency"`, `>Consistency</option>`, `value="ref_recs"`, `>Ref Recs</option>`, `value="reference-or-recommended"`, `>Ref / Rec Refs</option>`, `value="without" selected`, `>With Out</option>`, `value="possibles"`, `>Possibles</option>`, `value="all"`, `>All</option>`} {
+	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card assigned\"", "class=\"grid\"", "dark green indicates", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:", "All non-assigned", `value="assigned-system">assigned-system</option>`, "id=\"page-assignment-state\"", `data-person-filter="assignment-options-face-1"`, `value="person-1" selected`, `value="collection"`, `>Collection</option>`, `value="cluster"`, `>Cluster</option>`, `value="consistency"`, `>Consistency</option>`, `value="ref_recs"`, `>Ref Recs</option>`, `value="reference-or-recommended"`, `>Ref / Rec Refs</option>`, `value="without" selected`, `>With Out</option>`, `value="possibles"`, `>Possibles</option>`, `value="all"`, `>All</option>`} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())
 		}

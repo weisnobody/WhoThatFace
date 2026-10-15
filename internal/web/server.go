@@ -166,6 +166,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /static/cluster.js", s.clusterScript)
 	mux.HandleFunc("GET /static/admin.js", s.adminScript)
 	mux.HandleFunc("POST /api/faces/{faceID}/assignment", s.assignFace)
+	mux.HandleFunc("POST /api/faces/assignments", s.assignFaces)
 	mux.HandleFunc("POST /api/faces/{faceID}/disposition", s.faceDisposition)
 	mux.HandleFunc("POST /api/faces/{faceID}/reference", s.referenceFace)
 	mux.HandleFunc("GET /", s.dashboard)
@@ -1465,7 +1466,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		}
 		body.WriteString(`<div class="person-page-actions"><div><label>Assignment <input type="checkbox" id="page-bulk-confirm" required> Bulk Assignment <select id="page-assignment-state"><option value="__all_non_assigned__">All non-assigned</option>`)
 		for _, state := range []string{"provisional", "assigned-system", "assigned-user", "unassigned", "unknown", "ambiguous"} {
-			if visibleStates[state] {
+			if state == "assigned-system" || visibleStates[state] {
 				body.WriteString(`<option value="` + state + `">` + state + `</option>`)
 			}
 		}
@@ -1847,14 +1848,12 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
     if (!faceIDs.length) { alert('No visible faces match the selected assignment.'); return; }
     const action = state === 'assigned-user' ? 'assign' : state;
     if (!confirm('Bulk ' + action + ' will affect ' + faceIDs.length + ' face' + (faceIDs.length === 1 ? '' : 's') + '. Continue?')) return;
-    for (const faceID of faceIDs) {
-      const response = await fetch('/api/faces/' + encodeURIComponent(faceID) + '/assignment', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
-        body: JSON.stringify({person_id: personID || '', state: state})
-      });
-      if (!response.ok) { alert(await response.text()); return; }
-    }
+    const response = await fetch('/api/faces/assignments', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
+      body: JSON.stringify({face_ids: faceIDs, person_id: personID || '', state: state})
+    });
+    if (!response.ok) { alert(await response.text()); return; }
     location.reload();
   }
   document.querySelectorAll('[data-action="page-unknown"], [data-action="page-ambiguous"]').forEach((button) => {
@@ -1941,7 +1940,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status, COUNT(DISTINCT cm.face_id), COUNT(DISTINCT rc.person_id), COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), substr(c.proposed_person_id, -8), '') FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id LEFT JOIN people p ON p.id = c.proposed_person_id WHERE cr.status = 'active'`
+	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status, COUNT(DISTINCT cm.face_id), COUNT(DISTINCT rc.person_id), COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), substr(c.proposed_person_id, -8), '') FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id AND rc.created_at = (SELECT MAX(rc2.created_at) FROM recognition_candidates rc2 WHERE rc2.face_id = rc.face_id) LEFT JOIN people p ON p.id = c.proposed_person_id WHERE cr.status = 'active'`
 	var clusterArgs []any
 	if allowed != nil {
 		if len(allowed) == 0 {
@@ -1953,7 +1952,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 			placeholders[i] = "?"
 			clusterArgs = append(clusterArgs, id)
 		}
-		clusterQuery += ` AND EXISTS (SELECT 1 FROM cluster_memberships cm2 JOIN faces f2 ON f2.id = cm2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE cm2.cluster_id = c.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `)`
+		clusterQuery += ` AND EXISTS (SELECT 1 FROM cluster_memberships cm2 JOIN faces f2 ON f2.id = cm2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE cm2.cluster_id = c.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
 	}
 	if query.Get("include_dont_track") != "true" {
 		clusterQuery += ` AND NOT EXISTS (SELECT 1 FROM cluster_memberships cm3 JOIN current_face_dispositions fd3 ON fd3.face_id = cm3.face_id WHERE cm3.cluster_id = c.id AND fd3.disposition = 'dont-track')`
@@ -2135,7 +2134,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 			body.WriteString(`<option value="` + option + `"` + selectedAttr(option, state) + `>` + option + `</option>`)
 		}
 		body.WriteString(`</select></label> <label>Disposition <select class="face-disposition"><option value="">None</option><option value="dont-track">Don't track</option><option value="false-detection">False detection</option><option value="incorrect-assignment">Incorrect assignment</option></select></label><div class="candidate">`)
-		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? ORDER BY rc.created_at DESC, rc.rank LIMIT 5`, faceID)
+		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? AND rc.created_at = (SELECT MAX(created_at) FROM recognition_candidates WHERE face_id = ?) ORDER BY rc.rank LIMIT 5`, faceID, faceID)
 		if candidateErr == nil {
 			for candidateRows.Next() {
 				var candidateID, name string
@@ -2565,6 +2564,43 @@ func (s *Server) assignFace(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, assignment)
+}
+
+func (s *Server) assignFaces(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.requireAccount(w, r)
+	if !ok {
+		return
+	}
+	if !validCSRFApi(r) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+	var input struct {
+		FaceIDs  []string               `json:"face_ids"`
+		PersonID string                 `json:"person_id"`
+		State    review.AssignmentState `json:"state"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "invalid assignment", http.StatusBadRequest)
+		return
+	}
+	if len(input.FaceIDs) == 0 {
+		http.Error(w, "at least one face is required", http.StatusBadRequest)
+		return
+	}
+	for _, faceID := range input.FaceIDs {
+		allowed, err := s.facePermission(r, account, faceID, true)
+		if err != nil || !allowed {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+	assignments, err := review.NewStore(s.db).AssignMany(r.Context(), input.FaceIDs, input.PersonID, input.State, review.Actor{Type: "user", AccountID: account.ID}, review.Evidence{}, "web-review")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignments": assignments})
 }
 
 func (s *Server) referenceFace(w http.ResponseWriter, r *http.Request) {
