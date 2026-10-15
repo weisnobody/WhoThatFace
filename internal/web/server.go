@@ -480,7 +480,12 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
+	view := r.URL.Query().Get("view")
+	if view != "possibles" && view != "dont-track" && view != "no-faces" {
+		view = "all"
+	}
 	possibleCount := `(SELECT COUNT(DISTINCT pc.face_id) FROM possible_face_candidates pc WHERE pc.person_id = p.id AND pc.is_current = 1)`
+	clusterCount := `(SELECT COUNT(DISTINCT c.id) FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cr.status = 'active' AND (c.proposed_person_id = p.id OR EXISTS (SELECT 1 FROM cluster_memberships cm JOIN current_face_assignments cca ON cca.face_id = cm.face_id WHERE cm.cluster_id = c.id AND cca.person_id = p.id)))`
 	var possibleArgs []any
 	if allowed != nil {
 		placeholders := make([]string, len(allowed))
@@ -497,6 +502,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND ca.state = 'provisional' THEN ca.face_id END),
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND cfr.reference = 1 THEN ca.face_id END),
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND rr.is_current = 1 THEN ca.face_id END),
+		` + clusterCount + `,
 		` + possibleCount + `
 		FROM people p
 		LEFT JOIN current_face_assignments ca ON ca.person_id = p.id
@@ -508,7 +514,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN reference_recommendations rr ON rr.face_id = ca.face_id AND rr.person_id = p.id
 		WHERE `
 	args := append([]any(nil), possibleArgs...)
-	if allowed != nil {
+	if allowed != nil && view != "no-faces" {
 		if len(allowed) == 0 {
 			body := `<h1>People</h1><p>No collections are assigned to this account.</p>`
 			s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body)})
@@ -518,7 +524,8 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		for i := range allowed {
 			placeholders[i] = "?"
 		}
-		peopleQuery += `EXISTS (SELECT 1 FROM faces f2 JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id JOIN current_face_assignments ca2 ON ca2.face_id = f2.id WHERE ca2.person_id = p.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
+		peopleQuery += ` (EXISTS (SELECT 1 FROM faces f2 JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id JOIN current_face_assignments ca2 ON ca2.face_id = f2.id WHERE ca2.person_id = p.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
+		peopleQuery += `)`
 		for _, id := range allowed {
 			args = append(args, id)
 		}
@@ -533,14 +540,14 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	type personRow struct {
-		ID, Name                                                                        string
-		DontTrack, Faces, User, System, Provisional, References, Recommended, Possibles int
+		ID, Name                                                                                  string
+		DontTrack, Faces, User, System, Provisional, References, Recommended, Clusters, Possibles int
 	}
 	var people []personRow
 	for rows.Next() {
 		var id, name string
 		var row personRow
-		if err := rows.Scan(&id, &name, &row.DontTrack, &row.Faces, &row.User, &row.System, &row.Provisional, &row.References, &row.Recommended, &row.Possibles); err != nil {
+		if err := rows.Scan(&id, &name, &row.DontTrack, &row.Faces, &row.User, &row.System, &row.Provisional, &row.References, &row.Recommended, &row.Clusters, &row.Possibles); err != nil {
 			http.Error(w, "people lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -554,30 +561,61 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	includeDontTrack := r.URL.Query().Get("include_dont_track") == "true"
 	includePossibles := r.URL.Query().Get("include_possibles") != "false"
+	includeNoFaces := r.URL.Query().Get("include_no_faces") == "true"
+	assignmentFiltersSpecified := false
+	for _, name := range []string{"assignment_user", "assignment_system", "assignment_provisional", "assignment_other"} {
+		if _, ok := r.URL.Query()[name]; ok {
+			assignmentFiltersSpecified = true
+			break
+		}
+	}
+	includeAssignmentUser := !assignmentFiltersSpecified || r.URL.Query().Get("assignment_user") == "true"
+	includeAssignmentSystem := !assignmentFiltersSpecified || r.URL.Query().Get("assignment_system") == "true"
+	includeAssignmentProvisional := !assignmentFiltersSpecified || r.URL.Query().Get("assignment_provisional") == "true"
+	includeAssignmentOther := !assignmentFiltersSpecified || r.URL.Query().Get("assignment_other") == "true"
 	filtered := people[:0]
 	for _, person := range people {
 		if q != "" && !strings.Contains(strings.ToLower(person.Name), q) {
 			continue
 		}
-		if !includeDontTrack && person.DontTrack != 0 {
-			continue
-		}
-		if !includePossibles && person.Possibles > 0 {
-			continue
-		}
-		filtered = append(filtered, person)
-	}
-	people = filtered
-	includeNoFaces := r.URL.Query().Get("include_no_faces") == "true"
-	if !includeNoFaces {
-		filtered = people[:0]
-		for _, person := range people {
-			if person.Faces > 0 {
-				filtered = append(filtered, person)
+		switch view {
+		case "possibles":
+			if person.Possibles == 0 {
+				continue
+			}
+		case "dont-track":
+			if person.DontTrack == 0 {
+				continue
+			}
+		case "no-faces":
+			if person.Faces != 0 {
+				continue
 			}
 		}
-		people = filtered
+		if view != "no-faces" {
+			if view != "dont-track" && !includeDontTrack && person.DontTrack != 0 {
+				continue
+			}
+			if !includePossibles && person.Possibles > 0 {
+				continue
+			}
+			if !includeNoFaces && person.Faces == 0 {
+				continue
+			}
+		}
+		other := person.Faces - person.User - person.System - person.Provisional
+		if view == "no-faces" {
+			filtered = append(filtered, person)
+			continue
+		}
+		if (includeAssignmentUser && person.User > 0) ||
+			(includeAssignmentSystem && person.System > 0) ||
+			(includeAssignmentProvisional && person.Provisional > 0) ||
+			(includeAssignmentOther && other > 0) {
+			filtered = append(filtered, person)
+		}
 	}
+	people = filtered
 	sortKey := r.URL.Query().Get("sort")
 	if sortKey == "" {
 		sortKey = "name"
@@ -594,6 +632,8 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 			left, right = fmt.Sprintf("%09d", people[i].System), fmt.Sprintf("%09d", people[j].System)
 		case "provisional":
 			left, right = fmt.Sprintf("%09d", people[i].Provisional), fmt.Sprintf("%09d", people[j].Provisional)
+		case "clusters":
+			left, right = fmt.Sprintf("%09d", people[i].Clusters), fmt.Sprintf("%09d", people[j].Clusters)
 		default:
 			left, right = strings.ToLower(people[i].Name), strings.ToLower(people[j].Name)
 		}
@@ -644,20 +684,20 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		return "/review/people?" + values.Encode()
 	}
 	var body strings.Builder
-	body.WriteString(`<h1>People (` + fmt.Sprint(len(pagePeople)) + `/` + fmt.Sprint(total) + `)</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><form id="people-controls" method="get"><strong>Filter</strong> <input name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `" placeholder="Filter name"><strong>Include:</strong> <label><input type="checkbox" name="include_possibles" value="true"` + checkedAttr(includePossibles) + `> Possibles</label><label><input type="checkbox" name="include_no_faces" value="true"` + checkedAttr(includeNoFaces) + `> No Faces</label><label><input type="checkbox" name="include_dont_track" value="true"` + checkedAttr(includeDontTrack) + `> Don't Track</label><label><strong>Sort</strong> <select name="sort">`)
-	for _, option := range []struct{ Value, Label string }{{"name", "Name"}, {"faces", "Faces"}, {"user", "User"}, {"system", "System"}, {"provisional", "Provisional"}} {
+	body.WriteString(`<h1>People (` + fmt.Sprint(len(pagePeople)) + `/` + fmt.Sprint(total) + `)</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><form id="people-controls" method="get"><strong>Filter</strong> <input name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `" placeholder="Filter name"><label><strong>View</strong> <select name="view"><option value="all"` + selectedAttr("all", view) + `>All</option><option value="possibles"` + selectedAttr("possibles", view) + `>Possibles</option><option value="dont-track"` + selectedAttr("dont-track", view) + `>Don't Track</option><option value="no-faces"` + selectedAttr("no-faces", view) + `>No Faces</option></select></label><strong>Include:</strong> <label><input type="checkbox" name="include_possibles" value="true"` + checkedAttr(includePossibles) + `> Possibles</label><label><input type="checkbox" name="include_no_faces" value="true"` + checkedAttr(includeNoFaces) + `> No Faces</label><label><input type="checkbox" name="include_dont_track" value="true"` + checkedAttr(includeDontTrack) + `> Don't Track</label><strong>Assignment:</strong> <label><input type="checkbox" name="assignment_user" value="true"` + checkedAttr(includeAssignmentUser) + `> User</label><label><input type="checkbox" name="assignment_system" value="true"` + checkedAttr(includeAssignmentSystem) + `> System</label><label><input type="checkbox" name="assignment_provisional" value="true"` + checkedAttr(includeAssignmentProvisional) + `> Provisional</label><label><input type="checkbox" name="assignment_other" value="true"` + checkedAttr(includeAssignmentOther) + `> Other</label><span class="people-controls-break"></span><label><strong>Sort</strong> <select name="sort">`)
+	for _, option := range []struct{ Value, Label string }{{"name", "Name"}, {"faces", "Faces"}, {"user", "User"}, {"system", "System"}, {"provisional", "Provisional"}, {"clusters", "Clusters"}} {
 		body.WriteString(`<option value="` + option.Value + `"` + selectedAttr(option.Value, sortKey) + `>` + option.Label + `</option>`)
 	}
 	body.WriteString(`</select></label><label><strong>Direction</strong> <select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select></label><label><strong>Per Page</strong> <select name="per_page" onchange="this.form.submit()">`)
 	for _, size := range []int{10, 20, 25, 50, 100} {
 		body.WriteString(`<option value="` + fmt.Sprint(size) + `"` + selectedAttr(fmt.Sprint(size), fmt.Sprint(perPage)) + `>` + fmt.Sprint(size) + `</option>`)
 	}
-	body.WriteString(`</select></label><button>Filter</button></form>`)
+	body.WriteString(`</select></label><button>Apply</button></form>`)
 	renderPager := func() {
-		body.WriteString(`<nav class="pager people-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><label>Jump to Page <input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"></label><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="include_possibles" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_possibles")) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_no_faces")) + `"><input type="hidden" name="include_dont_track" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_dont_track")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
+		body.WriteString(`<nav class="pager people-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><label>Jump to Page <input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"></label><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="view" value="` + template.HTMLEscapeString(view) + `"><input type="hidden" name="include_possibles" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_possibles")) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_no_faces")) + `"><input type="hidden" name="include_dont_track" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_dont_track")) + `"><input type="hidden" name="assignment_user" value="` + template.HTMLEscapeString(r.URL.Query().Get("assignment_user")) + `"><input type="hidden" name="assignment_system" value="` + template.HTMLEscapeString(r.URL.Query().Get("assignment_system")) + `"><input type="hidden" name="assignment_provisional" value="` + template.HTMLEscapeString(r.URL.Query().Get("assignment_provisional")) + `"><input type="hidden" name="assignment_other" value="` + template.HTMLEscapeString(r.URL.Query().Get("assignment_other")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
 	}
 	renderPager()
-	body.WriteString(`<table class="people-table"><tr><th>Name</th><th>Faces</th><th>User</th><th>System</th><th>Provisional</th><th>References</th><th>Ref Recs</th><th>Don't track</th><th>Possibles</th></tr>`)
+	body.WriteString(`<table class="people-table"><tr><th>Name</th><th>Faces</th><th>User</th><th>System</th><th>Provisional</th><th>Clusters</th><th>References</th><th>Ref Recs</th><th>Don't track</th><th>Possibles</th></tr>`)
 	for _, person := range pagePeople {
 		dontTrack := ""
 		if person.DontTrack != 0 {
@@ -667,12 +707,12 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		if person.Possibles > 0 {
 			possible = `<a href="/review/photos?candidate_person=` + template.HTMLEscapeString(person.ID) + `">` + fmt.Sprint(person.Possibles) + `</a>`
 		}
-		body.WriteString(`<tr><td><img loading="lazy" style="max-height:32px;width:auto;border-radius:4px;vertical-align:middle" alt="" src="/api/people/` + template.HTMLEscapeString(person.ID) + `/representative"> <a href="/review/people/` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</a></td><td>` + fmt.Sprint(person.Faces) + `</td><td>` + fmt.Sprint(person.User) + `</td><td>` + fmt.Sprint(person.System) + `</td><td>` + fmt.Sprint(person.Provisional) + `</td><td>` + fmt.Sprint(person.References) + `</td><td>` + fmt.Sprint(person.Recommended) + `</td><td>` + dontTrack + `</td><td>` + possible + `</td></tr>`)
+		body.WriteString(`<tr><td><img loading="lazy" style="max-height:32px;width:auto;border-radius:4px;vertical-align:middle" alt="" src="/api/people/` + template.HTMLEscapeString(person.ID) + `/representative"> <a href="/review/people/` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</a></td><td>` + fmt.Sprint(person.Faces) + `</td><td>` + fmt.Sprint(person.User) + `</td><td>` + fmt.Sprint(person.System) + `</td><td>` + fmt.Sprint(person.Provisional) + `</td><td>` + fmt.Sprint(person.Clusters) + `</td><td>` + fmt.Sprint(person.References) + `</td><td>` + fmt.Sprint(person.Recommended) + `</td><td>` + dontTrack + `</td><td>` + possible + `</td></tr>`)
 	}
 	body.WriteString(`</table>`)
 	renderPager()
 	body.WriteString(`<script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
-	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`#create-person{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0}#people-controls{display:flex;align-items:center;flex-wrap:nowrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}.people-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.people-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.people-table{width:max-content}`)})
+	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`#create-person{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0}#people-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#people-controls .people-controls-break{flex-basis:100%;height:0}#people-controls>button{margin-left:4rem}.people-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.people-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.people-table{width:max-content}`)})
 }
 
 func (s *Server) reviewCandidateRun(w http.ResponseWriter, r *http.Request) {

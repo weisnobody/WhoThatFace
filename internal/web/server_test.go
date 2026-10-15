@@ -81,8 +81,16 @@ func TestReviewPeopleWorksForRestrictedCollectionAccount(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "People") {
 		t.Fatalf("unexpected response: %s", response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), `<strong>Sort</strong> <select name="sort">`) || !strings.Contains(response.Body.String(), `</select></label><label><strong>Direction</strong>`) || !strings.Contains(response.Body.String(), `<strong>Per Page</strong>`) || !strings.Contains(response.Body.String(), `<label>Jump to Page <input type="number" name="page"`) {
+	if !strings.Contains(response.Body.String(), `<strong>Sort</strong> <select name="sort">`) || !strings.Contains(response.Body.String(), `value="clusters">Clusters</option>`) || !strings.Contains(response.Body.String(), `<th>Clusters</th><th>References</th>`) || !strings.Contains(response.Body.String(), `</select></label><label><strong>Direction</strong>`) || !strings.Contains(response.Body.String(), `<strong>Per Page</strong>`) || !strings.Contains(response.Body.String(), `<button>Apply</button>`) || !strings.Contains(response.Body.String(), `class="people-controls-break"`) || !strings.Contains(response.Body.String(), `#people-controls>button{margin-left:4rem}`) || !strings.Contains(response.Body.String(), `<label>Jump to Page <input type="number" name="page"`) {
 		t.Fatalf("people filter form has malformed sort labels: %s", response.Body.String())
+	}
+	for _, value := range []string{`<select name="view">`, `>All</option>`, `>Possibles</option>`, `>Don't Track</option>`, `>No Faces</option>`, `<strong>Assignment:</strong>`, `name="assignment_user"`, `name="assignment_system"`, `name="assignment_provisional"`, `name="assignment_other"`} {
+		if !strings.Contains(response.Body.String(), value) {
+			t.Errorf("people filter form is missing %q: %s", value, response.Body.String())
+		}
+	}
+	if strings.Count(response.Body.String(), `name="assignment_user" value="true" checked`) != 1 || strings.Count(response.Body.String(), `name="assignment_system" value="true" checked`) != 1 || strings.Count(response.Body.String(), `name="assignment_provisional" value="true" checked`) != 1 || strings.Count(response.Body.String(), `name="assignment_other" value="true" checked`) != 1 {
+		t.Fatalf("assignment filters are not checked by default: %s", response.Body.String())
 	}
 }
 
@@ -374,6 +382,22 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	server, err := NewServer(authStore, database)
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		query string
+		want  string
+		avoid string
+	}{
+		{query: "view=no-faces", want: "person-2", avoid: "person-1"},
+		{query: "assignment_user=true", want: "person-1", avoid: "person-2"},
+	} {
+		filteredRequest := httptest.NewRequest(http.MethodGet, "/review/people?"+testCase.query, nil)
+		filteredRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+		filteredResponse := httptest.NewRecorder()
+		server.Handler().ServeHTTP(filteredResponse, filteredRequest)
+		if filteredResponse.Code != http.StatusOK || !strings.Contains(filteredResponse.Body.String(), testCase.want) || strings.Contains(filteredResponse.Body.String(), testCase.avoid) {
+			t.Fatalf("people filter %q: status=%d body=%s", testCase.query, filteredResponse.Code, filteredResponse.Body.String())
+		}
 	}
 	request := httptest.NewRequest(http.MethodGet, "/review/people/person-1", nil)
 	request.AddCookie(&http.Cookie{Name: "session", Value: token})
