@@ -416,6 +416,18 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if clusterResponse.Code != http.StatusOK || !strings.Contains(clusterResponse.Body.String(), "support 4") || strings.Contains(clusterResponse.Body.String(), "support 1") {
 		t.Fatalf("cluster detail did not restrict candidates to the latest batch: status=%d body=%s", clusterResponse.Code, clusterResponse.Body.String())
 	}
+	for _, value := range []string{"← Clusters", "cluster-detail-controls", "Proposed person", "Consistency", "Candidate confidence", "face-person", "face-state", "face-disposition", "/review/photos?path_id=path-1", "/review/people/person-1"} {
+		if !strings.Contains(clusterResponse.Body.String(), value) {
+			t.Errorf("cluster detail missing %q: %s", value, clusterResponse.Body.String())
+		}
+	}
+	filteredClusterRequest := httptest.NewRequest(http.MethodGet, "/review/clusters/cluster-active?assignment_state=assigned-user&min_quality=80&sort=quality&direction=desc", nil)
+	filteredClusterRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	filteredClusterResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(filteredClusterResponse, filteredClusterRequest)
+	if filteredClusterResponse.Code != http.StatusOK || !strings.Contains(filteredClusterResponse.Body.String(), `name="min_quality"`) || !strings.Contains(filteredClusterResponse.Body.String(), `value="80"`) || !strings.Contains(filteredClusterResponse.Body.String(), `value="desc" selected`) {
+		t.Fatalf("cluster detail filters were not preserved: status=%d body=%s", filteredClusterResponse.Code, filteredClusterResponse.Body.String())
+	}
 	clusterListRequest := httptest.NewRequest(http.MethodGet, "/review/clusters", nil)
 	clusterListRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
 	clusterListResponse := httptest.NewRecorder()

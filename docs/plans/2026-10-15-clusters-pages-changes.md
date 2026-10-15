@@ -2,15 +2,15 @@
 
 ## Goal and decisions
 
-- [ ] Align `/review/clusters` and `/review/clusters/<id>` with the people review UI.
-- [ ] Preserve cluster-specific mixed-cluster behavior and review safeguards.
+- [x] Align `/review/clusters` and `/review/clusters/<id>` with the people review UI.
+- [x] Preserve cluster-specific mixed-cluster behavior and review safeguards.
 - [x] Expose all persisted clustering run statuses, with active runs selected by default.
 - [x] Mark all non-active runs visibly and make them read-only.
 - [x] For multi-person clusters, show accessible assigned people ordered by assigned-face count and display `Multiple` when applicable.
 
 ## Shared review UI
 
-- [ ] Refactor shared helpers for filter/control rendering.
+- [x] Refactor shared helpers for filter/control rendering.
 - [x] Refactor shared helpers for selected options and checkbox state.
 - [x] Refactor shared helpers for pagination and query-parameter preservation.
 - [x] Reuse score and unavailable-value formatting.
@@ -105,7 +105,7 @@
 
 - [x] Add a people-style header with readable cluster title and key/ID.
 - [x] Link the proposed person to its person detail page.
-- [ ] Show Face count, Candidate count, Proposed person, Consistency, Purity, Connectivity, Mixed, Review status, and clustering-run status in the summary.
+- [x] Show Face count, Candidate count, Proposed person, Consistency, Purity, Connectivity, Mixed, Review status, and clustering-run status in the summary.
 - [x] Keep the review version visible where useful for concurrency handling.
 - [x] Add a clear link back to `/review/clusters`.
 - [x] Move mixed-cluster warnings into a shared alert area.
@@ -116,12 +116,12 @@
 - [x] Distinguish review status from clustering-run status.
 - [x] Label the run state as `Cluster: <status>`.
 - [x] Move inline cluster styles into `PageStyle`.
-- [ ] Reuse people-detail style names and layout conventions.
+- [x] Reuse people-detail style names and layout conventions.
 - [x] Use a responsive grid and card-width strategy.
 - [x] Reuse shared spacing, typography, borders, and controls.
 - [x] Preserve cluster-specific mixed and assignment styling.
 - [x] Keep the Default person, Status, Note, and Save review controls.
-- [ ] Place controls in a prominent people-style page-action area.
+- [x] Place controls in a prominent people-style page-action area.
 - [x] Preserve save behavior and optimistic/concurrency version handling.
 - [x] Make save success and error messages visually consistent.
 
@@ -137,7 +137,7 @@
 - [x] Display possible candidates using people-page presentation.
 - [x] Keep disposition, person assignment, and face-state controls.
 - [x] Use consistent assignment-state card border colors.
-- [ ] Match people-page card action placement, spacing, and input treatment.
+- [x] Match people-page card action placement, spacing, and input treatment.
 - [x] Show an explicit empty state when filters match no faces.
 - [x] Show a distinct empty state when the cluster has no accessible faces.
 - [x] Link assigned people to person detail pages.
@@ -167,28 +167,28 @@
 - [x] Verify clusters with no accessible faces are hidden.
 - [x] Verify representative-image access and fallback behavior.
 - [x] Verify pagination, clamping, page jump, and parameter preservation.
-- [ ] Verify detail header and summary fields.
-- [ ] Verify proposed-person, person, photo, cluster, and candidate links.
-- [ ] Verify mixed-cluster warnings and disabled default assignment.
-- [ ] Verify historical warnings and read-only behavior.
-- [ ] Verify detail controls render with current values.
-- [ ] Verify face cards contain required metadata and actions.
-- [ ] Verify recognition and possible-candidate rendering.
-- [ ] Verify detail filters and sorting.
-- [ ] Verify both detail empty states.
-- [ ] Verify collection access enforcement.
-- [ ] Verify viewer/editor action differences.
-- [ ] Verify CSRF protection.
-- [ ] Verify save behavior and review-version conflicts.
-- [ ] Run the full Go test suite.
-- [ ] Run `git diff --check`.
+- [x] Verify detail header and summary fields.
+- [x] Verify proposed-person, person, photo, cluster, and candidate links.
+- [x] Verify mixed-cluster warnings and disabled default assignment.
+- [x] Verify historical warnings and read-only behavior.
+- [x] Verify detail controls render with current values.
+- [x] Verify face cards contain required metadata and actions.
+- [x] Verify recognition and possible-candidate rendering.
+- [x] Verify detail filters and sorting.
+- [x] Verify both detail empty states.
+- [x] Verify collection access enforcement.
+- [x] Verify viewer/editor action differences.
+- [x] Verify CSRF protection.
+- [x] Verify save behavior and review-version conflicts.
+- [x] Run the full Go test suite.
+- [x] Run `git diff --check`.
 
 ## Assumptions
 
-- [ ] Treat all persisted run statuses as selectable, with active as the default.
-- [ ] Treat queued, running, completed, superseded, failed, and cancelled runs as read-only.
-- [ ] Define Historical as any non-active, non-superseded run.
-- [ ] Use accessible assigned faces only for assigned-person aggregation.
-- [ ] Keep the proposed person in the summary without artificially adding it to the assigned-person list.
-- [ ] Use numeric 0–100 percentage inputs for quality and detection filters.
-- [ ] Do not add a schema migration unless implementation discovers an existing field is insufficient.
+- [x] Treat all persisted run statuses as selectable, with active as the default.
+- [x] Treat queued, running, completed, superseded, failed, and cancelled runs as read-only.
+- [x] Define Historical as any non-active, non-superseded run.
+- [x] Use accessible assigned faces only for assigned-person aggregation.
+- [x] Keep the proposed person in the summary without artificially adding it to the assigned-person list.
+- [x] Use numeric 0–100 percentage inputs for quality and detection filters.
+- [x] Do not add a schema migration unless implementation discovers an existing field is insufficient.
