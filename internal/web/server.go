@@ -2035,16 +2035,20 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clusterID := r.PathValue("clusterID")
-	var runStatus, supersededBy, reviewStatus, collectionID string
-	var reviewVersion, mixed int
+	var runStatus, supersededBy, reviewStatus, collectionID, proposedPersonID, proposedPersonName string
+	var reviewVersion, mixed, membershipCount int
+	var purityValue, consistencyValue, connectivityValue sql.NullFloat64
 	err := s.db.QueryRowContext(r.Context(), `
 		SELECT cr.status, COALESCE(cr.superseded_by, ''), c.review_status, c.review_version, c.is_mixed,
+		       c.purity, c.consistency, c.connectivity,
+		       COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), substr(c.proposed_person_id, -8), ''),
+		       (SELECT COUNT(*) FROM cluster_memberships cm2 WHERE cm2.cluster_id = c.id),
 		       (SELECT pp.collection_id FROM cluster_memberships cm
 				JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id
 				JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
 		WHERE cm.cluster_id = c.id LIMIT 1)
-		FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE c.id = ?`, clusterID).
-		Scan(&runStatus, &supersededBy, &reviewStatus, &reviewVersion, &mixed, &collectionID)
+		FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN people p ON p.id = c.proposed_person_id WHERE c.id = ?`, clusterID).
+		Scan(&runStatus, &supersededBy, &reviewStatus, &reviewVersion, &mixed, &purityValue, &consistencyValue, &connectivityValue, &proposedPersonID, &proposedPersonName, &membershipCount, &collectionID)
 	if err == sql.ErrNoRows {
 		http.NotFound(w, r)
 		return
@@ -2053,10 +2057,21 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 		return
 	}
-	allowed, err := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, false, false)
-	if err != nil || !allowed {
+	accessibleCollections, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if accessibleCollections != nil && len(accessibleCollections) == 0 {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	}
+	if accessibleCollections == nil {
+		allowed, permissionErr := s.auth.CanAccessCollection(r.Context(), account.ID, collectionID, false, false)
+		if permissionErr != nil || !allowed {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 	peopleRows, err := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8))), id`)
 	if err != nil {
@@ -2075,7 +2090,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		people = append(people, person)
 	}
 	peopleRows.Close()
-	rows, err := s.db.QueryContext(r.Context(), `
+	faceQuery := `
 		SELECT cm.face_id, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''),
 		       COALESCE(pp.id, ''), COALESCE(pp.relative_path, ''), COALESCE(pa.width, 0), COALESCE(pa.height, 0),
 		       f.box_left, f.box_top, f.box_right, f.box_bottom,
@@ -2084,37 +2099,145 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id
 		JOIN photo_assets pa ON pa.id = a.asset_id
 		LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id
-		LEFT JOIN photo_paths pp ON pp.asset_id = pa.id AND pp.collection_id = ?
-		WHERE cm.cluster_id = ? ORDER BY cm.face_id`, collectionID, clusterID)
+		LEFT JOIN assignment_events ae ON ae.id = ca.event_id
+		JOIN photo_paths pp ON pp.asset_id = pa.id
+		WHERE cm.cluster_id = ? AND pp.missing_at IS NULL`
+	faceArgs := []any{clusterID}
+	if accessibleCollections != nil {
+		faceQuery += ` AND pp.collection_id IN (` + placeholders(len(accessibleCollections)) + `)`
+		for _, id := range accessibleCollections {
+			faceArgs = append(faceArgs, id)
+		}
+	} else {
+		faceQuery += ` AND pp.collection_id = ?`
+		faceArgs = append(faceArgs, collectionID)
+	}
+	detailQuery := r.URL.Query()
+	if value := detailQuery.Get("assignment_state"); value != "" {
+		faceQuery += ` AND COALESCE(ca.state, 'unassigned') = ?`
+		faceArgs = append(faceArgs, value)
+	}
+	if value := strings.TrimSpace(detailQuery.Get("assigned_person")); value != "" {
+		faceQuery += ` AND (LOWER(COALESCE(ca.person_id, '')) LIKE ? OR EXISTS (SELECT 1 FROM people fp WHERE fp.id = ca.person_id AND LOWER(COALESCE(fp.name, '')) LIKE ?))`
+		pattern := "%" + strings.ToLower(value) + "%"
+		faceArgs = append(faceArgs, pattern, pattern)
+	}
+	if value := detailQuery.Get("disposition"); value != "" {
+		if value == "none" {
+			faceQuery += ` AND NOT EXISTS (SELECT 1 FROM current_face_dispositions fdx WHERE fdx.face_id = cm.face_id)`
+		} else {
+			faceQuery += ` AND EXISTS (SELECT 1 FROM current_face_dispositions fdx WHERE fdx.face_id = cm.face_id AND fdx.disposition = ?)`
+			faceArgs = append(faceArgs, value)
+		}
+	}
+	if value := detailQuery.Get("min_quality"); value != "" {
+		if score, parseErr := strconv.ParseFloat(value, 64); parseErr == nil {
+			faceQuery += ` AND f.quality >= ?`
+			faceArgs = append(faceArgs, score/100)
+		}
+	}
+	if value := detailQuery.Get("max_quality"); value != "" {
+		if score, parseErr := strconv.ParseFloat(value, 64); parseErr == nil {
+			faceQuery += ` AND f.quality <= ?`
+			faceArgs = append(faceArgs, score/100)
+		}
+	}
+	if value := detailQuery.Get("min_detection"); value != "" {
+		if score, parseErr := strconv.ParseFloat(value, 64); parseErr == nil {
+			faceQuery += ` AND f.detection_confidence >= ?`
+			faceArgs = append(faceArgs, score/100)
+		}
+	}
+	if value := detailQuery.Get("max_detection"); value != "" {
+		if score, parseErr := strconv.ParseFloat(value, 64); parseErr == nil {
+			faceQuery += ` AND f.detection_confidence <= ?`
+			faceArgs = append(faceArgs, score/100)
+		}
+	}
+	if value := detailQuery.Get("candidate_presence"); value == "with" || value == "without" {
+		candidateExists := `EXISTS (SELECT 1 FROM recognition_candidates rcf WHERE rcf.face_id = cm.face_id AND rcf.created_at = (SELECT MAX(rcf2.created_at) FROM recognition_candidates rcf2 WHERE rcf2.face_id = cm.face_id))`
+		if value == "without" {
+			candidateExists = "NOT " + candidateExists
+		}
+		faceQuery += ` AND ` + candidateExists
+	}
+	if value := detailQuery.Get("possible_presence"); value == "with" || value == "without" {
+		possibleExists := `EXISTS (SELECT 1 FROM possible_face_candidates pcf WHERE pcf.face_id = cm.face_id AND pcf.is_current = 1)`
+		if value == "without" {
+			possibleExists = "NOT " + possibleExists
+		}
+		faceQuery += ` AND ` + possibleExists
+	}
+	orderBy := map[string]string{"path": "pp.relative_path", "person": "LOWER(COALESCE(ca.person_id, ''))", "assignment_state": "COALESCE(ca.state, 'unassigned')", "disposition": "COALESCE((SELECT disposition FROM current_face_dispositions WHERE face_id = cm.face_id), '')", "quality": "f.quality", "detection": "f.detection_confidence", "confidence": "COALESCE(ae.similarity, 0)"}[detailQuery.Get("sort")]
+	if orderBy == "" {
+		orderBy = "pp.relative_path"
+	}
+	direction := "ASC"
+	if strings.EqualFold(detailQuery.Get("direction"), "desc") {
+		direction = "DESC"
+	}
+	faceQuery += ` ORDER BY ` + orderBy + ` ` + direction + `, cm.face_id`
+	rows, err := s.db.QueryContext(r.Context(), faceQuery, faceArgs...)
 	if err != nil {
 		http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 	var body strings.Builder
-	body.WriteString(`<style>.cluster-grid{display:flex;flex-wrap:wrap;gap:18px}.cluster-face{width:min(420px,45vw);border:4px solid;padding:10px}.photo-frame{position:relative;display:inline-block;max-width:100%}.photo-frame img{max-width:100%;max-height:55vh;display:block}.face-box{position:absolute;border:2px solid #f00;box-sizing:border-box;pointer-events:none}.cluster-face select{max-width:100%}.candidate{font-size:.9rem;margin-top:6px}.cluster-controls{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}</style>`)
-	body.WriteString(`<div id="cluster-page" data-cluster-id="` + template.HTMLEscapeString(clusterID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-version="` + fmt.Sprint(reviewVersion) + `">`)
-	body.WriteString(`<h1>Cluster ` + template.HTMLEscapeString(idSuffix(clusterID)) + `</h1>`)
-	body.WriteString(`<p>Review status: ` + template.HTMLEscapeString(reviewStatus) + `; version ` + fmt.Sprint(reviewVersion) + `; run: ` + template.HTMLEscapeString(runStatus) + `</p>`)
-	if mixed != 0 {
-		body.WriteString(`<p class="error">This cluster is mixed: review each face explicitly. A default person cannot bulk-confirm it.</p>`)
+	canModify := account.Role != auth.Viewer && runStatus == "active"
+	disabledAttr := ""
+	if !canModify {
+		disabledAttr = ` disabled`
 	}
-	if runStatus == "superseded" {
-		body.WriteString(`<p class="error">This is a historical clustering run. A newer run is active`)
+	pageStyle := template.CSS(`#cluster-page{max-width:100%}.cluster-grid{display:flex;flex-wrap:wrap;gap:18px}.cluster-face{width:min(420px,45vw);border:4px solid;padding:10px}.cluster-face.assigned{border-color:#2a9d50}.cluster-face.provisional{border-color:#d6a800}.cluster-face.needs-attention{border-color:#c62828}.photo-frame{position:relative;display:inline-block;max-width:100%}.photo-frame img{max-width:100%;max-height:55vh;display:block}.face-box{position:absolute;border:2px solid #f00;box-sizing:border-box;pointer-events:none}.cluster-face select{max-width:100%}.candidate{font-size:.9rem;margin-top:6px}.cluster-controls{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.cluster-alert{border:1px solid #c62828;background:#fff1f1;padding:.75rem;margin:.75rem 0}.cluster-summary{display:flex;flex-wrap:wrap;gap:.75rem}.cluster-summary div{min-width:7rem}.cluster-summary dt{font-size:.8rem;color:#666}.cluster-summary dd{margin:.15rem 0 0;font-weight:600}`)
+	body.WriteString(`<div id="cluster-page" data-cluster-id="` + template.HTMLEscapeString(clusterID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-version="` + fmt.Sprint(reviewVersion) + `"><p><a href="/review/clusters">← Clusters</a></p><header class="cluster-header"><h1>Cluster ` + template.HTMLEscapeString(idSuffix(clusterID)) + ` <small>(` + template.HTMLEscapeString(clusterID) + `)</small></h1><dl class="cluster-summary"><div><dt>Review</dt><dd>` + template.HTMLEscapeString(reviewStatus) + `</dd></div><div><dt>Cluster</dt><dd>` + template.HTMLEscapeString(humanRunStatus(runStatus)) + `</dd></div><div><dt>Proposed person</dt><dd>`)
+	if proposedPersonID == "" {
+		body.WriteString(`Unassigned`)
+	} else {
+		body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(proposedPersonID) + `"><img alt="" src="/api/people/` + template.HTMLEscapeString(proposedPersonID) + `/representative">` + template.HTMLEscapeString(proposedPersonName) + `</a>`)
+	}
+	body.WriteString(`</dd></div><div><dt>Purity</dt><dd>` + formatScoreUnavailable(purityValue.Float64, purityValue.Valid) + `</dd></div><div><dt>Consistency</dt><dd>` + formatScoreUnavailable(consistencyValue.Float64, consistencyValue.Valid) + `</dd></div><div><dt>Connectivity</dt><dd>` + formatScoreUnavailable(connectivityValue.Float64, connectivityValue.Valid) + `</dd></div><div><dt>Mixed</dt><dd>`)
+	if mixed != 0 {
+		body.WriteString(`X`)
+	}
+	body.WriteString(`</dd></div></dl></header>`)
+	if mixed != 0 {
+		body.WriteString(`<div class="cluster-alert">This cluster is mixed: review each face explicitly. A default person cannot bulk-confirm it.</div>`)
+	}
+	if runStatus != "active" {
+		body.WriteString(`<div class="cluster-alert">This is a historical clustering run. It is read-only`)
 		if supersededBy != "" {
 			body.WriteString(` (` + template.HTMLEscapeString(idSuffix(supersededBy)) + `)`)
 		}
-		body.WriteString(`. Review changes are still recorded against this historical cluster.</p>`)
+		body.WriteString(`.</div>`)
 	}
-	body.WriteString(`<div class="cluster-controls"><label>Default person <select id="default-person"`)
+	body.WriteString(`<form id="cluster-detail-controls" method="get"><div><label>Assignment <select name="assignment_state"><option value="">Any</option>`)
+	for _, value := range []string{"unassigned", "unknown", "ambiguous", "provisional", "assigned-system", "assigned-user"} {
+		body.WriteString(clusterOption(value, assignmentLabel(value), detailQuery.Get("assignment_state")))
+	}
+	body.WriteString(`</select></label><label>Person <input name="assigned_person" value="` + template.HTMLEscapeString(detailQuery.Get("assigned_person")) + `"></label><label>Disposition <select name="disposition">` + clusterOption("", "Any", detailQuery.Get("disposition")) + clusterOption("none", "None", detailQuery.Get("disposition")) + clusterOption("dont-track", "Don’t track", detailQuery.Get("disposition")) + clusterOption("false-detection", "False detection", detailQuery.Get("disposition")) + clusterOption("incorrect-assignment", "Incorrect assignment", detailQuery.Get("disposition")) + `</select></label><label>Candidates <select name="candidate_presence">` + clusterOption("", "Any", detailQuery.Get("candidate_presence")) + clusterOption("with", "With candidates", detailQuery.Get("candidate_presence")) + clusterOption("without", "Without candidates", detailQuery.Get("candidate_presence")) + `</select></label><label>Possible <select name="possible_presence">` + clusterOption("", "Any", detailQuery.Get("possible_presence")) + clusterOption("with", "With possibles", detailQuery.Get("possible_presence")) + clusterOption("without", "Without possibles", detailQuery.Get("possible_presence")) + `</select></label>`)
+	for _, field := range []string{"min_quality", "max_quality", "min_detection", "max_detection"} {
+		body.WriteString(`<label>` + strings.Title(strings.ReplaceAll(field, "_", " ")) + ` <input type="number" name="` + field + `" min="0" max="100" step="0.1" value="` + template.HTMLEscapeString(detailQuery.Get(field)) + `"></label>`)
+	}
+	body.WriteString(`</div><div><label>Sort <select name="sort">`)
+	for _, option := range []struct{ value, label string }{{"path", "Face/path"}, {"person", "Person"}, {"assignment_state", "Assignment state"}, {"disposition", "Disposition"}, {"consistency", "Consistency"}, {"quality", "Quality"}, {"detection", "Detection"}, {"confidence", "Candidate confidence"}} {
+		body.WriteString(clusterOption(option.value, option.label, detailQuery.Get("sort")))
+	}
+	detailDirection := "asc"
+	if strings.EqualFold(detailQuery.Get("direction"), "desc") {
+		detailDirection = "desc"
+	}
+	body.WriteString(`</select></label><label>Direction <select name="direction">` + clusterOption("asc", "Ascending", detailDirection) + clusterOption("desc", "Descending", detailDirection) + `</select></label><button>Apply</button></div></form>`)
+	body.WriteString(`<div class="cluster-controls"><label>Default person <select id="default-person"` + disabledAttr)
 	if mixed != 0 {
 		body.WriteString(` disabled`)
 	}
 	body.WriteString(`><option value="">No default</option>`)
 	for _, person := range people {
-		body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</option>`)
+		body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selectedAttr(person.ID, proposedPersonID) + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
 	}
-	body.WriteString(`</select></label> <label>Status <select id="cluster-status"><option>in-progress</option><option>partially-reviewed</option><option>reviewed</option><option>needs-review</option></select></label> <label>Note <input id="cluster-note" size="45"></label> <button id="save-cluster" type="button">Save review</button></div><p id="cluster-message"></p><div class="cluster-grid">`)
+	body.WriteString(`</select></label> <label>Status <select id="cluster-status"` + disabledAttr + `>` + clusterOption("unreviewed", "Unreviewed", reviewStatus) + clusterOption("in-progress", "In progress", reviewStatus) + clusterOption("partially-reviewed", "Partially reviewed", reviewStatus) + clusterOption("reviewed", "Reviewed", reviewStatus) + clusterOption("needs-review", "Needs review", reviewStatus) + `</select></label> <label>Note <input id="cluster-note" size="45"` + disabledAttr + `></label> <button id="save-cluster" type="button"` + disabledAttr + `>Save review</button></div><p id="cluster-message"></p><div class="cluster-grid">`)
+	renderedFaces := 0
 	for rows.Next() {
 		var faceID, state, personID, pathID, relativePath string
 		var width, height int
@@ -2123,17 +2246,25 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
-		color := faceStateColor(state)
-		body.WriteString(`<article class="cluster-face" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-original-state="` + template.HTMLEscapeString(state) + `" data-original-person="` + template.HTMLEscapeString(personID) + `" style="border-color:` + color + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="face ` + template.HTMLEscapeString(idSuffix(faceID)) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(pathID) + `">` + template.HTMLEscapeString(relativePath) + `</a></div><div>Face ` + template.HTMLEscapeString(idSuffix(faceID)) + ` · ` + template.HTMLEscapeString(state) + ` · Quality ` + formatScore(quality) + `% · Detection ` + formatScore(detection) + `%</div><label>Person <select class="face-person"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+		renderedFaces++
+		body.WriteString(`<article class="` + template.HTMLEscapeString("cluster-face "+func() string {
+			if state == string(review.AssignedUser) || state == string(review.AssignedSystem) {
+				return "assigned"
+			}
+			if state == string(review.Provisional) {
+				return "provisional"
+			}
+			return "needs-attention"
+		}()) + `" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-original-state="` + template.HTMLEscapeString(state) + `" data-original-person="` + template.HTMLEscapeString(personID) + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="face ` + template.HTMLEscapeString(idSuffix(faceID)) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(pathID) + `">` + template.HTMLEscapeString(relativePath) + `</a></div><div>Face ` + template.HTMLEscapeString(idSuffix(faceID)) + ` · ` + template.HTMLEscapeString(state) + ` · Quality ` + formatScore(quality) + `% · Detection ` + formatScore(detection) + `%</div><label>Person <select class="face-person"` + disabledAttr + `><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
 		for _, person := range people {
 			selected := selectedAttr(person.ID, personID)
 			body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selected + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
 		}
-		body.WriteString(`</select></label> <label>State <select class="face-state">`)
+		body.WriteString(`</select></label> <label>State <select class="face-state"` + disabledAttr + `>`)
 		for _, option := range []string{"unassigned", "unknown", "ambiguous", "provisional", "assigned-system", "assigned-user"} {
 			body.WriteString(`<option value="` + option + `"` + selectedAttr(option, state) + `>` + option + `</option>`)
 		}
-		body.WriteString(`</select></label> <label>Disposition <select class="face-disposition"><option value="">None</option><option value="dont-track">Don't track</option><option value="false-detection">False detection</option><option value="incorrect-assignment">Incorrect assignment</option></select></label><div class="candidate">`)
+		body.WriteString(`</select></label> <label>Disposition <select class="face-disposition"` + disabledAttr + `><option value="">None</option><option value="dont-track">Don't track</option><option value="false-detection">False detection</option><option value="incorrect-assignment">Incorrect assignment</option></select></label><div class="candidate">`)
 		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? AND rc.created_at = (SELECT MAX(created_at) FROM recognition_candidates WHERE face_id = ?) ORDER BY rc.rank LIMIT 5`, faceID, faceID)
 		if candidateErr == nil {
 			for candidateRows.Next() {
@@ -2146,10 +2277,26 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 			}
 			candidateRows.Close()
 		}
+		possibleCandidates, possibleErr := s.currentPossibleCandidates(r.Context(), faceID)
+		if possibleErr == nil && len(possibleCandidates) > 0 {
+			body.WriteString(`<strong>Possible matches:</strong> `)
+			for index, candidate := range possibleCandidates {
+				if index > 0 {
+					body.WriteString(`, `)
+				}
+				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a>` + template.HTMLEscapeString(fmt.Sprintf(" (S: %.3f, margin %.3f, support %d, %s)", candidate.Similarity, candidate.Margin, candidate.Support, candidate.Evidence)))
+			}
+		}
 		body.WriteString(`</div></article>`)
 	}
+	if renderedFaces == 0 && membershipCount > 0 {
+		body.WriteString(`<p class="cluster-alert">No faces match the active filters.</p>`)
+	}
+	if renderedFaces == 0 && membershipCount == 0 {
+		body.WriteString(`<p class="cluster-alert">This cluster has no faces.</p>`)
+	}
 	body.WriteString(`</div><p>Green means user-assigned, yellow means the selected/default person is provisional or system-assigned, and red means the face needs attention. Save may be used before every face is assigned.</p></div><script src="/static/cluster.js" defer></script>`)
-	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Body": template.HTML(body.String())})
+	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Body": template.HTML(body.String()), "PageStyle": pageStyle})
 }
 
 func (s *Server) clusterScript(w http.ResponseWriter, _ *http.Request) {
@@ -2279,7 +2426,7 @@ func (s *Server) reviewClusterAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cluster not found", http.StatusNotFound)
 		return
 	}
-	if runStatus == "superseded" {
+	if runStatus != "active" {
 		http.Error(w, "historical cluster runs are read-only", http.StatusConflict)
 		return
 	}
@@ -2299,6 +2446,31 @@ func (s *Server) reviewClusterAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid review", http.StatusBadRequest)
 		return
 	}
+	memberRows, err := s.db.QueryContext(r.Context(), `SELECT face_id FROM cluster_memberships WHERE cluster_id = ?`, clusterID)
+	if err != nil {
+		http.Error(w, "cluster membership lookup failed", http.StatusInternalServerError)
+		return
+	}
+	for memberRows.Next() {
+		var faceID string
+		if err := memberRows.Scan(&faceID); err != nil {
+			memberRows.Close()
+			http.Error(w, "cluster membership lookup failed", http.StatusInternalServerError)
+			return
+		}
+		faceAllowed, permissionErr := s.facePermission(r, account, faceID, true)
+		if permissionErr != nil || !faceAllowed {
+			memberRows.Close()
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+	if err := memberRows.Err(); err != nil {
+		memberRows.Close()
+		http.Error(w, "cluster membership lookup failed", http.StatusInternalServerError)
+		return
+	}
+	memberRows.Close()
 	if err := review.NewStore(s.db).ReviewCluster(r.Context(), clusterID, input.DefaultPersonID, input.Status, input.ExpectedVersion, input.Decisions, review.Actor{Type: "user", AccountID: account.ID}, input.Note); err != nil {
 		if errors.Is(err, review.ErrUndoConflict) || strings.Contains(err.Error(), "review conflict") {
 			http.Error(w, err.Error(), http.StatusConflict)

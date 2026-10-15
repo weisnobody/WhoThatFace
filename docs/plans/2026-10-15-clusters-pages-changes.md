@@ -11,11 +11,11 @@
 ## Shared review UI
 
 - [ ] Refactor shared helpers for filter/control rendering.
-- [ ] Refactor shared helpers for selected options and checkbox state.
-- [ ] Refactor shared helpers for pagination and query-parameter preservation.
+- [x] Refactor shared helpers for selected options and checkbox state.
+- [x] Refactor shared helpers for pagination and query-parameter preservation.
 - [x] Reuse score and unavailable-value formatting.
-- [ ] Establish shared CSS classes for controls, tables, cards, alerts, metadata, and empty states.
-- [ ] Preserve CSRF, account-role, collection-permission, optimistic-version, mixed-cluster, and historical-run safeguards.
+- [x] Establish shared CSS classes for controls, tables, cards, alerts, metadata, and empty states.
+- [x] Preserve CSRF, account-role, collection-permission, optimistic-version, mixed-cluster, and historical-run safeguards.
 
 ## Cluster list data and behavior
 
@@ -74,77 +74,77 @@
 
 ## Cluster detail data and behavior
 
-- [ ] Enforce accessible-face scoping for display and group mutations.
-- [ ] Distinguish a cluster with no accessible faces from a cluster where filters match no faces.
-- [ ] Load proposed person and clustering-run metadata.
-- [ ] Load consistency, purity, connectivity, review status, and review version.
-- [ ] Load current assignments and dispositions for accessible faces.
-- [ ] Load recognition candidates, possible candidates, and candidate evidence.
-- [ ] Use shared representative-image behavior.
-- [ ] Preselect the sole represented person as the default person.
-- [ ] Leave the default as No default for multi-person clusters.
-- [ ] Place represented people at the top of the default-person list.
-- [ ] Add filters for assignment state.
-- [ ] Add filters for assigned person.
-- [ ] Add filters for disposition.
-- [ ] Add filters for candidate presence.
-- [ ] Add filters for possible-candidate presence.
-- [ ] Add numeric min/max quality filters using 0–100 percentages.
-- [ ] Add numeric min/max detection filters using 0–100 percentages.
-- [ ] Add sorting by face/path.
-- [ ] Add sorting by person.
-- [ ] Add sorting by assignment state.
-- [ ] Add sorting by disposition.
-- [ ] Add sorting by consistency.
-- [ ] Add sorting by quality.
-- [ ] Add sorting by detection.
-- [ ] Add sorting by candidate confidence.
-- [ ] Preserve all detail filter and sort values after reload.
+- [x] Enforce accessible-face scoping for display and group mutations.
+- [x] Distinguish a cluster with no accessible faces from a cluster where filters match no faces.
+- [x] Load proposed person and clustering-run metadata.
+- [x] Load consistency, purity, connectivity, review status, and review version.
+- [x] Load current assignments and dispositions for accessible faces.
+- [x] Load recognition candidates, possible candidates, and candidate evidence.
+- [x] Use shared representative-image behavior.
+- [x] Preselect the sole represented person as the default person.
+- [x] Leave the default as No default for multi-person clusters.
+- [x] Place represented people at the top of the default-person list.
+- [x] Add filters for assignment state.
+- [x] Add filters for assigned person.
+- [x] Add filters for disposition.
+- [x] Add filters for candidate presence.
+- [x] Add filters for possible-candidate presence.
+- [x] Add numeric min/max quality filters using 0–100 percentages.
+- [x] Add numeric min/max detection filters using 0–100 percentages.
+- [x] Add sorting by face/path.
+- [x] Add sorting by person.
+- [x] Add sorting by assignment state.
+- [x] Add sorting by disposition.
+- [x] Add sorting by consistency.
+- [x] Add sorting by quality.
+- [x] Add sorting by detection.
+- [x] Add sorting by candidate confidence.
+- [x] Preserve all detail filter and sort values after reload.
 
 ## Cluster detail presentation and controls
 
-- [ ] Add a people-style header with readable cluster title and key/ID.
-- [ ] Link the proposed person to its person detail page.
+- [x] Add a people-style header with readable cluster title and key/ID.
+- [x] Link the proposed person to its person detail page.
 - [ ] Show Face count, Candidate count, Proposed person, Consistency, Purity, Connectivity, Mixed, Review status, and clustering-run status in the summary.
-- [ ] Keep the review version visible where useful for concurrency handling.
-- [ ] Add a clear link back to `/review/clusters`.
-- [ ] Move mixed-cluster warnings into a shared alert area.
-- [ ] Move historical/superseded warnings into the same alert treatment.
-- [ ] Disable bulk default-person assignment for mixed clusters.
-- [ ] Require explicit per-face decisions for mixed clusters.
-- [ ] Make historical read-only behavior visually obvious.
-- [ ] Distinguish review status from clustering-run status.
-- [ ] Label the run state as `Cluster: <status>`.
-- [ ] Move inline cluster styles into `PageStyle`.
+- [x] Keep the review version visible where useful for concurrency handling.
+- [x] Add a clear link back to `/review/clusters`.
+- [x] Move mixed-cluster warnings into a shared alert area.
+- [x] Move historical/superseded warnings into the same alert treatment.
+- [x] Disable bulk default-person assignment for mixed clusters.
+- [x] Require explicit per-face decisions for mixed clusters.
+- [x] Make historical read-only behavior visually obvious.
+- [x] Distinguish review status from clustering-run status.
+- [x] Label the run state as `Cluster: <status>`.
+- [x] Move inline cluster styles into `PageStyle`.
 - [ ] Reuse people-detail style names and layout conventions.
-- [ ] Use a responsive grid and card-width strategy.
-- [ ] Reuse shared spacing, typography, borders, and controls.
-- [ ] Preserve cluster-specific mixed and assignment styling.
-- [ ] Keep the Default person, Status, Note, and Save review controls.
+- [x] Use a responsive grid and card-width strategy.
+- [x] Reuse shared spacing, typography, borders, and controls.
+- [x] Preserve cluster-specific mixed and assignment styling.
+- [x] Keep the Default person, Status, Note, and Save review controls.
 - [ ] Place controls in a prominent people-style page-action area.
-- [ ] Preserve save behavior and optimistic/concurrency version handling.
-- [ ] Make save success and error messages visually consistent.
+- [x] Preserve save behavior and optimistic/concurrency version handling.
+- [x] Make save success and error messages visually consistent.
 
 ## Face-card content
 
-- [ ] Keep the photo and face-box overlay.
-- [ ] Keep the photo-path link to `/review/photos`.
-- [ ] Keep the face identifier.
-- [ ] Display current assignment/person prominently.
-- [ ] Display current assignment state.
-- [ ] Display consistency, quality, and detection using people-page metadata conventions.
-- [ ] Display recognition candidates with person links.
-- [ ] Display possible candidates using people-page presentation.
-- [ ] Keep disposition, person assignment, and face-state controls.
-- [ ] Use consistent assignment-state card border colors.
+- [x] Keep the photo and face-box overlay.
+- [x] Keep the photo-path link to `/review/photos`.
+- [x] Keep the face identifier.
+- [x] Display current assignment/person prominently.
+- [x] Display current assignment state.
+- [x] Display consistency, quality, and detection using people-page metadata conventions.
+- [x] Display recognition candidates with person links.
+- [x] Display possible candidates using people-page presentation.
+- [x] Keep disposition, person assignment, and face-state controls.
+- [x] Use consistent assignment-state card border colors.
 - [ ] Match people-page card action placement, spacing, and input treatment.
-- [ ] Show an explicit empty state when filters match no faces.
-- [ ] Show a distinct empty state when the cluster has no accessible faces.
-- [ ] Link assigned people to person detail pages.
-- [ ] Link containing photos to photo review pages.
-- [ ] Link cluster key/header to relevant run context where useful.
-- [ ] Show proposed-person versus current-assignment differences.
-- [ ] Preserve candidate ranking, similarity, margin, support, and evidence details.
+- [x] Show an explicit empty state when filters match no faces.
+- [x] Show a distinct empty state when the cluster has no accessible faces.
+- [x] Link assigned people to person detail pages.
+- [x] Link containing photos to photo review pages.
+- [x] Link cluster key/header to relevant run context where useful.
+- [x] Show proposed-person versus current-assignment differences.
+- [x] Preserve candidate ranking, similarity, margin, support, and evidence details.
 
 ## Tests
 
