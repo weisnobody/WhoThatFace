@@ -15,6 +15,47 @@ import (
 	"github.com/pjg/face_me_bro/internal/review"
 )
 
+func TestPossibleFaceForPersonOnlyIncludesActionableAssignments(t *testing.T) {
+	candidates := []possibleCandidateView{{PersonID: "person-1"}}
+	for _, testCase := range []struct {
+		name                          string
+		state, assignedPerson, person string
+		want                          bool
+	}{
+		{name: "assigned system to person", state: string(review.AssignedSystem), assignedPerson: "person-1", person: "person-1", want: false},
+		{name: "assigned user to person", state: string(review.AssignedUser), assignedPerson: "person-1", person: "person-1", want: false},
+		{name: "unknown candidate", state: string(review.Unknown), assignedPerson: "", person: "person-1", want: true},
+		{name: "provisional candidate for another person", state: string(review.Provisional), assignedPerson: "person-2", person: "person-1", want: true},
+		{name: "provisional candidate for same person", state: string(review.Provisional), assignedPerson: "person-1", person: "person-1", want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := possibleFaceForPerson(testCase.state, testCase.assignedPerson, testCase.person, candidates); got != testCase.want {
+				t.Fatalf("possibleFaceForPerson() = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestCandidateRenderersFormatAssignedPerson(t *testing.T) {
+	recognition := renderRecognitionCandidates([]recognitionCandidateView{
+		{PersonID: "person-1", Name: "One", Similarity: 0.91},
+		{PersonID: "person-2", Name: "Two", Similarity: 0.79},
+	}, "face-1", "person-1", false)
+	for _, want := range []string{
+		`<strong>Candidates:</strong><div class="candidate-list"><strong><a href="/review/people/person-1">One</a></strong>`,
+		`<br><a href="/review/people/person-2">Two</a>`,
+	} {
+		if !strings.Contains(recognition, want) {
+			t.Fatalf("candidate rendering missing %q: %s", want, recognition)
+		}
+	}
+
+	possible := renderPossibleMatches([]possibleCandidateView{{PersonID: "person-1", PersonName: "One"}}, "face-1", "person-1", false)
+	if !strings.Contains(possible, `<strong><a href="/review/people/person-1">One</a></strong>`) {
+		t.Fatalf("possible-match rendering did not emphasize the assigned person: %s", possible)
+	}
+}
+
 func TestLoginRequiresCSRFAndCreatesSession(t *testing.T) {
 	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "web.sqlite3"))
 	if err != nil {
@@ -413,10 +454,13 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	clusterRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
 	clusterResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(clusterResponse, clusterRequest)
-	if clusterResponse.Code != http.StatusOK || !strings.Contains(clusterResponse.Body.String(), "support 4") || strings.Contains(clusterResponse.Body.String(), "support 1") {
+	if clusterResponse.Code != http.StatusOK || !strings.Contains(clusterResponse.Body.String(), "Sp: 4") || strings.Contains(clusterResponse.Body.String(), "support 1") {
 		t.Fatalf("cluster detail did not restrict candidates to the latest batch: status=%d body=%s", clusterResponse.Code, clusterResponse.Body.String())
 	}
-	for _, value := range []string{"← Clusters", "cluster-detail-controls", "Proposed person", "Consistency", "Candidate confidence", "face-person", "face-state", "face-disposition", "/review/photos?path_id=path-1", "/review/people/person-1"} {
+	if !strings.Contains(clusterResponse.Body.String(), "<dt>Candidates</dt><dd>N/A</dd>") {
+		t.Fatalf("cluster detail did not render N/A for an all-assigned cluster: %s", clusterResponse.Body.String())
+	}
+	for _, value := range []string{"Face-Me-Bro", `class="breadcrumb">› <a href="/review/clusters">Clusters</a>`, "cluster-detail-controls", "Proposed person", "Consistency", "Review version", "Candidate confidence", "class=\"grid cluster-grid\"", "class=\"card cluster-face assigned\"", `value="person-1" selected`, "User:</strong> Cs:", `data-action="unknown"`, `data-action="ambiguous"`, `data-disposition="incorrect-assignment"`, `data-disposition="false-detection">No Face`, `data-disposition="dont-track">Don't Track`, "person-select-filter", "data-action=\"assign\"", "/review/photos?path_id=path-1", "/review/people/person-1"} {
 		if !strings.Contains(clusterResponse.Body.String(), value) {
 			t.Errorf("cluster detail missing %q: %s", value, clusterResponse.Body.String())
 		}
@@ -432,7 +476,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	clusterListRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
 	clusterListResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(clusterListResponse, clusterListRequest)
-	if clusterListResponse.Code != http.StatusOK || !strings.Contains(clusterListResponse.Body.String(), ">1</td><td>N/A</td><td>0</td><td>1</td>") {
+	if clusterListResponse.Code != http.StatusOK || !strings.Contains(clusterListResponse.Body.String(), ">1</td><td>N/A</td><td>0</td><td>0</td><td>1</td>") {
 		t.Fatalf("cluster list did not count latest candidates only: status=%d body=%s", clusterListResponse.Code, clusterListResponse.Body.String())
 	}
 	bulkRequest := httptest.NewRequest(http.MethodPost, "/api/faces/assignments", strings.NewReader(`{"face_ids":["face-1"],"person_id":"person-1","state":"assigned-user"}`))
@@ -456,7 +500,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("CSP does not allow the page styles: %s", policy)
 	}
-	for _, value := range []string{"person-1", "/api/photos/path-1", "class=\"box reference\"", "class=\"card assigned\"", "class=\"grid\"", "dark green indicates", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", "Similarity Max:", "All non-assigned", `value="assigned-system">assigned-system</option>`, "id=\"page-assignment-state\"", `data-person-filter="assignment-options-face-1"`, `value="person-1" selected`, `value="collection"`, `>Collection</option>`, `value="cluster"`, `>Cluster</option>`, `value="consistency"`, `>Consistency</option>`, `value="ref_recs"`, `>Ref Recs</option>`, `value="reference-or-recommended"`, `>Ref / Rec Refs</option>`, `value="without" selected`, `>With Out</option>`, `value="possibles"`, `>Possibles</option>`, `value="all"`, `>All</option>`} {
+	for _, value := range []string{"person-1", `class="breadcrumb">› <a href="/review/people">People</a>`, "/api/photos/path-1", "class=\"box reference\"", "class=\"card assigned\"", "class=\"grid\"", "dark green indicates", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", `class="person-summary-table"`, "<dt>Similarity</dt><dd>91.0% - 91.0%", "<dt>Cluster Min/Max</dt>", "<dt>Faces</dt><dd>1 / 1", "<dt>Possibles</dt><dd>0 / 0", "<dt>References</dt><dd>1", "<strong>Filter:</strong>", "<strong>Sort:</strong>", "All non-assigned", `value="assigned-system">assigned-system</option>`, "id=\"page-assignment-state\"", `data-person-filter="assignment-options-face-1"`, `value="person-1" selected`, `value="collection"`, `>Collection</option>`, `value="cluster"`, `>Cluster</option>`, `value="consistency"`, `>Consistency</option>`, `value="possibles"`, `>Possibles</option>`, `value="ref_recs"`, `>Ref Recs</option>`, `value="reference-or-recommended"`, `>Ref / Rec Refs</option>`, `value="without" selected`, `>With Out</option>`, `value="only"`, `>Only</option>`, `value="all"`, `>All</option>`} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())
 		}
@@ -464,8 +508,11 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if strings.Index(response.Body.String(), `data-action="representative"`) > strings.Index(response.Body.String(), `data-action="role"`) {
 		t.Fatalf("person photo card buttons are in the wrong order: %s", response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), "Max: 91.0%, Min: 91.0%") {
+	if !strings.Contains(response.Body.String(), "<dt>Similarity</dt><dd>91.0% - 91.0%") {
 		t.Fatalf("person confidence summary was not derived from the candidate: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "Candidates:") || !strings.Contains(response.Body.String(), "S: 91.0% M: 12.0% Sp: 4 Q: 90.0% D: 99.0%") {
+		t.Fatalf("person page did not render the latest recognition candidates: %s", response.Body.String())
 	}
 	headEnd := strings.Index(response.Body.String(), "</head>")
 	gridStyle := strings.Index(response.Body.String(), ".grid{")
@@ -511,7 +558,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if photoResponse.Code != http.StatusOK {
 		t.Fatalf("photo review status = %d, body = %s", photoResponse.Code, photoResponse.Body.String())
 	}
-	for _, value := range []string{"Face 1", "photo-box", "data-action=\"unknown\"", "data-action=\"ambiguous\"", "data-action=\"assign\"", "data-action=\"role\"", "/static/photo.js"} {
+	for _, value := range []string{`class="breadcrumb">› <a href="/review/photos">Photos</a>`, "Face 1", "photo-box", "data-action=\"unknown\"", "data-action=\"ambiguous\"", "data-action=\"assign\"", "data-action=\"role\"", "/static/photo.js"} {
 		if !strings.Contains(photoResponse.Body.String(), value) {
 			t.Errorf("photo review is missing %q: %s", value, photoResponse.Body.String())
 		}

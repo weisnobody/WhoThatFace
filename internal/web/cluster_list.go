@@ -11,13 +11,13 @@ import (
 )
 
 type clusterListRow struct {
-	ID, Key, RunID, RunStatus, ReviewStatus string
-	ProposedPersonID, ProposedPersonName    string
-	People                                  []clusterListPerson
-	Purity, Consistency, Connectivity       sql.NullFloat64
-	Mixed                                   bool
-	FaceCount, CandidateCount, ToAssign     int
-	AssignedMatch                           int
+	ID, Key, RunID, RunStatus, ReviewStatus    string
+	ProposedPersonID, ProposedPersonName       string
+	People                                     []clusterListPerson
+	Purity, Consistency, Connectivity          sql.NullFloat64
+	Mixed                                      bool
+	FaceCount, CandidateCount, ToAssign, Other int
+	AssignedMatch                              int
 }
 
 type clusterListPerson struct {
@@ -56,7 +56,8 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 		JOIN analyses a ON a.id = f.analysis_id
 		JOIN photo_assets pa ON pa.id = a.asset_id
 		JOIN photo_paths pp ON pp.asset_id = pa.id
-		WHERE pp.missing_at IS NULL`
+		WHERE pp.missing_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM current_face_dispositions fd WHERE fd.face_id = cm.face_id AND fd.disposition = 'false-detection')`
 	var args []any
 	if allowed != nil {
 		clusterQuery += ` AND pp.collection_id IN (` + placeholders(len(allowed)) + `)`
@@ -75,6 +76,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 		COUNT(DISTINCT vm.face_id),
 		COUNT(DISTINCT CASE WHEN lc.similarity >= 0.015 THEN vm.face_id END),
 		COUNT(DISTINCT CASE WHEN COALESCE(ca.state, 'unassigned') NOT IN ('assigned-user', 'assigned-system') THEN vm.face_id END),
+		COUNT(DISTINCT CASE WHEN COALESCE(ca.state, 'unassigned') NOT IN ('provisional', 'assigned-user', 'assigned-system') THEN vm.face_id END),
 		COUNT(DISTINCT CASE WHEN COALESCE(ca.state, 'unassigned') IN ('assigned-user', 'assigned-system') AND ca.person_id = c.proposed_person_id THEN vm.face_id END)
 	FROM clusters c
 	JOIN clustering_runs cr ON cr.id = c.clustering_run_id
@@ -111,7 +113,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var row clusterListRow
 		var mixed int
-		if err := rows.Scan(&row.ID, &row.Key, &row.RunID, &row.RunStatus, &row.ProposedPersonID, &row.ProposedPersonName, &row.Purity, &row.Consistency, &row.Connectivity, &mixed, &row.ReviewStatus, &row.FaceCount, &row.CandidateCount, &row.ToAssign, &row.AssignedMatch); err != nil {
+		if err := rows.Scan(&row.ID, &row.Key, &row.RunID, &row.RunStatus, &row.ProposedPersonID, &row.ProposedPersonName, &row.Purity, &row.Consistency, &row.Connectivity, &mixed, &row.ReviewStatus, &row.FaceCount, &row.CandidateCount, &row.ToAssign, &row.Other, &row.AssignedMatch); err != nil {
 			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -132,6 +134,8 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	minFaces, maxFaces := parseIntFilter(query.Get("min_faces")), parseIntFilter(query.Get("max_faces"))
 	minConsistency, maxConsistency := parseScoreFilter(query.Get("min_consistency")), parseScoreFilter(query.Get("max_consistency"))
 	rating := query.Get("rating")
+	otherFilter := query.Get("other") == "true"
+	toAssignFilter := query.Get("to_assign") == "true"
 	filtered := clusters[:0]
 	for _, row := range clusters {
 		personText := strings.ToLower(row.ProposedPersonID + " " + row.ProposedPersonName)
@@ -148,6 +152,9 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !matchesClusterRating(row, rating) {
+			continue
+		}
+		if (otherFilter || toAssignFilter) && !(otherFilter && row.Other > 0 || toAssignFilter && row.ToAssign > 0) {
 			continue
 		}
 		filtered = append(filtered, row)
@@ -206,10 +213,11 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	body.WriteString(`</select></label>`)
 	body.WriteString(`<label><strong>Rating</strong> <select name="rating">` + clusterOption("", "Any rating", rating) + clusterOption("high", "High", rating) + clusterOption("medium", "Medium", rating) + clusterOption("low", "Low", rating) + `</select></label>`)
 	body.WriteString(`<label><input type="checkbox" name="include_dont_track" value="true"` + checkedAttr(query.Get("include_dont_track") == "true") + `> Include Don’t Track</label>`)
+	body.WriteString(`<label><input type="checkbox" name="other" value="true"` + checkedAttr(otherFilter) + `> Other &gt; 0</label><label><input type="checkbox" name="to_assign" value="true"` + checkedAttr(toAssignFilter) + `> To Assign &gt; 0</label>`)
 	body.WriteString(`<label>Min faces <input name="min_faces" type="number" min="1" value="` + template.HTMLEscapeString(query.Get("min_faces")) + `"></label><label>Max faces <input name="max_faces" type="number" min="1" value="` + template.HTMLEscapeString(query.Get("max_faces")) + `"></label>`)
 	body.WriteString(`<label>Min consistency <input name="min_consistency" type="number" min="0" max="100" step="0.1" value="` + template.HTMLEscapeString(query.Get("min_consistency")) + `"></label><label>Max consistency <input name="max_consistency" type="number" min="0" max="100" step="0.1" value="` + template.HTMLEscapeString(query.Get("max_consistency")) + `"></label></div>`)
 	body.WriteString(`<div class="clusters-sort-controls"><label><strong>Sort</strong> <select name="sort">`)
-	for _, option := range []struct{ value, label string }{{"mixed", "Mixed"}, {"face_count", "Face count"}, {"candidate_count", "Candidate count"}, {"person", "Person"}, {"rating", "Rating"}, {"review_status", "Review status"}, {"to_assign", "To Be Assigned"}, {"cluster_key", "Cluster key"}} {
+	for _, option := range []struct{ value, label string }{{"mixed", "Mixed"}, {"face_count", "Face count"}, {"candidate_count", "Candidate count"}, {"person", "Person"}, {"rating", "Rating"}, {"review_status", "Review status"}, {"to_assign", "To Be Assigned"}, {"other", "Other"}, {"cluster_key", "Cluster key"}} {
 		body.WriteString(clusterOption(option.value, option.label, sortKey))
 	}
 	body.WriteString(`</select></label><label><strong>Direction</strong> <select name="direction">` + clusterOption("asc", "Ascending", direction) + clusterOption("desc", "Descending", direction) + `</select></label><label><strong>Per Page</strong> <select name="per_page">`)
@@ -218,7 +226,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</select></label><button>Apply</button></div></form>`)
 	renderClusterPager(&body, r, page, pageCount, perPage)
-	body.WriteString(`<table class="clusters-table"><thead><tr><th>Cluster</th><th>Person</th><th>Faces</th><th>Candidates</th><th>To Assign</th><th>Assigned Match</th><th>Consistency</th><th>Purity</th><th>Connectivity</th><th>Mixed</th><th>Review</th><th>Type</th></tr></thead><tbody>`)
+	body.WriteString(`<table class="clusters-table"><thead><tr><th>Cluster</th><th>Person</th><th>Faces</th><th>Candidates</th><th>To Assign</th><th>Other</th><th>Assigned Match</th><th>Consistency</th><th>Purity</th><th>Connectivity</th><th>Mixed</th><th>Review</th><th>Type</th></tr></thead><tbody>`)
 	for _, row := range pageClusters {
 		personCell := clusterPeopleHTML(row)
 		candidateCount := strconv.Itoa(row.CandidateCount)
@@ -235,7 +243,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 		if row.Mixed {
 			mixedCell = "X"
 		}
-		body.WriteString(`<tr><td><a href="/review/clusters/` + template.HTMLEscapeString(row.ID) + `">` + template.HTMLEscapeString(row.Key) + `</a></td><td>` + personCell + `</td><td>` + strconv.Itoa(row.FaceCount) + `</td><td>` + candidateCount + `</td><td>` + strconv.Itoa(row.ToAssign) + `</td><td>` + assignedMatch + `</td><td>` + formatScoreUnavailable(row.Consistency.Float64, row.Consistency.Valid) + `</td><td>` + formatScoreUnavailable(row.Purity.Float64, row.Purity.Valid) + `</td><td>` + formatScoreUnavailable(row.Connectivity.Float64, row.Connectivity.Valid) + `</td><td>` + mixedCell + `</td><td>` + template.HTMLEscapeString(humanReviewStatus(row.ReviewStatus)) + `</td><td>` + template.HTMLEscapeString(clusterType(row.RunStatus)) + `</td></tr>`)
+		body.WriteString(`<tr><td><a href="/review/clusters/` + template.HTMLEscapeString(row.ID) + `">` + template.HTMLEscapeString(row.Key) + `</a></td><td>` + personCell + `</td><td>` + strconv.Itoa(row.FaceCount) + `</td><td>` + candidateCount + `</td><td>` + strconv.Itoa(row.ToAssign) + `</td><td>` + strconv.Itoa(row.Other) + `</td><td>` + assignedMatch + `</td><td>` + formatScoreUnavailable(row.Consistency.Float64, row.Consistency.Valid) + `</td><td>` + formatScoreUnavailable(row.Purity.Float64, row.Purity.Valid) + `</td><td>` + formatScoreUnavailable(row.Connectivity.Float64, row.Connectivity.Valid) + `</td><td>` + mixedCell + `</td><td>` + template.HTMLEscapeString(humanReviewStatus(row.ReviewStatus)) + `</td><td>` + template.HTMLEscapeString(clusterType(row.RunStatus)) + `</td></tr>`)
 	}
 	body.WriteString(`</tbody></table>`)
 	renderClusterPager(&body, r, page, pageCount, perPage)
@@ -341,6 +349,8 @@ func compareClusterRows(left, right clusterListRow, key string) int {
 		return compareInt(left.ToAssign, right.ToAssign)
 	case "to_assign":
 		return compareInt(left.ToAssign, right.ToAssign)
+	case "other":
+		return compareInt(left.Other, right.Other)
 	case "cluster_key":
 		return strings.Compare(left.Key, right.Key)
 	default:

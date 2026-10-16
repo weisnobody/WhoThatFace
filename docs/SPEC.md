@@ -790,12 +790,13 @@ have at least one approved reference face. It does not mutate assignments,
 create automatic assignments, or change cluster membership.
 
 The default target set includes `unknown`, `ambiguous`, and `unassigned` faces,
-plus faces in provisional people with one through five current provisional
-faces. `assigned-user` and don't-track faces are excluded by default;
-`assigned-system` and don't-track inclusion are explicit options. Faces without
-compatible embeddings or pipeline provenance are skipped. The default limits
-are five provisional faces per person, five retained candidates per target,
-and a 0.25 similarity floor. Candidates below the floor may still be retained
+plus faces in named provisional people with one through five current
+provisional faces, and faces in unnamed temporary people with one through 50
+current provisional faces. `assigned-user` and `assigned-system` faces, as
+well as don't-track faces, are excluded. Faces without compatible embeddings
+or pipeline provenance are skipped. The default limits are five named
+provisional faces per person, 50 temporary faces per person, five retained
+candidates per target, and a 0.25 similarity floor. Candidates below the floor may still be retained
 when they are among the configured top-ranked results.
 
 Each run records its scope, policy snapshot, pipeline and reference-set

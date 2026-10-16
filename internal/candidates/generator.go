@@ -244,7 +244,7 @@ func (g Generator) loadTargets(ctx context.Context, request Request) ([]targetFa
 		       CASE
 		         WHEN COALESCE(ca.state, 'unassigned') IN ('unknown', 'ambiguous', 'unassigned') THEN COALESCE(ca.state, 'unassigned')
 		         WHEN COALESCE(ca.state, '') = 'assigned-system' THEN 'assigned-system'
-		         ELSE 'provisional-assignment,small-provisional-person'
+			ELSE CASE WHEN COALESCE(TRIM(p.name), '') = '' THEN 'provisional-assignment,temporary-provisional-person' ELSE 'provisional-assignment,small-provisional-person' END
 		       END,
 		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
 		FROM faces f
@@ -258,14 +258,17 @@ func (g Generator) loadTargets(ctx context.Context, request Request) ([]targetFa
 		  AND COALESCE(ca.state, 'unassigned') <> 'assigned-user'
 		  AND (
 			COALESCE(ca.state, 'unassigned') IN ('unknown', 'ambiguous', 'unassigned')
-			OR (COALESCE(ca.state, '') = 'provisional' AND COALESCE(p.is_provisional, 0) = 1 AND pc.face_count BETWEEN 1 AND ?)
-			OR (? = 1 AND COALESCE(ca.state, '') = 'assigned-system')
+			OR (COALESCE(ca.state, '') = 'provisional' AND COALESCE(p.is_provisional, 0) = 1 AND pc.face_count BETWEEN 1 AND CASE WHEN COALESCE(TRIM(p.name), '') = '' THEN ? ELSE ? END)
 		  )
 		  AND (? = 1 OR NOT EXISTS (
 			SELECT 1 FROM current_face_dispositions fd
 			WHERE fd.face_id = f.id AND fd.disposition = 'dont-track'
 		  ))`
-	args := []any{g.pipelineID, g.config.MaxProvisionalFaces, boolInt(g.config.IncludeAssignedSystem), boolInt(g.config.IncludeDontTrack)}
+	temporaryLimit := g.config.MaxTemporaryFaces
+	if temporaryLimit <= 0 {
+		temporaryLimit = DefaultConfig().MaxTemporaryFaces
+	}
+	args := []any{g.pipelineID, temporaryLimit, g.config.MaxProvisionalFaces, boolInt(g.config.IncludeDontTrack)}
 	if request.Scope == "person" {
 		query += ` AND ca.person_id = ?`
 		args = append(args, request.ScopeID)

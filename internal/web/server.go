@@ -25,18 +25,20 @@ import (
 	"github.com/pjg/face_me_bro/internal/id"
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/media"
+	"github.com/pjg/face_me_bro/internal/recognition"
 	"github.com/pjg/face_me_bro/internal/representative"
 	"github.com/pjg/face_me_bro/internal/review"
 	"github.com/pjg/face_me_bro/internal/search"
 )
 
 type Server struct {
-	auth       auth.Store
-	db         *sql.DB
-	pythonPath string
-	templates  *template.Template
-	statusJSON []byte
-	setupJSON  []byte
+	auth                  auth.Store
+	db                    *sql.DB
+	pythonPath            string
+	templates             *template.Template
+	statusJSON            []byte
+	setupJSON             []byte
+	recognitionThresholds recognition.Thresholds
 }
 
 type possibleCandidateView struct {
@@ -49,6 +51,75 @@ type possibleCandidateView struct {
 	Evidence, RetentionReason       string
 	CreatedAt                       string
 	Current                         bool
+}
+
+type recognitionCandidateView struct {
+	PersonID, Name, Evidence string
+	Similarity, Margin       float64
+	Support                  int
+	Quality, Detection       float64
+}
+
+func (s *Server) latestRecognitionCandidates(ctx context.Context, faceID string) ([]recognitionCandidateView, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id),
+		       rc.similarity, rc.margin, rc.support_count, rc.quality, rc.detection_confidence, rc.evidence
+		FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id
+		WHERE rc.face_id = ? AND rc.created_at = (SELECT MAX(created_at) FROM recognition_candidates WHERE face_id = ?)
+		ORDER BY rc.rank LIMIT 5`, faceID, faceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []recognitionCandidateView
+	for rows.Next() {
+		var candidate recognitionCandidateView
+		if err := rows.Scan(&candidate.PersonID, &candidate.Name, &candidate.Similarity, &candidate.Margin, &candidate.Support, &candidate.Quality, &candidate.Detection, &candidate.Evidence); err != nil {
+			return nil, err
+		}
+		result = append(result, candidate)
+	}
+	return result, rows.Err()
+}
+
+func renderRecognitionCandidates(candidates []recognitionCandidateView, faceID, assignedPersonID string, canAssign bool) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	var body strings.Builder
+	body.WriteString(`<div class="person-candidates recognition-candidates"><strong>Candidates:</strong><div class="candidate-list">`)
+	for index, candidate := range candidates {
+		if index > 0 {
+			body.WriteString(`<br>`)
+		}
+		name := `<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.Name) + `</a>`
+		if candidate.PersonID == assignedPersonID {
+			name = `<strong>` + name + `</strong>`
+		}
+		body.WriteString(name + ` (S: ` + formatScore(candidate.Similarity) + `% M: ` + formatScore(candidate.Margin) + `% Sp: ` + fmt.Sprint(candidate.Support) + ` Q: ` + formatScore(candidate.Quality) + `% D: ` + formatScore(candidate.Detection) + `%)`)
+		if canAssign {
+			body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="">Assign</button>`)
+		}
+	}
+	body.WriteString(`</div></div>`)
+	return body.String()
+}
+
+func possibleFaceForPerson(state, assignedPersonID, personID string, candidates []possibleCandidateView) bool {
+	_, possible := possibleSimilarityForPerson(state, assignedPersonID, personID, candidates)
+	return possible
+}
+
+func possibleSimilarityForPerson(state, assignedPersonID, personID string, candidates []possibleCandidateView) (float64, bool) {
+	if assignedPersonID == personID || (state != string(review.Unknown) && state != string(review.Provisional)) {
+		return 0, false
+	}
+	for _, candidate := range candidates {
+		if candidate.PersonID == personID {
+			return candidate.Similarity, true
+		}
+	}
+	return 0, false
 }
 
 func (s *Server) currentPossibleCandidates(ctx context.Context, faceID string) ([]possibleCandidateView, error) {
@@ -84,6 +155,27 @@ func (s *Server) currentPossibleCandidates(ctx context.Context, faceID string) (
 	return result, rows.Err()
 }
 
+func renderPossibleMatches(candidates []possibleCandidateView, faceID, assignedPersonID string, canAssign bool) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	var body strings.Builder
+	body.WriteString(`<div class="person-candidates possible-candidates"><strong>Possible matches:</strong><div class="candidate-list">`)
+	for _, candidate := range candidates {
+		name := `<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a>`
+		if candidate.PersonID == assignedPersonID {
+			name = `<strong>` + name + `</strong>`
+		}
+		body.WriteString(`<div class="possible-match">` + name + ` (S: ` + formatScore(candidate.Similarity) + `% M: ` + formatScore(candidate.Margin) + `% Sp: ` + fmt.Sprint(candidate.Support) + ` Q: ` + formatScore(candidate.Quality) + `% D: ` + formatScore(candidate.Detection) + `% <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
+		if canAssign {
+			body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
+		}
+		body.WriteString(`</div>`)
+	}
+	body.WriteString(`</div></div>`)
+	return body.String()
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1
@@ -114,17 +206,23 @@ func splitCSV(value string) []string {
 }
 
 func NewServer(authStore auth.Store, database *sql.DB) (*Server, error) {
-	return newServer(authStore, database, "")
+	return newServer(authStore, database, "", recognition.DefaultThresholds())
 }
 
 func NewServerWithPython(authStore auth.Store, database *sql.DB, pythonPath string) (*Server, error) {
-	return newServer(authStore, database, pythonPath)
+	return newServer(authStore, database, pythonPath, recognition.DefaultThresholds())
 }
 
 // NewServerWithDiagnostics configures the dashboard's status and setup-check
 // pages with the same snapshots used when the serve command starts.
 func NewServerWithDiagnostics(authStore auth.Store, database *sql.DB, pythonPath string, statusJSON, setupJSON []byte) (*Server, error) {
-	server, err := newServer(authStore, database, pythonPath)
+	return NewServerWithDiagnosticsAndThresholds(authStore, database, pythonPath, statusJSON, setupJSON, recognition.DefaultThresholds())
+}
+
+// NewServerWithDiagnosticsAndThresholds configures the dashboard with the
+// resolved recognition thresholds used by recognition jobs.
+func NewServerWithDiagnosticsAndThresholds(authStore auth.Store, database *sql.DB, pythonPath string, statusJSON, setupJSON []byte, thresholds recognition.Thresholds) (*Server, error) {
+	server, err := newServer(authStore, database, pythonPath, thresholds)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +231,7 @@ func NewServerWithDiagnostics(authStore auth.Store, database *sql.DB, pythonPath
 	return server, nil
 }
 
-func newServer(authStore auth.Store, database *sql.DB, pythonPath string) (*Server, error) {
+func newServer(authStore auth.Store, database *sql.DB, pythonPath string, thresholds recognition.Thresholds) (*Server, error) {
 	//  body{font-family:system-ui,sans-serif;max-width:70rem;margin:2rem auto;padding:0 1rem}
 
 	page := template.Must(template.New("page").Parse(`<!doctype html>
@@ -141,14 +239,17 @@ func newServer(authStore auth.Store, database *sql.DB, pythonPath string) (*Serv
 <style>
  body { font: 14px system-ui; margin: 20px; color: #222 }
  .page-header { position: sticky; top: 0; z-index: 10; background: #fff; padding: 2px 0}
- nav{display:flex;justify-content:space-between}
+ nav{display:flex;align-items:center;gap:.5rem;justify-content:space-between}
+ nav .breadcrumb{display:flex;align-items:center;gap:.5rem;margin-right:auto}
  table{border-collapse:collapse}
  td,th{padding:.4rem;border:1px solid #ccc}
  input,button{padding:.4rem;margin:.2rem 0}
+ .person-candidates{font-size:.9em;line-height:1.35;margin-top:6px}
+ .candidate-list{margin-left:1.5em}
  .error{color:#a00}
 </style>{{with .PageStyle}}<style>{{.}}</style>{{end}}</head>
-<body><nav><a href="/">Face-Me-Bro</a>{{if .Account}}<span>{{.Account.Username}} <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
-	return &Server{auth: authStore, db: database, pythonPath: pythonPath, templates: page}, nil
+<body><nav><a href="/">Face-Me-Bro</a>{{with .Breadcrumb}}<span class="breadcrumb">› {{.}}</span>{{end}}{{if .Account}}<span>{{.Account.Username}} <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
+	return &Server{auth: authStore, db: database, pythonPath: pythonPath, recognitionThresholds: thresholds, templates: page}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -440,16 +541,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 			body.WriteString(` · reference`)
 		}
 		if len(value.PossibleCandidates) > 0 {
-			body.WriteString(` · possible matches: `)
-			for index, candidate := range value.PossibleCandidates {
-				if index > 0 {
-					body.WriteString(`, `)
-				}
-				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, possible/current, generated: ` + template.HTMLEscapeString(candidate.CreatedAt) + `, pipeline: ` + template.HTMLEscapeString(candidate.PipelineID) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
-				if account.Role != auth.Viewer {
-					body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(value.ID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
-				}
-			}
+			body.WriteString(renderPossibleMatches(value.PossibleCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
 		}
 		if account.Role != auth.Viewer {
 			body.WriteString(`<div class="photo-actions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Ambiguous</button><button type="button" data-action="disposition" data-disposition="false-detection" data-face-id="` + template.HTMLEscapeString(value.ID) + `">False detection</button><button type="button" data-action="disposition" data-disposition="dont-track" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Don't track</button><select data-assignment-person="` + template.HTMLEscapeString(value.ID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
@@ -468,7 +560,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	if account.Role != auth.Viewer {
 		body.WriteString(`<script src="/static/photo.js" defer></script>`)
 	}
-	s.render(w, map[string]any{"Title": "Photo review", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`.photo-detail{position:relative;display:inline-block}.photo-detail img{max-width:90vw;max-height:70vh}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15)}.photo-box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.photo-face{border:1px solid #ccc;padding:8px;margin:8px 0}.photo-actions{display:flex;justify-content:space-between;gap:8px;align-items:center}`)})
+	s.render(w, map[string]any{"Title": "Photo review", "Account": account, "Breadcrumb": template.HTML(`<a href="/review/photos">Photos</a>`), "Body": template.HTML(body.String()), "PageStyle": template.CSS(`.photo-detail{position:relative;display:inline-block}.photo-detail img{max-width:90vw;max-height:70vh}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15)}.photo-box.reference{border-color:#0a2;background:rgba(0,170,34,.15)}.photo-face{border:1px solid #ccc;padding:8px;margin:8px 0}.photo-actions{display:flex;justify-content:space-between;gap:8px;align-items:center}`)})
 }
 
 func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
@@ -819,20 +911,24 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if allowed != nil && len(allowed) == 0 {
-		s.render(w, map[string]any{"Title": personName, "Account": account, "Body": template.HTML(`<h1>` + template.HTMLEscapeString(personName) + `</h1><p>No collections are assigned to this account.</p>`)})
+		s.render(w, map[string]any{"Title": personName, "Account": account, "Breadcrumb": template.HTML(`<a href="/review/people">People</a>`), "Body": template.HTML(`<h1>` + template.HTMLEscapeString(personName) + `</h1><p>No collections are assigned to this account.</p>`)})
 		return
 	}
 	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(col.name, ''), COALESCE(pa.width, a.source_width, 0), COALESCE(pa.height, a.source_height, 0),
 		f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
-		CASE WHEN ae.reason = 'cluster-provisional' AND COALESCE(ae.support_count, 0) = 0 AND COALESCE(ae.quality, 0) = 0 AND COALESCE(ae.detection_confidence, 0) = 0 AND ae.agreement IS NULL THEN NULL ELSE ae.similarity END, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(cfr.reference, 0)
+		CASE WHEN ae.reason = 'cluster-provisional' AND COALESCE(ae.support_count, 0) = 0 AND COALESCE(ae.quality, 0) = 0 AND COALESCE(ae.detection_confidence, 0) = 0 AND ae.agreement IS NULL THEN NULL ELSE ae.similarity END, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(NULLIF(ca_person.name, ''), substr(ca.person_id, -8), ''), COALESCE(cfr.reference, 0)
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
 		JOIN collections col ON col.id = pp.collection_id
 		JOIN current_face_assignments ca ON ca.face_id = f.id
+		LEFT JOIN people ca_person ON ca_person.id = ca.person_id
 		LEFT JOIN assignment_events ae ON ae.id = ca.event_id
 		LEFT JOIN current_face_references cfr ON cfr.face_id = f.id AND cfr.person_id = ?
-		WHERE ca.person_id = ? AND pp.missing_at IS NULL`
-	args := []any{personID, personID}
+		WHERE (ca.person_id = ? OR (ca.state IN ('unknown', 'provisional') AND EXISTS (
+			SELECT 1 FROM possible_face_candidates pc_scope
+			WHERE pc_scope.face_id = f.id AND pc_scope.person_id = ? AND pc_scope.is_current = 1
+		))) AND pp.missing_at IS NULL`
+	args := []any{personID, personID, personID}
 	if allowed != nil {
 		query += ` AND pp.collection_id IN (` + strings.TrimRight(strings.Repeat("?,", len(allowed)), ",") + `)`
 		for _, collectionID := range allowed {
@@ -846,11 +942,6 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	type personCandidate struct {
-		PersonID, Name, Evidence string
-		Similarity, Margin       float64
-		Support                  int
-	}
 	type personCluster struct {
 		ID, PersonID, PersonName                                     string
 		PersonCount                                                  int
@@ -866,13 +957,16 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		Confidence                               float64
 		ConfidenceAvailable                      bool
 		State, PersonID                          string
+		AssignedPersonName                       string
 		Reference                                bool
 		Recommended                              bool
 		RecommendationPriority                   int
 		Representative                           bool
 		Cluster                                  *personCluster
-		Candidates                               []personCandidate
+		Candidates                               []recognitionCandidateView
 		PossibleCandidates                       []possibleCandidateView
+		PossibleForPerson                        bool
+		PossibleSimilarity                       float64
 	}
 	var faces []personFace
 	referenceCount := 0
@@ -880,7 +974,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		var face personFace
 		var reference, representativeFace int
 		var confidence sql.NullFloat64
-		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Collection, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &confidence, &face.State, &face.PersonID, &reference); err != nil {
+		if err := rows.Scan(&face.FaceID, &face.PathID, &face.RelativePath, &face.Collection, &face.Width, &face.Height, &face.Left, &face.Top, &face.Right, &face.Bottom, &face.Quality, &face.Detection, &confidence, &face.State, &face.PersonID, &face.AssignedPersonName, &reference); err != nil {
 			http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -890,31 +984,11 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		face.Reference = reference == 1
 		_ = s.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM person_representatives WHERE person_id = ? AND face_id = ?)`, personID, face.FaceID).Scan(&representativeFace)
 		face.Representative = representativeFace == 1
-		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `
-			SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id),
-			       rc.similarity, rc.margin, rc.support_count, rc.evidence
-			FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id
-			WHERE rc.face_id = ? AND rc.created_at = (SELECT MAX(created_at) FROM recognition_candidates WHERE face_id = ?)
-			ORDER BY rc.rank LIMIT 5`, face.FaceID, face.FaceID)
-		if candidateErr != nil {
+		face.Candidates, err = s.latestRecognitionCandidates(r.Context(), face.FaceID)
+		if err != nil {
 			http.Error(w, "person candidate lookup failed", http.StatusInternalServerError)
 			return
 		}
-		for candidateRows.Next() {
-			var candidate personCandidate
-			if err := candidateRows.Scan(&candidate.PersonID, &candidate.Name, &candidate.Similarity, &candidate.Margin, &candidate.Support, &candidate.Evidence); err != nil {
-				candidateRows.Close()
-				http.Error(w, "person candidate lookup failed", http.StatusInternalServerError)
-				return
-			}
-			face.Candidates = append(face.Candidates, candidate)
-		}
-		if err := candidateRows.Err(); err != nil {
-			candidateRows.Close()
-			http.Error(w, "person candidate lookup failed", http.StatusInternalServerError)
-			return
-		}
-		candidateRows.Close()
 		foundCurrent := false
 		for _, candidate := range face.Candidates {
 			if candidate.PersonID == face.PersonID {
@@ -923,15 +997,15 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !foundCurrent && face.PersonID != "" {
-			var candidate personCandidate
+			var candidate recognitionCandidateView
 			if err := s.db.QueryRowContext(r.Context(), `
 				SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id),
-				       rc.similarity, rc.margin, rc.support_count, rc.evidence
+				       rc.similarity, rc.margin, rc.support_count, rc.quality, rc.detection_confidence, rc.evidence
 				FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id
 				WHERE rc.face_id = ? AND rc.person_id = ?
 				ORDER BY rc.created_at DESC, rc.rank LIMIT 1`, face.FaceID, face.PersonID).
-				Scan(&candidate.PersonID, &candidate.Name, &candidate.Similarity, &candidate.Margin, &candidate.Support, &candidate.Evidence); err == nil {
-				face.Candidates = append([]personCandidate{candidate}, face.Candidates[:min(4, len(face.Candidates))]...)
+				Scan(&candidate.PersonID, &candidate.Name, &candidate.Similarity, &candidate.Margin, &candidate.Support, &candidate.Quality, &candidate.Detection, &candidate.Evidence); err == nil {
+				face.Candidates = append([]recognitionCandidateView{candidate}, face.Candidates[:min(4, len(face.Candidates))]...)
 			}
 		}
 		if face.Confidence == 0 {
@@ -981,21 +1055,36 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "possible candidate lookup failed", http.StatusInternalServerError)
 			return
 		}
-		if face.Reference {
-			referenceCount++
-		}
+		face.PossibleForPerson = possibleFaceForPerson(face.State, face.PersonID, personID, face.PossibleCandidates)
+		face.PossibleSimilarity, _ = possibleSimilarityForPerson(face.State, face.PersonID, personID, face.PossibleCandidates)
 		faces = append(faces, face)
 	}
 	if err := rows.Err(); err != nil {
 		http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 		return
 	}
-	totalFaceCount := len(faces)
-	hasTrustedFaces := false
+	headerFaces := make([]personFace, 0, len(faces))
+	totalPossibleFaceCount := 0
 	for _, face := range faces {
+		if face.PossibleForPerson {
+			totalPossibleFaceCount++
+		} else {
+			headerFaces = append(headerFaces, face)
+		}
+	}
+	totalFaceCount := len(headerFaces)
+	referenceCount = 0
+	for _, face := range headerFaces {
+		if face.Reference {
+			referenceCount++
+		}
+	}
+	hasTrustedFaces := false
+	trustedFaceCount := 0
+	for _, face := range headerFaces {
 		if face.State == string(review.AssignedUser) || face.State == string(review.AssignedSystem) {
 			hasTrustedFaces = true
-			break
+			trustedFaceCount++
 		}
 	}
 	faceFilter := r.URL.Query().Get("state")
@@ -1032,30 +1121,48 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	if possibleFilter == "" {
 		possibleFilter = "without"
 	}
-	if possibleFilter == "possibles" || possibleFilter == "without" || candidatePersonFilter != "" || evidenceFilter != "" {
+	if possibleFilter == "possibles" || possibleFilter == "only" || possibleFilter == "without" || possibleFilter == "high" || possibleFilter == "medium" || possibleFilter == "low" || possibleFilter == "very-low" || candidatePersonFilter != "" || evidenceFilter != "" {
 		filtered := faces[:0]
 		for _, face := range faces {
 			matched := true
-			if possibleFilter == "possibles" || possibleFilter == "true" {
-				matched = len(face.PossibleCandidates) > 0
+			if possibleFilter == "possibles" || possibleFilter == "only" || possibleFilter == "true" {
+				matched = face.PossibleForPerson
 			} else if possibleFilter == "without" || possibleFilter == "false" {
-				matched = len(face.PossibleCandidates) == 0
+				matched = !face.PossibleForPerson
+			} else if face.PossibleForPerson {
+				similarity := face.PossibleSimilarity
+				switch possibleFilter {
+				case "high":
+					matched = similarity >= float64(s.recognitionThresholds.HighSimilarity)
+				case "medium":
+					matched = similarity >= float64(s.recognitionThresholds.MediumSimilarity) && similarity < float64(s.recognitionThresholds.HighSimilarity)
+				case "low":
+					matched = similarity >= float64(s.recognitionThresholds.LowSimilarity) && similarity < float64(s.recognitionThresholds.MediumSimilarity)
+				case "very-low":
+					matched = similarity < float64(s.recognitionThresholds.LowSimilarity)
+				}
+			} else if possibleFilter == "high" || possibleFilter == "medium" || possibleFilter == "low" || possibleFilter == "very-low" {
+				matched = false
 			}
 			if matched && candidatePersonFilter != "" {
 				matched = false
-				for _, candidate := range face.PossibleCandidates {
-					if candidate.PersonID == candidatePersonFilter || strings.EqualFold(candidate.PersonName, candidatePersonFilter) {
-						matched = true
-						break
+				if face.PossibleForPerson {
+					for _, candidate := range face.PossibleCandidates {
+						if candidate.PersonID == candidatePersonFilter || strings.EqualFold(candidate.PersonName, candidatePersonFilter) {
+							matched = true
+							break
+						}
 					}
 				}
 			}
 			if matched && evidenceFilter != "" {
 				matched = false
-				for _, candidate := range face.PossibleCandidates {
-					if candidate.Evidence == evidenceFilter {
-						matched = true
-						break
+				if face.PossibleForPerson {
+					for _, candidate := range face.PossibleCandidates {
+						if candidate.Evidence == evidenceFilter {
+							matched = true
+							break
+						}
 					}
 				}
 			}
@@ -1113,6 +1220,8 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			less = faces[i].Quality < faces[j].Quality
 		case "detection":
 			less = faces[i].Detection < faces[j].Detection
+		case "possibles":
+			less = faces[i].PossibleSimilarity < faces[j].PossibleSimilarity
 		default:
 			less = faces[i].RelativePath < faces[j].RelativePath
 		}
@@ -1125,10 +1234,10 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	hasConfidence := false
 	minConsistency, maxConsistency := 0.0, 0.0
 	hasConsistency := false
-	clusterSummary := make(map[string][]string)
+	clusterSummaryClusters := make(map[string][]string)
 	clusterPersonIDs := make(map[string]string)
 	clusterSummaryOrder := make([]string, 0)
-	for _, face := range faces {
+	for _, face := range headerFaces {
 		if face.ConfidenceAvailable {
 			if !hasConfidence || face.Confidence > maxConfidence {
 				maxConfidence = face.Confidence
@@ -1151,18 +1260,18 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 				}
 				hasConsistency = true
 			}
-			if _, exists := clusterSummary[face.Cluster.PersonName]; !exists {
+			if _, exists := clusterSummaryClusters[face.Cluster.PersonName]; !exists {
 				clusterSummaryOrder = append(clusterSummaryOrder, face.Cluster.PersonName)
 			}
 			seen := false
-			for _, clusterID := range clusterSummary[face.Cluster.PersonName] {
+			for _, clusterID := range clusterSummaryClusters[face.Cluster.PersonName] {
 				if clusterID == face.Cluster.ID {
 					seen = true
 					break
 				}
 			}
 			if !seen {
-				clusterSummary[face.Cluster.PersonName] = append(clusterSummary[face.Cluster.PersonName], face.Cluster.ID)
+				clusterSummaryClusters[face.Cluster.PersonName] = append(clusterSummaryClusters[face.Cluster.PersonName], face.Cluster.ID)
 			}
 		}
 	}
@@ -1173,28 +1282,37 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	minConfidenceText := formatScoreUnavailable(minConfidence, hasConfidence)
 	minConsistencyText := formatScoreUnavailable(minConsistency, hasConsistency)
 	maxConsistencyText := formatScoreUnavailable(maxConsistency, hasConsistency)
-	clusterLine := strings.Builder{}
+	clusterSummary := strings.Builder{}
 	if len(clusterSummaryOrder) > 0 {
-		clusterLine.WriteString(`<div class="person-clusters">Clusters: `)
+		clusterSummary.WriteString(`<span class="person-clusters">`)
 		for index, clusterPerson := range clusterSummaryOrder {
 			if index > 0 {
-				clusterLine.WriteString(`, `)
+				clusterSummary.WriteString(`, `)
 			}
 			if clusterPersonIDs[clusterPerson] != "" && clusterPersonIDs[clusterPerson] != personID {
-				clusterLine.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(clusterPersonIDs[clusterPerson]) + `">` + template.HTMLEscapeString(clusterPerson) + `</a>`)
+				clusterSummary.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(clusterPersonIDs[clusterPerson]) + `">` + template.HTMLEscapeString(clusterPerson) + `</a>`)
 			} else {
-				clusterLine.WriteString(template.HTMLEscapeString(clusterPerson))
+				clusterSummary.WriteString(template.HTMLEscapeString(clusterPerson))
 			}
-			clusterLine.WriteString(` (`)
-			for clusterIndex, clusterID := range clusterSummary[clusterPerson] {
+			clusterSummary.WriteString(` (`)
+			for clusterIndex, clusterID := range clusterSummaryClusters[clusterPerson] {
 				if clusterIndex > 0 {
-					clusterLine.WriteString(`, `)
+					clusterSummary.WriteString(`, `)
 				}
-				clusterLine.WriteString(`<a href="/review/clusters/` + template.HTMLEscapeString(clusterID) + `">` + template.HTMLEscapeString(idSuffix(clusterID)) + `</a>`)
+				clusterSummary.WriteString(`<a href="/review/clusters/` + template.HTMLEscapeString(clusterID) + `">` + template.HTMLEscapeString(idSuffix(clusterID)) + `</a>`)
 			}
-			clusterLine.WriteString(`)`)
+			clusterSummary.WriteString(`)`)
 		}
-		clusterLine.WriteString(`</div>`)
+		clusterSummary.WriteString(`</span>`)
+	}
+	shownFaceCount := 0
+	shownPossibleFaceCount := 0
+	for _, face := range faces {
+		if face.PossibleForPerson {
+			shownPossibleFaceCount++
+		} else {
+			shownFaceCount++
+		}
 	}
 
 	body := strings.Builder{}
@@ -1252,20 +1370,29 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 .person-empty{margin-top:1rem}
 .person-summary{font-size:.8em;font-weight:normal}
 .person-metadata{font-size:.9em;line-height:1.35}
-.person-candidates{font-size:.9em;line-height:1.35}
 .person-identity{display:flex;gap:12px;align-items:stretch}
 .person-identity img{flex:0 0 auto;border-radius:8px}
 .person-identity-info{display:flex;flex-direction:column;min-width:0}
 .person-identity-info h1{margin:0}
-.person-name-form{display:flex;align-items:center;gap:8px;margin-top:auto}
+.person-heading{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px;align-items:start}
+.person-heading img{flex:0 0 auto;border-radius:8px}
+.person-heading h1{margin:0}
+.person-name-form{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px}
 .person-name-form .dont-track-button{margin-right:4px}
 .person-name-form .recommend-button{margin-left:8px}
 .person-clusters{margin-top:6px;font-size:.9em}
+.person-summary-table{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0}
+.person-summary-table>div{min-width:7rem}
+.person-summary-table dt{font-size:.8em;color:#555}
+.person-summary-table dd{margin:2px 0 0;font-weight:600}
+.person-summary-table .person-clusters{margin:0;font-size:inherit}
 .ref-rec{float:right}
 .person-footer-note{margin-top:1rem;font-size:.9em;color:#555}
+.person-reference-warning{display:inline-block;margin-left:.5rem;padding:.35rem .6rem;border:1px solid #c62828;background:#fff1f1;color:#b71c1c;font-weight:600}
 .person-select{min-width:10rem}
 .person-select-filter{min-width:10rem}
-.person-page-controls{margin:8px 0}
+.person-page-controls{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:8px 0}
+.person-controls-break{flex-basis:100%;height:0}
 .person-page-actions{display:flex;justify-content:space-between;align-items:center;margin-top:18px;padding:10px 0;border-top:1px solid #ccc}
 .person-page-actions select{max-width:14rem}
 .person-actions{display:flex;justify-content:space-between;align-items:center;margin-top:8px}
@@ -1303,10 +1430,18 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 
 	canModify := account.Role != auth.Viewer
 	recommendButton := ""
-	if canModify {
+	if account.Role == auth.SystemAdmin {
 		if hasTrustedFaces {
 			recommendButton = `<button type="button" class="recommend-button" data-action="recommend-references">Recommend References</button>`
 		}
+	}
+	reprocessButton := ""
+	if account.Role == auth.SystemAdmin && referenceCount > s.recognitionThresholds.MediumSupport {
+		reprocessButton = `<button type="button" class="reprocess-button" data-action="reprocess-references">Reprocess</button>`
+	}
+	referenceWarning := ""
+	if trustedFaceCount > 5 && referenceCount < s.recognitionThresholds.HighSupport {
+		referenceWarning = `<span class="person-reference-warning">Need ` + strconv.Itoa(s.recognitionThresholds.HighSupport-referenceCount) + ` more references</span>`
 	}
 	dontTrackLabel := "Don't Track"
 	if personDontTrack != 0 {
@@ -1316,8 +1451,12 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	if canModify {
 		dontTrackButton = `<button type="button" class="dont-track-button" data-action="person-dont-track" data-dont-track="` + fmt.Sprint(personDontTrack == 0) + `">` + dontTrackLabel + `</button>`
 	}
-	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-person-name="` + template.HTMLEscapeString(personName) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><div class="person-identity"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><div class="person-identity-info"><h1>` + template.HTMLEscapeString(personName) + ` <span class="person-summary">(` + fmt.Sprint(totalFaceCount) + ` / ` + fmt.Sprint(len(faces)) + ` faces, ` + fmt.Sprint(referenceCount) + ` references, Similarity Max: ` + maxConfidenceText + `, Min: ` + minConfidenceText + `, Cluster Min: ` + minConsistencyText + `, Max: ` + maxConsistencyText + `)</span></h1>` + clusterLine.String() + `<form id="rename-person" class="person-name-form">` + dontTrackButton + `<input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button>` + recommendButton + `</form></div></div>`)
-	body.WriteString(`<form method="get" class="person-page-controls"><label>Filter <select name="state"><option value="">All faces</option>`)
+	clusterSummaryText := clusterSummary.String()
+	if clusterSummaryText == "" {
+		clusterSummaryText = "—"
+	}
+	body.WriteString(`<div id="person-page" data-person-id="` + template.HTMLEscapeString(personID) + `" data-person-name="` + template.HTMLEscapeString(personName) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" class="person-header"><div class="person-heading"><img loading="lazy" width="96" height="96" alt="Representative image" src="/api/people/` + template.HTMLEscapeString(personID) + `/representative"><div><h1>` + template.HTMLEscapeString(personName) + `</h1><dl class="person-summary-table"><div><dt>Faces</dt><dd>` + fmt.Sprint(shownFaceCount) + ` / ` + fmt.Sprint(totalFaceCount) + `</dd></div><div><dt>Possibles</dt><dd>` + fmt.Sprint(shownPossibleFaceCount) + ` / ` + fmt.Sprint(totalPossibleFaceCount) + `</dd></div><div><dt>References</dt><dd>` + fmt.Sprint(referenceCount) + `</dd></div><div><dt>Clusters</dt><dd>` + clusterSummaryText + `</dd></div><div><dt>Similarity</dt><dd>` + minConfidenceText + ` - ` + maxConfidenceText + `</dd></div><div><dt>Cluster Min/Max</dt><dd>` + minConsistencyText + ` - ` + maxConsistencyText + `</dd></div></dl></div></div><form id="rename-person" class="person-name-form">` + dontTrackButton + `<input name="name" value="` + template.HTMLEscapeString(personName) + `" required><button>Rename</button>` + recommendButton + reprocessButton + referenceWarning + `</form></div>`)
+	body.WriteString(`<form method="get" class="person-page-controls"><label><strong>Filter:</strong> <select name="state"><option value="">All faces</option>`)
 	for _, state := range []string{"provisional", "assigned-user", "assigned-system", "unknown", "ambiguous", "unassigned"} {
 		body.WriteString(`<option value="` + state + `"` + selectedAttr(state, faceFilter) + `>` + state + `</option>`)
 	}
@@ -1336,11 +1475,11 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	for _, clusterID := range clusterIDs {
 		body.WriteString(`<option value="` + template.HTMLEscapeString(clusterID) + `"` + selectedAttr(clusterID, clusterFilter) + `>` + template.HTMLEscapeString(clusterOptions[clusterID]) + `</option>`)
 	}
-	body.WriteString(`</select></label> <label>Possible <select name="possible"><option value="without"` + selectedAttr("without", possibleFilter) + `>With Out</option><option value="possibles"` + selectedAttr("possibles", possibleFilter) + `>Possibles</option><option value="all"` + selectedAttr("all", possibleFilter) + `>All</option></select></label> <label>Candidate <input name="candidate_person" value="` + template.HTMLEscapeString(candidatePersonFilter) + `" placeholder="name or ID"></label> <label>Evidence <select name="evidence"><option value="">All</option>`)
+	body.WriteString(`</select></label> <label>Possible <select name="possible"><option value="without"` + selectedAttr("without", possibleFilter) + `>With Out</option><option value="high"` + selectedAttr("high", possibleFilter) + `>High</option><option value="medium"` + selectedAttr("medium", possibleFilter) + `>Medium</option><option value="low"` + selectedAttr("low", possibleFilter) + `>Low</option><option value="very-low"` + selectedAttr("very-low", possibleFilter) + `>Very Low</option><option value="only"` + selectedAttr("only", possibleFilter) + `>Only</option><option value="all"` + selectedAttr("all", possibleFilter) + `>All</option></select></label> <label>Candidate <input name="candidate_person" value="` + template.HTMLEscapeString(candidatePersonFilter) + `" placeholder="name or ID"></label> <label>Evidence <select name="evidence"><option value="">All</option>`)
 	for _, evidence := range []string{"high", "medium", "low", "manual-review"} {
 		body.WriteString(`<option value="` + evidence + `"` + selectedAttr(evidence, evidenceFilter) + `>` + evidence + `</option>`)
 	}
-	body.WriteString(`</select></label> <label>Sort <select name="sort">`)
+	body.WriteString(`</select></label><span class="person-controls-break"></span><label><strong>Sort:</strong> <select name="sort">`)
 	for _, option := range []struct{ Value, Label string }{
 		{Value: "path", Label: "Path"},
 		{Value: "collection", Label: "Collection"},
@@ -1349,6 +1488,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		{Value: "confidence", Label: "Confidence"},
 		{Value: "quality", Label: "Quality"},
 		{Value: "detection", Label: "Detection"},
+		{Value: "possibles", Label: "Possibles"},
 		{Value: "ref_recs", Label: "Ref Recs"},
 	} {
 		body.WriteString(`<option value="` + option.Value + `"` + selectedAttr(option.Value, faceSort) + `>` + option.Label + `</option>`)
@@ -1371,44 +1511,18 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		}
 		body.WriteString(`<article class="` + cardClass + `" id="face-` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-face-state="` + template.HTMLEscapeString(face.State) + `"><div class="viewer"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(face.PathID) + `" alt="` + template.HTMLEscapeString(idSuffix(face.FaceID)) + `"><span class="` + boxClass + `" style="left:` + percent(face.Left, face.Width) + `%;top:` + percent(face.Top, face.Height) + `%;width:` + percent(face.Right-face.Left, face.Width) + `%;height:` + percent(face.Bottom-face.Top, face.Height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(face.PathID) + `">` + template.HTMLEscapeString(face.RelativePath) + `</a></div>`)
 		confidence := formatScoreUnavailable(face.Confidence, face.ConfidenceAvailable)
-		body.WriteString(`<div class="person-metadata"><strong>` + template.HTMLEscapeString(assignmentLabel(face.State)) + `:</strong> <strong>C:</strong> ` + confidence + ` Q: ` + formatScore(face.Quality) + `% D: ` + formatScore(face.Detection) + `%`)
+		assignment := template.HTMLEscapeString(assignmentLabel(face.State))
+		if face.PossibleForPerson && face.PersonID != "" && face.PersonID != personID {
+			assignment += ` (<a href="/review/people/` + template.HTMLEscapeString(face.PersonID) + `">` + template.HTMLEscapeString(face.AssignedPersonName) + `</a>)`
+		}
+		body.WriteString(`<div class="person-metadata"><strong>` + assignment + `:</strong> <strong>C:</strong> ` + confidence + ` Q: ` + formatScore(face.Quality) + `% D: ` + formatScore(face.Detection) + `%`)
 		if face.Recommended {
 			body.WriteString(`<span class="ref-rec"><strong>Ref Rec #` + fmt.Sprint(face.RecommendationPriority) + `</strong></span>`)
 		}
 		body.WriteString(`</div>`)
-		otherCandidates := make([]personCandidate, 0, len(face.Candidates))
-		for _, candidate := range face.Candidates {
-			if candidate.PersonID != face.PersonID && candidate.Similarity > 0.15 {
-				otherCandidates = append(otherCandidates, candidate)
-			}
-		}
-		if len(otherCandidates) > 1 {
-			body.WriteString(`<div class="person-candidates">Other candidates: `)
-			for index, candidate := range otherCandidates {
-				if index > 0 {
-					body.WriteString(`, `)
-				}
-				if candidate.PersonID != personID {
-					body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.Name) + `</a>`)
-				} else {
-					body.WriteString(template.HTMLEscapeString(candidate.Name))
-				}
-				body.WriteString(` (` + formatScore(candidate.Similarity) + `%)`)
-			}
-			body.WriteString(`</div>`)
-		}
-		if len(face.PossibleCandidates) > 0 {
-			body.WriteString(`<div class="person-candidates possible-candidates"><strong>Possible matches:</strong> `)
-			for index, candidate := range face.PossibleCandidates {
-				if index > 0 {
-					body.WriteString(`, `)
-				}
-				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a> (S: ` + formatScore(candidate.Similarity) + `%, M: ` + formatScore(candidate.Margin) + `%, Support: ` + fmt.Sprint(candidate.Support) + `, Q: ` + formatScore(candidate.Quality) + `%, D: ` + formatScore(candidate.Detection) + `%, ` + template.HTMLEscapeString(candidate.Evidence) + `, possible/current, generated: ` + template.HTMLEscapeString(candidate.CreatedAt) + `, pipeline: ` + template.HTMLEscapeString(candidate.PipelineID) + `, <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
-				if canModify {
-					body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(face.FaceID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
-				}
-			}
-			body.WriteString(`</div>`)
+		body.WriteString(renderRecognitionCandidates(face.Candidates, face.FaceID, face.PersonID, canModify))
+		if face.PossibleForPerson {
+			body.WriteString(renderPossibleMatches(face.PossibleCandidates, face.FaceID, face.PersonID, canModify))
 		}
 		if face.Cluster != nil {
 			clusterPerson := ""
@@ -1484,7 +1598,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	if canModify {
 		body.WriteString(`<script src="/static/person.js" defer></script>`)
 	}
-	s.render(w, map[string]any{"Title": personName, "Account": account, "PageStyle": pageStyle, "Body": template.HTML(body.String())})
+	s.render(w, map[string]any{"Title": personName, "Account": account, "Breadcrumb": template.HTML(`<a href="/review/people">People</a>`), "PageStyle": pageStyle, "Body": template.HTML(body.String())})
 }
 
 func (s *Server) createPerson(w http.ResponseWriter, r *http.Request) {
@@ -1779,6 +1893,15 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
     const result = await response.json();
     alert('Reference recommendation job queued for ' + page.dataset.personName + ': ' + result.job_id);
   };
+  const reprocessButton = document.querySelector('[data-action="reprocess-references"]');
+  if (reprocessButton) reprocessButton.onclick = async () => {
+    const response = await fetch('/api/people/' + encodeURIComponent(page.dataset.personId) + '/reference-reprocess', {
+      method: 'POST', headers: {'X-CSRF-Token': token}
+    });
+    if (!response.ok) { alert(await response.text()); return; }
+    const result = await response.json();
+    alert('Reference reprocess job queued for ' + page.dataset.personName + ': ' + result.job_id);
+  };
   const dontTrackButton = document.querySelector('[data-action="person-dont-track"]');
   if (dontTrackButton) dontTrackButton.onclick = async () => {
     const enabled = dontTrackButton.dataset.dontTrack === 'true';
@@ -1940,7 +2063,7 @@ func (s *Server) reviewClustersLegacy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
-	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status, COUNT(DISTINCT cm.face_id), COUNT(DISTINCT rc.person_id), COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), substr(c.proposed_person_id, -8), '') FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id AND rc.created_at = (SELECT MAX(rc2.created_at) FROM recognition_candidates rc2 WHERE rc2.face_id = rc.face_id) LEFT JOIN people p ON p.id = c.proposed_person_id WHERE cr.status = 'active'`
+	clusterQuery := `SELECT c.id, c.cluster_key, c.purity, c.connectivity, c.is_mixed, c.review_status, COUNT(DISTINCT cm.face_id), COUNT(DISTINCT rc.person_id), COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), substr(c.proposed_person_id, -8), '') FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id AND NOT EXISTS (SELECT 1 FROM current_face_dispositions fd0 WHERE fd0.face_id = cm.face_id AND fd0.disposition = 'false-detection') LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id AND rc.created_at = (SELECT MAX(rc2.created_at) FROM recognition_candidates rc2 WHERE rc2.face_id = rc.face_id) LEFT JOIN people p ON p.id = c.proposed_person_id WHERE cr.status = 'active'`
 	var clusterArgs []any
 	if allowed != nil {
 		if len(allowed) == 0 {
@@ -2075,7 +2198,8 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	visibleFaceCount := membershipCount
 	visibleCandidateCount := 0
-	countQuery := `SELECT COUNT(DISTINCT cm.face_id), COUNT(DISTINCT CASE WHEN rc.similarity >= 0.015 THEN cm.face_id END) FROM cluster_memberships cm JOIN faces cf ON cf.id = cm.face_id JOIN analyses caa ON caa.id = cf.analysis_id JOIN photo_assets cpa ON cpa.id = caa.asset_id JOIN photo_paths cpp ON cpp.asset_id = cpa.id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id AND rc.created_at = (SELECT MAX(rc2.created_at) FROM recognition_candidates rc2 WHERE rc2.face_id = cm.face_id) WHERE cm.cluster_id = ? AND cpp.missing_at IS NULL`
+	visibleToAssignCount := 0
+	countQuery := `SELECT COUNT(DISTINCT cm.face_id), COUNT(DISTINCT CASE WHEN rc.similarity >= 0.015 THEN cm.face_id END), COUNT(DISTINCT CASE WHEN COALESCE(ca.state, 'unassigned') NOT IN ('assigned-user', 'assigned-system') THEN cm.face_id END) FROM cluster_memberships cm JOIN faces cf ON cf.id = cm.face_id JOIN analyses caa ON caa.id = cf.analysis_id JOIN photo_assets cpa ON cpa.id = caa.asset_id JOIN photo_paths cpp ON cpp.asset_id = cpa.id LEFT JOIN current_face_assignments ca ON ca.face_id = cm.face_id LEFT JOIN recognition_candidates rc ON rc.face_id = cm.face_id AND rc.created_at = (SELECT MAX(rc2.created_at) FROM recognition_candidates rc2 WHERE rc2.face_id = cm.face_id) WHERE cm.cluster_id = ? AND cpp.missing_at IS NULL`
 	countArgs := []any{clusterID}
 	if accessibleCollections != nil {
 		countQuery += ` AND cpp.collection_id IN (` + placeholders(len(accessibleCollections)) + `)`
@@ -2086,10 +2210,45 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		countQuery += ` AND cpp.collection_id = ?`
 		countArgs = append(countArgs, collectionID)
 	}
-	if err := s.db.QueryRowContext(r.Context(), countQuery, countArgs...).Scan(&visibleFaceCount, &visibleCandidateCount); err != nil {
+	if err := s.db.QueryRowContext(r.Context(), countQuery, countArgs...).Scan(&visibleFaceCount, &visibleCandidateCount, &visibleToAssignCount); err != nil {
 		http.Error(w, "cluster face count failed", http.StatusInternalServerError)
 		return
 	}
+
+	representedPeople := make(map[string]int)
+	representedQuery := `SELECT ca.person_id, COUNT(*) FROM cluster_memberships cm JOIN current_face_assignments ca ON ca.face_id = cm.face_id JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE cm.cluster_id = ? AND ca.state IN ('assigned-user', 'assigned-system') AND pp.missing_at IS NULL`
+	representedArgs := []any{clusterID}
+	if accessibleCollections != nil {
+		representedQuery += ` AND pp.collection_id IN (` + placeholders(len(accessibleCollections)) + `)`
+		for _, id := range accessibleCollections {
+			representedArgs = append(representedArgs, id)
+		}
+	} else {
+		representedQuery += ` AND pp.collection_id = ?`
+		representedArgs = append(representedArgs, collectionID)
+	}
+	representedQuery += ` GROUP BY ca.person_id`
+	representedRows, err := s.db.QueryContext(r.Context(), representedQuery, representedArgs...)
+	if err != nil {
+		http.Error(w, "cluster people lookup failed", http.StatusInternalServerError)
+		return
+	}
+	for representedRows.Next() {
+		var personID string
+		var count int
+		if err := representedRows.Scan(&personID, &count); err != nil {
+			representedRows.Close()
+			http.Error(w, "cluster people lookup failed", http.StatusInternalServerError)
+			return
+		}
+		representedPeople[personID] = count
+	}
+	if err := representedRows.Err(); err != nil {
+		representedRows.Close()
+		http.Error(w, "cluster people lookup failed", http.StatusInternalServerError)
+		return
+	}
+	representedRows.Close()
 	peopleRows, err := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8))), id`)
 	if err != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
@@ -2107,8 +2266,30 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		people = append(people, person)
 	}
 	peopleRows.Close()
+	sort.SliceStable(people, func(i, j int) bool {
+		leftProposed := people[i].ID == proposedPersonID
+		rightProposed := people[j].ID == proposedPersonID
+		if leftProposed != rightProposed {
+			return leftProposed
+		}
+		leftCount, leftShown := representedPeople[people[i].ID]
+		rightCount, rightShown := representedPeople[people[j].ID]
+		if leftShown != rightShown {
+			return leftShown
+		}
+		if leftShown && leftCount != rightCount {
+			return leftCount > rightCount
+		}
+		leftName, rightName := strings.ToLower(people[i].Name), strings.ToLower(people[j].Name)
+		if leftName != rightName {
+			return leftName < rightName
+		}
+		return people[i].ID < people[j].ID
+	})
+	defaultPersonID := proposedPersonID
 	faceQuery := `
 		SELECT cm.face_id, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''),
+		       COALESCE((SELECT disposition FROM current_face_dispositions WHERE face_id = cm.face_id), ''),
 		       COALESCE(pp.id, ''), COALESCE(pp.relative_path, ''), COALESCE(pa.width, 0), COALESCE(pa.height, 0),
 		       f.box_left, f.box_top, f.box_right, f.box_bottom,
 		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
@@ -2206,14 +2387,22 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	if !canModify {
 		disabledAttr = ` disabled`
 	}
-	pageStyle := template.CSS(`#cluster-page{max-width:100%}.cluster-grid{display:flex;flex-wrap:wrap;gap:18px}.cluster-face{width:min(420px,45vw);border:4px solid;padding:10px}.cluster-face.assigned{border-color:#2a9d50}.cluster-face.provisional{border-color:#d6a800}.cluster-face.needs-attention{border-color:#c62828}.photo-frame{position:relative;display:inline-block;max-width:100%}.photo-frame img{max-width:100%;max-height:55vh;display:block}.face-box{position:absolute;border:2px solid #f00;box-sizing:border-box;pointer-events:none}.cluster-face select{max-width:100%}.candidate{font-size:.9rem;margin-top:6px}.cluster-controls{position:sticky;top:0;z-index:10;background:#fff;padding:10px 0;border-bottom:1px solid #ccc}.cluster-alert{border:1px solid #c62828;background:#fff1f1;padding:.75rem;margin:.75rem 0}.cluster-summary{display:flex;flex-wrap:wrap;gap:.75rem}.cluster-summary div{min-width:7rem}.cluster-summary dt{font-size:.8rem;color:#666}.cluster-summary dd{margin:.15rem 0 0;font-weight:600}`)
-	body.WriteString(`<div id="cluster-page" data-cluster-id="` + template.HTMLEscapeString(clusterID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-version="` + fmt.Sprint(reviewVersion) + `"><p><a href="/review/clusters">← Clusters</a></p><header class="cluster-header"><h1>Cluster ` + template.HTMLEscapeString(idSuffix(clusterID)) + ` <small>(` + template.HTMLEscapeString(clusterID) + `)</small></h1><dl class="cluster-summary"><div><dt>Faces</dt><dd>` + fmt.Sprint(visibleFaceCount) + `</dd></div><div><dt>Candidates</dt><dd>` + fmt.Sprint(visibleCandidateCount) + `</dd></div><div><dt>Review</dt><dd>` + template.HTMLEscapeString(reviewStatus) + `</dd></div><div><dt>Cluster</dt><dd>` + template.HTMLEscapeString(humanRunStatus(runStatus)) + `</dd></div><div><dt>Proposed person</dt><dd>`)
+	pageStyle := template.CSS(`#cluster-page{max-width:100%}.cluster-header{display:grid;grid-template-columns:96px minmax(0,1fr);column-gap:.5rem;position:sticky;top:0;z-index:10;background:#fff;padding:4px 0}.cluster-heading{display:contents}.cluster-heading h1{grid-column:2;grid-row:1;margin:.15rem 0}.cluster-heading img{grid-column:1;grid-row:1 / span 2;width:96px;height:96px;object-fit:cover;border-radius:6px}.grid{display:flex;flex-wrap:wrap;gap:18px}.card{width:min(420px,45vw);border:1px solid #ccc;padding:10px}.card.provisional{border:2px solid #d6a800}.card.assigned{border:2px solid #0a2}.card.needs-attention{border:2px solid #c62828}.viewer{position:relative;display:inline-block;max-width:100%}.viewer img{max-width:100%;max-height:55vh}.box{position:absolute;border:2px solid #f00;pointer-events:none}.path{margin-top:8px;overflow-wrap:anywhere}.card select{max-width:100%}.person-candidates{font-size:.9em;line-height:1.35;margin-top:6px}.person-page-actions{display:flex;justify-content:flex-start;align-items:center;flex-wrap:wrap;gap:.75rem;width:max-content;max-width:100%;margin-top:18px;padding:10px 0}.cluster-card-actions{margin-top:8px}.cluster-dispositions{display:flex;flex-wrap:wrap;gap:6px}.person-assignment{display:flex;justify-content:flex-end;gap:6px;margin-top:8px}.person-assignment select{min-width:10rem}.person-select-filter{min-width:10rem}.cluster-face{border-width:4px}.cluster-alert{border:1px solid #c62828;background:#fff1f1;padding:.75rem;margin:.75rem 0}.cluster-summary{grid-column:2;grid-row:2;display:flex;flex-wrap:wrap;gap:.35rem}.cluster-summary div{min-width:6rem}.cluster-summary dt{font-size:.8rem;color:#666}.cluster-summary dd{margin:.15rem 0 0;font-weight:600}@media(max-width:600px){.card{width:100%}}`)
+	candidateSummary := strconv.Itoa(visibleCandidateCount)
+	if visibleToAssignCount == 0 {
+		candidateSummary = "N/A"
+	}
+	body.WriteString(`<div id="cluster-page" data-cluster-id="` + template.HTMLEscapeString(clusterID) + `" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-version="` + fmt.Sprint(reviewVersion) + `"><header class="cluster-header"><div class="cluster-heading">`)
+	if proposedPersonID != "" {
+		body.WriteString(`<img alt="" src="/api/people/` + template.HTMLEscapeString(proposedPersonID) + `/representative">`)
+	}
+	body.WriteString(`<h1>Cluster ` + template.HTMLEscapeString(idSuffix(clusterID)) + ` <small>(` + template.HTMLEscapeString(clusterID) + `)</small></h1></div><dl class="cluster-summary"><div><dt>Proposed person</dt><dd>`)
 	if proposedPersonID == "" {
 		body.WriteString(`Unassigned`)
 	} else {
-		body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(proposedPersonID) + `"><img alt="" src="/api/people/` + template.HTMLEscapeString(proposedPersonID) + `/representative">` + template.HTMLEscapeString(proposedPersonName) + `</a>`)
+		body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(proposedPersonID) + `">` + template.HTMLEscapeString(proposedPersonName) + `</a>`)
 	}
-	body.WriteString(`</dd></div><div><dt>Purity</dt><dd>` + formatScoreUnavailable(purityValue.Float64, purityValue.Valid) + `</dd></div><div><dt>Consistency</dt><dd>` + formatScoreUnavailable(consistencyValue.Float64, consistencyValue.Valid) + `</dd></div><div><dt>Connectivity</dt><dd>` + formatScoreUnavailable(connectivityValue.Float64, connectivityValue.Valid) + `</dd></div><div><dt>Mixed</dt><dd>`)
+	body.WriteString(`</dd></div><div><dt>Faces</dt><dd>` + fmt.Sprint(visibleFaceCount) + `</dd></div><div><dt>Candidates</dt><dd>` + candidateSummary + `</dd></div><div><dt>Review version</dt><dd>` + fmt.Sprint(reviewVersion) + `</dd></div><div><dt>Review</dt><dd>` + template.HTMLEscapeString(reviewStatus) + `</dd></div><div><dt>Cluster</dt><dd>` + template.HTMLEscapeString(humanRunStatus(runStatus)) + `</dd></div><div><dt>Purity</dt><dd>` + formatScoreUnavailable(purityValue.Float64, purityValue.Valid) + `</dd></div><div><dt>Consistency</dt><dd>` + formatScoreUnavailable(consistencyValue.Float64, consistencyValue.Valid) + `</dd></div><div><dt>Connectivity</dt><dd>` + formatScoreUnavailable(connectivityValue.Float64, connectivityValue.Valid) + `</dd></div><div><dt>Mixed</dt><dd>`)
 	if mixed != 0 {
 		body.WriteString(`X`)
 	}
@@ -2228,7 +2417,23 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		}
 		body.WriteString(`.</div>`)
 	}
-	body.WriteString(`<form id="cluster-detail-controls" method="get"><div><label>Assignment <select name="assignment_state"><option value="">Any</option>`)
+	body.WriteString(`<div class="person-page-actions cluster-controls"><label>Default person <select id="default-person"` + disabledAttr)
+	if mixed != 0 {
+		body.WriteString(` disabled`)
+	}
+	if proposedPersonID != "" {
+		body.WriteString(`><option value="` + template.HTMLEscapeString(proposedPersonID) + `" selected>` + template.HTMLEscapeString(proposedPersonName) + `</option>`)
+	} else {
+		body.WriteString(`>`)
+	}
+	for _, person := range people {
+		if person.ID == proposedPersonID {
+			continue
+		}
+		body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selectedAttr(person.ID, defaultPersonID) + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
+	}
+	body.WriteString(`<option value="">No default</option></select></label> <label>Status <select id="cluster-status"` + disabledAttr + `>` + clusterOption("unreviewed", "Unreviewed", reviewStatus) + clusterOption("in-progress", "In progress", reviewStatus) + clusterOption("partially-reviewed", "Partially reviewed", reviewStatus) + clusterOption("reviewed", "Reviewed", reviewStatus) + clusterOption("needs-review", "Needs review", reviewStatus) + `</select></label> <label>Note <input id="cluster-note" size="45"` + disabledAttr + `></label> <button id="save-cluster" type="button"` + disabledAttr + `>Save review</button></div>`)
+	body.WriteString(`<form id="cluster-detail-controls" method="get"><div><strong>Filter:</strong> <label>Assignment <select name="assignment_state"><option value="">Any</option>`)
 	for _, value := range []string{"unassigned", "unknown", "ambiguous", "provisional", "assigned-system", "assigned-user"} {
 		body.WriteString(clusterOption(value, assignmentLabel(value), detailQuery.Get("assignment_state")))
 	}
@@ -2236,7 +2441,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	for _, field := range []string{"min_quality", "max_quality", "min_detection", "max_detection"} {
 		body.WriteString(`<label>` + strings.Title(strings.ReplaceAll(field, "_", " ")) + ` <input type="number" name="` + field + `" min="0" max="100" step="0.1" value="` + template.HTMLEscapeString(detailQuery.Get(field)) + `"></label>`)
 	}
-	body.WriteString(`</div><div><label>Sort <select name="sort">`)
+	body.WriteString(`</div><div><label><strong>Sort:</strong> <select name="sort">`)
 	for _, option := range []struct{ value, label string }{{"path", "Face/path"}, {"person", "Person"}, {"assignment_state", "Assignment state"}, {"disposition", "Disposition"}, {"consistency", "Consistency"}, {"quality", "Quality"}, {"detection", "Detection"}, {"confidence", "Candidate confidence"}} {
 		body.WriteString(clusterOption(option.value, option.label, detailQuery.Get("sort")))
 	}
@@ -2245,26 +2450,30 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		detailDirection = "desc"
 	}
 	body.WriteString(`</select></label><label>Direction <select name="direction">` + clusterOption("asc", "Ascending", detailDirection) + clusterOption("desc", "Descending", detailDirection) + `</select></label><button>Apply</button></div></form>`)
-	body.WriteString(`<div class="cluster-controls"><label>Default person <select id="default-person"` + disabledAttr)
-	if mixed != 0 {
-		body.WriteString(` disabled`)
-	}
-	body.WriteString(`><option value="">No default</option>`)
-	for _, person := range people {
-		body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selectedAttr(person.ID, proposedPersonID) + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
-	}
-	body.WriteString(`</select></label> <label>Status <select id="cluster-status"` + disabledAttr + `>` + clusterOption("unreviewed", "Unreviewed", reviewStatus) + clusterOption("in-progress", "In progress", reviewStatus) + clusterOption("partially-reviewed", "Partially reviewed", reviewStatus) + clusterOption("reviewed", "Reviewed", reviewStatus) + clusterOption("needs-review", "Needs review", reviewStatus) + `</select></label> <label>Note <input id="cluster-note" size="45"` + disabledAttr + `></label> <button id="save-cluster" type="button"` + disabledAttr + `>Save review</button></div><p id="cluster-message"></p><div class="cluster-grid">`)
+	body.WriteString(`<p id="cluster-message"></p><div class="grid cluster-grid">`)
 	renderedFaces := 0
 	for rows.Next() {
-		var faceID, state, personID, pathID, relativePath string
+		var faceID, state, personID, disposition, pathID, relativePath string
 		var width, height int
 		var left, top, right, bottom, quality, detection float64
-		if err := rows.Scan(&faceID, &state, &personID, &pathID, &relativePath, &width, &height, &left, &top, &right, &bottom, &quality, &detection); err != nil {
+		if err := rows.Scan(&faceID, &state, &personID, &disposition, &pathID, &relativePath, &width, &height, &left, &top, &right, &bottom, &quality, &detection); err != nil {
 			http.Error(w, "cluster lookup failed", http.StatusInternalServerError)
 			return
 		}
 		renderedFaces++
-		body.WriteString(`<article class="` + template.HTMLEscapeString("cluster-face "+func() string {
+		assignmentType := template.HTMLEscapeString(assignmentLabel(state))
+		if personID != "" && personID != proposedPersonID {
+			assignedPersonName := personID
+			for _, person := range people {
+				if person.ID == personID {
+					assignedPersonName = person.Name
+					break
+				}
+			}
+			assignmentType += ` (<a href="/review/people/` + template.HTMLEscapeString(personID) + `">` + template.HTMLEscapeString(assignedPersonName) + `</a>)`
+		}
+		dispositionActive := disposition != ""
+		body.WriteString(`<article class="` + template.HTMLEscapeString("card cluster-face "+func() string {
 			if state == string(review.AssignedUser) || state == string(review.AssignedSystem) {
 				return "assigned"
 			}
@@ -2272,37 +2481,28 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 				return "provisional"
 			}
 			return "needs-attention"
-		}()) + `" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-original-state="` + template.HTMLEscapeString(state) + `" data-original-person="` + template.HTMLEscapeString(personID) + `"><div class="photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="face ` + template.HTMLEscapeString(idSuffix(faceID)) + `"><span class="face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(pathID) + `">` + template.HTMLEscapeString(relativePath) + `</a></div><div>Face ` + template.HTMLEscapeString(idSuffix(faceID)) + ` · ` + template.HTMLEscapeString(state) + ` · Quality ` + formatScore(quality) + `% · Detection ` + formatScore(detection) + `%</div><label>Person <select class="face-person"` + disabledAttr + `><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+		}()) + `" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-original-state="` + template.HTMLEscapeString(state) + `" data-original-person="` + template.HTMLEscapeString(personID) + `" data-original-disposition="` + template.HTMLEscapeString(disposition) + `" data-disposition-active="` + strconv.FormatBool(dispositionActive) + `" data-pending-state="` + template.HTMLEscapeString(state) + `"><div class="viewer photo-frame"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="face ` + template.HTMLEscapeString(idSuffix(faceID)) + `"><span class="box face-box" style="left:` + percent(left, width) + `%;top:` + percent(top, height) + `%;width:` + percent(right-left, width) + `%;height:` + percent(bottom-top, height) + `%"></span></div><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(pathID) + `">` + template.HTMLEscapeString(relativePath) + `</a></div><div class="person-metadata"><strong>` + assignmentType + `:</strong> Cs: ` + formatScoreUnavailable(consistencyValue.Float64, consistencyValue.Valid) + ` Cn: ` + formatScoreUnavailable(connectivityValue.Float64, connectivityValue.Valid) + ` Q: ` + formatScore(quality) + `% D: ` + formatScore(detection) + `%</div><div class="cluster-card-actions"><div class="cluster-dispositions"><button type="button" data-action="unknown"` + disabledAttr + `>Unknown</button><button type="button" data-action="ambiguous"` + disabledAttr + `>Ambiguous</button><button type="button" data-action="disposition" data-disposition="incorrect-assignment"` + disabledAttr + `>` + dispositionButtonLabel(disposition, "incorrect-assignment", "Incorrect", "Correct") + `</button><button type="button" data-action="disposition" data-disposition="false-detection"` + disabledAttr + `>` + dispositionButtonLabel(disposition, "false-detection", "No Face", "Has Face") + `</button><button type="button" data-action="disposition" data-disposition="dont-track"` + disabledAttr + `>` + dispositionButtonLabel(disposition, "dont-track", "Don't Track", "Track") + `</button></div>`)
+		selectedName := ""
+		for _, person := range people {
+			if person.ID == personID {
+				selectedName = person.Name
+				break
+			}
+		}
+		body.WriteString(`<div class="person-assignment"><input class="person-select-filter" data-person-filter="assignment-options-` + template.HTMLEscapeString(faceID) + `" value="` + template.HTMLEscapeString(selectedName) + `" placeholder="Type to filter people"><select class="person-select face-person" id="assignment-options-` + template.HTMLEscapeString(faceID) + `" data-assignment-person="` + template.HTMLEscapeString(faceID) + `"` + disabledAttr + `><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
 		for _, person := range people {
 			selected := selectedAttr(person.ID, personID)
-			body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selected + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
+			body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `" data-person-name="` + template.HTMLEscapeString(person.Name) + `"` + selected + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
 		}
-		body.WriteString(`</select></label> <label>State <select class="face-state"` + disabledAttr + `>`)
-		for _, option := range []string{"unassigned", "unknown", "ambiguous", "provisional", "assigned-system", "assigned-user"} {
-			body.WriteString(`<option value="` + option + `"` + selectedAttr(option, state) + `>` + option + `</option>`)
-		}
-		body.WriteString(`</select></label> <label>Disposition <select class="face-disposition"` + disabledAttr + `><option value="">None</option><option value="dont-track">Don't track</option><option value="false-detection">False detection</option><option value="incorrect-assignment">Incorrect assignment</option></select></label><div class="candidate">`)
-		candidateRows, candidateErr := s.db.QueryContext(r.Context(), `SELECT rc.person_id, COALESCE(NULLIF(p.name, ''), substr(rc.person_id, -8), rc.person_id), rc.similarity, rc.margin, rc.support_count FROM recognition_candidates rc LEFT JOIN people p ON p.id = rc.person_id WHERE rc.face_id = ? AND rc.created_at = (SELECT MAX(created_at) FROM recognition_candidates WHERE face_id = ?) ORDER BY rc.rank LIMIT 5`, faceID, faceID)
+		body.WriteString(`</select><button type="button" data-action="assign"` + disabledAttr + `>Save</button></div></div><input type="hidden" class="face-disposition" value="` + template.HTMLEscapeString(disposition) + `">`)
+		body.WriteString(`<div class="person-candidates candidate">`)
+		recognitionCandidates, candidateErr := s.latestRecognitionCandidates(r.Context(), faceID)
 		if candidateErr == nil {
-			for candidateRows.Next() {
-				var candidateID, name string
-				var similarity, margin float64
-				var support int
-				if candidateRows.Scan(&candidateID, &name, &similarity, &margin, &support) == nil {
-					body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidateID) + `">` + template.HTMLEscapeString(name) + `</a>` + template.HTMLEscapeString(fmt.Sprintf(" %.3f (margin %.3f, support %d)", similarity, margin, support)) + `<br>`)
-				}
-			}
-			candidateRows.Close()
+			body.WriteString(renderRecognitionCandidates(recognitionCandidates, faceID, personID, canModify))
 		}
 		possibleCandidates, possibleErr := s.currentPossibleCandidates(r.Context(), faceID)
-		if possibleErr == nil && len(possibleCandidates) > 0 {
-			body.WriteString(`<strong>Possible matches:</strong> `)
-			for index, candidate := range possibleCandidates {
-				if index > 0 {
-					body.WriteString(`, `)
-				}
-				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(candidate.PersonID) + `">` + template.HTMLEscapeString(candidate.PersonName) + `</a>` + template.HTMLEscapeString(fmt.Sprintf(" (S: %.3f, margin %.3f, support %d, %s)", candidate.Similarity, candidate.Margin, candidate.Support, candidate.Evidence)))
-			}
+		if possibleErr == nil {
+			body.WriteString(renderPossibleMatches(possibleCandidates, faceID, personID, canModify))
 		}
 		body.WriteString(`</div></article>`)
 	}
@@ -2313,7 +2513,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		body.WriteString(`<p class="cluster-alert">This cluster has no faces.</p>`)
 	}
 	body.WriteString(`</div><p>Green means user-assigned, yellow means the selected/default person is provisional or system-assigned, and red means the face needs attention. Save may be used before every face is assigned.</p></div><script src="/static/cluster.js" defer></script>`)
-	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Body": template.HTML(body.String()), "PageStyle": pageStyle})
+	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Breadcrumb": template.HTML(`<a href="/review/clusters">Clusters</a>`), "Body": template.HTML(body.String()), "PageStyle": pageStyle})
 }
 
 func (s *Server) clusterScript(w http.ResponseWriter, _ *http.Request) {
@@ -2321,16 +2521,25 @@ func (s *Server) clusterScript(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`(function () {
   const page = document.getElementById('cluster-page'); if (!page) return;
   const message = document.getElementById('cluster-message');
-  function stateFor(card) { const person = card.querySelector('.face-person').value; const selectedState = card.querySelector('.face-state').value; if (person === '__ambiguous__') return 'ambiguous'; if (person && person === card.dataset.originalPerson && (selectedState === 'assigned-system' || selectedState === 'provisional')) return selectedState; if (person) return 'assigned-user'; return selectedState; }
-  function refresh(card) { const state = stateFor(card); card.style.borderColor = state === 'assigned-user' ? '#2a9d50' : (state === 'unknown' || state === 'ambiguous' ? '#c62828' : '#d6a800'); }
-  document.querySelectorAll('.cluster-face').forEach((card) => { card.querySelector('.face-person').addEventListener('change', () => { if (card.querySelector('.face-person').value !== card.dataset.originalPerson) card.querySelector('.face-state').value = 'assigned-user'; refresh(card); }); refresh(card); });
-  document.getElementById('save-cluster').onclick = async () => {
-    const decisions = Array.from(document.querySelectorAll('.cluster-face')).map((card) => { const person = card.querySelector('.face-person').value; const disposition = card.querySelector('.face-disposition').value; const state = stateFor(card); return {face_id: card.dataset.faceId, person_id: person === '__ambiguous__' ? '' : person, state: state, disposition: disposition, original_state: card.dataset.originalState, original_person: card.dataset.originalPerson}; }).filter((decision) => decision.disposition || decision.state !== decision.original_state || decision.person_id !== decision.original_person);
-    const payload = {default_person_id: document.getElementById('default-person').value, status: document.getElementById('cluster-status').value, note: document.getElementById('cluster-note').value, expected_version: Number(page.dataset.version), decisions: decisions};
+  const dispositionLabels = {'incorrect-assignment':['Incorrect','Correct'], 'false-detection':['No Face','Has Face'], 'dont-track':["Don't Track",'Track']};
+  function stateFor(card) { const person = card.querySelector('.face-person').value; const pendingState = card.dataset.pendingState; if (person === '__ambiguous__') return 'ambiguous'; if (person) return person === card.dataset.originalPerson && (pendingState === 'assigned-system' || pendingState === 'provisional') ? pendingState : 'assigned-user'; return 'unknown'; }
+  function refresh(card) { const state = stateFor(card); card.dataset.pendingState = state; card.style.borderColor = state === 'assigned-user' ? '#2a9d50' : (state === 'unknown' || state === 'ambiguous' ? '#c62828' : '#d6a800'); }
+  function refreshDispositionButtons(card) { const current = card.dataset.dispositionActive === 'true' ? card.querySelector('.face-disposition').value : ''; card.querySelectorAll('[data-action="disposition"]').forEach((button) => { const labels = dispositionLabels[button.dataset.disposition]; button.textContent = current === button.dataset.disposition ? labels[1] : labels[0]; }); }
+  document.querySelectorAll('[data-person-filter]').forEach((input) => { const select = document.getElementById(input.dataset.personFilter); if (!select) return; const filter = () => { const text = input.value.toLowerCase(); Array.from(select.options).forEach((option) => { const label = (option.dataset.personName || option.textContent || '').toLowerCase(); option.hidden = text !== '' && !label.includes(text); }); const selected = select.options[select.selectedIndex]; if (selected && selected.hidden) { const first = Array.from(select.options).find((option) => !option.hidden); if (first) select.value = first.value; } }; input.addEventListener('input', filter); filter(); });
+  document.querySelectorAll('.cluster-face').forEach((card) => { const select = card.querySelector('.face-person'); select.addEventListener('change', () => { card.dataset.pendingState = select.value ? (select.value === '__ambiguous__' ? 'ambiguous' : 'assigned-user') : 'unknown'; refresh(card); }); refreshDispositionButtons(card); refresh(card); });
+  document.querySelectorAll('.cluster-face [data-action="unknown"], .cluster-face [data-action="ambiguous"]').forEach((button) => { button.onclick = () => { const card = button.closest('.cluster-face'); const select = card.querySelector('.face-person'); select.value = button.dataset.action === 'ambiguous' ? '__ambiguous__' : ''; card.dataset.pendingState = button.dataset.action; refresh(card); saveReview(); }; });
+  document.querySelectorAll('.cluster-face [data-action="disposition"]').forEach((button) => { button.onclick = () => { const card = button.closest('.cluster-face'); const disposition = card.querySelector('.face-disposition'); const active = card.dataset.dispositionActive === 'true' && disposition.value === button.dataset.disposition; disposition.value = button.dataset.disposition; card.dataset.dispositionActive = active ? 'false' : 'true'; refreshDispositionButtons(card); saveReview(); }; });
+  async function saveReview() {
+    const decisions = Array.from(document.querySelectorAll('.cluster-face')).map((card) => { const person = card.querySelector('.face-person').value; const disposition = card.querySelector('.face-disposition').value; const dispositionActive = card.dataset.dispositionActive === 'true'; const state = stateFor(card); const dispositionChanged = dispositionActive !== Boolean(card.dataset.originalDisposition) || (dispositionActive && disposition !== card.dataset.originalDisposition); return {face_id: card.dataset.faceId, person_id: person === '__ambiguous__' ? '' : person, state: state, disposition: dispositionChanged ? disposition : '', disposition_active: dispositionActive, original_state: card.dataset.originalState, original_person: card.dataset.originalPerson}; }).filter((decision) => decision.disposition || decision.state !== decision.original_state || decision.person_id !== decision.original_person);
+    const selectedStatus = document.getElementById('cluster-status').value;
+    const defaultPerson = document.getElementById('default-person');
+    const payload = {default_person_id: defaultPerson.disabled ? '' : defaultPerson.value, status: selectedStatus === 'unreviewed' ? 'in-progress' : selectedStatus, note: document.getElementById('cluster-note').value, expected_version: Number(page.dataset.version), decisions: decisions};
     const response = await fetch('/api/clusters/' + encodeURIComponent(page.dataset.clusterId) + '/review', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':page.dataset.csrf}, body:JSON.stringify(payload)});
     if (!response.ok) { message.textContent = await response.text(); message.className = 'error'; return; }
     message.textContent = 'Review saved.'; location.reload();
-  };
+  }
+  document.querySelectorAll('.cluster-face [data-action="assign"]').forEach((button) => { button.onclick = () => { const card = button.closest('.cluster-face'); const select = card.querySelector('.face-person'); card.dataset.pendingState = select.value === '__ambiguous__' ? 'ambiguous' : (select.value ? 'assigned-user' : 'unknown'); refresh(card); saveReview(); }; });
+  document.getElementById('save-cluster').onclick = saveReview;
 })();
 `))
 }
@@ -2392,6 +2601,13 @@ func assignmentLabel(state string) string {
 	default:
 		return state
 	}
+}
+
+func dispositionButtonLabel(current, disposition, inactiveLabel, activeLabel string) string {
+	if current == disposition {
+		return activeLabel
+	}
+	return inactiveLabel
 }
 
 func maxInt(a, b int) int {

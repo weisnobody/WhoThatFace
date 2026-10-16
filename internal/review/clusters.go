@@ -10,10 +10,11 @@ import (
 )
 
 type ClusterFaceDecision struct {
-	FaceID      string          `json:"face_id"`
-	PersonID    string          `json:"person_id"`
-	State       AssignmentState `json:"state"`
-	Disposition string          `json:"disposition"`
+	FaceID            string          `json:"face_id"`
+	PersonID          string          `json:"person_id"`
+	State             AssignmentState `json:"state"`
+	Disposition       string          `json:"disposition"`
+	DispositionActive *bool           `json:"disposition_active,omitempty"`
 }
 
 // ReviewCluster records the cluster review event first, then applies explicit
@@ -100,7 +101,11 @@ func (s Store) ReviewCluster(ctx context.Context, clusterID string, defaultPerso
 			}
 		}
 		if decision.Disposition != "" {
-			if auditEvent, err := s.setDispositionInTx(ctx, tx, decision.FaceID, decision.Disposition, true, actor, "cluster-review"); err != nil {
+			active := true
+			if decision.DispositionActive != nil {
+				active = *decision.DispositionActive
+			}
+			if auditEvent, err := s.setDispositionInTx(ctx, tx, decision.FaceID, decision.Disposition, active, actor, "cluster-review"); err != nil {
 				return err
 			} else {
 				auditEvents = append(auditEvents, auditEvent)

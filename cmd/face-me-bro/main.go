@@ -179,6 +179,8 @@ func commandIsReadOnly(command string, args []string) bool {
 		return subcommand == "list"
 	case "search":
 		return true
+	case "chart":
+		return true
 	case "backup", "export":
 		return true
 	default:
@@ -232,6 +234,8 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		return candidateCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "search":
 		return searchCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "chart":
+		return chartCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "audit":
 		return auditCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	case "backup":
@@ -267,6 +271,7 @@ var commandHelp = map[string]helpTopic{
 	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
 	"candidate":  {Usage: "face-me-bro candidate run <get|list|status> [options]", Description: "Inspect possible face-candidate discovery runs.", Options: "list: --limit N --page N; get/status: --run-id ID"},
 	"search":     {Usage: "face-me-bro search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
+	"chart":      {Usage: "face-me-bro chart [options]", Description: "Create score histograms for faces and clusters in active clustering runs.", Options: "--all; --collection-id ID (repeatable or comma-separated); --format text|markdown|json"},
 	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
 	"backup":     {Usage: "face-me-bro backup create", Description: "Create a database backup in the configured backup directory."},
 	"restore":    {Usage: "face-me-bro restore --input FILE --yes", Description: "Replace the configured database from a backup after explicit confirmation."},
@@ -861,9 +866,9 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		collectionID := flags.String("collection-id", "", "limit targets to a collection")
 		all := flags.Bool("all", false, "evaluate all accessible targets")
 		maxProvisional := flags.Int("max-provisional-faces", application.Config.PossibleCandidates.MaxProvisionalFaces, "maximum provisional faces per target person")
+		maxTemporary := flags.Int("max-temporary-faces", application.Config.PossibleCandidates.MaxTemporaryFaces, "maximum faces per unnamed temporary person")
 		maxCandidates := flags.Int("max-candidates", application.Config.PossibleCandidates.MaxCandidates, "maximum candidates retained per face")
 		minSimilarity := flags.Float64("min-similarity", float64(application.Config.PossibleCandidates.MinSimilarity), "minimum similarity floor")
-		includeAssignedSystem := flags.Bool("include-assigned-system", application.Config.PossibleCandidates.IncludeAssignedSystem, "include assigned-system faces")
 		includeDontTrack := flags.Bool("include-dont-track", application.Config.PossibleCandidates.IncludeDontTrack, "include don't-track faces")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
@@ -887,7 +892,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		if scope == "" {
 			return fmt.Errorf("job possible-candidates requires --person-id, --collection-id, or --all")
 		}
-		if *maxProvisional < 1 || *maxCandidates < 1 || *minSimilarity < 0 || *minSimilarity > 1 {
+		if *maxProvisional < 1 || *maxTemporary < 1 || *maxCandidates < 1 || *minSimilarity < 0 || *minSimilarity > 1 {
 			return fmt.Errorf("job possible-candidates has invalid candidate settings")
 		}
 		version, err := candidates.ReferenceSetVersion(ctx, application.DB)
@@ -895,8 +900,8 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 			return err
 		}
 		payload := candidates.JobPayload{Scope: scope, ScopeID: scopeID, ReferenceSetVersion: version, Policy: candidates.Config{
-			MaxProvisionalFaces: *maxProvisional, MaxCandidates: *maxCandidates,
-			MinSimilarity: float32(*minSimilarity), IncludeAssignedSystem: *includeAssignedSystem, IncludeDontTrack: *includeDontTrack,
+			MaxProvisionalFaces: *maxProvisional, MaxTemporaryFaces: *maxTemporary, MaxCandidates: *maxCandidates,
+			MinSimilarity: float32(*minSimilarity), IncludeDontTrack: *includeDontTrack,
 		}}
 		job, queued, err := store.EnqueuePossibleCandidates(ctx, payload)
 		if err != nil {
@@ -992,7 +997,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	query, queryArgs, err := applyPagination("SELECT id, kind, priority, status, created_at, attempts, max_attempts FROM jobs ORDER BY created_at DESC", nil, *limit, *page)
+	query, queryArgs, err := applyPagination("SELECT id, kind, priority, status, created_at, COALESCE(started_at, ''), attempts, max_attempts FROM jobs ORDER BY created_at DESC", nil, *limit, *page)
 	if err != nil {
 		return err
 	}
@@ -1007,13 +1012,14 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		Priority    int    `json:"priority"`
 		Status      string `json:"status"`
 		CreatedAt   string `json:"created_at"`
+		StartedAt   string `json:"started_at"`
 		Attempts    int    `json:"attempts"`
 		MaxAttempts int    `json:"max_attempts"`
 	}
 	var result []item
 	for rows.Next() {
 		var value item
-		if err := rows.Scan(&value.ID, &value.Kind, &value.Priority, &value.Status, &value.CreatedAt, &value.Attempts, &value.MaxAttempts); err != nil {
+		if err := rows.Scan(&value.ID, &value.Kind, &value.Priority, &value.Status, &value.CreatedAt, &value.StartedAt, &value.Attempts, &value.MaxAttempts); err != nil {
 			return err
 		}
 		result = append(result, value)
@@ -1021,9 +1027,9 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 	if jsonOutput {
 		return writeJSON(stdout, envelope("job list", result))
 	}
-	fmt.Fprintln(stdout, "id\tkind\tstatus\tpriority\tattempts")
+	fmt.Fprintln(stdout, "id\tkind\tstatus\tpriority\tstarted_at\tattempts")
 	for _, value := range result {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\tattempts=%d/%d\n", value.ID, value.Kind, value.Status, value.Priority, value.Attempts, value.MaxAttempts)
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\t%s\t%d/%d\n", value.ID, value.Kind, value.Status, value.Priority, value.StartedAt, value.Attempts, value.MaxAttempts)
 	}
 	return rows.Err()
 }
@@ -2180,7 +2186,7 @@ func serveCommand(ctx context.Context, application *app.App, args []string, stdo
 	if err != nil {
 		return err
 	}
-	server, err := web.NewServerWithDiagnostics(auth.NewStore(application.DB), application.DB, application.Config.PythonPath, statusJSON, setupJSON)
+	server, err := web.NewServerWithDiagnosticsAndThresholds(auth.NewStore(application.DB), application.DB, application.Config.PythonPath, statusJSON, setupJSON, application.Config.RecognitionThresholds)
 	if err != nil {
 		return err
 	}

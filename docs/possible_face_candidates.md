@@ -15,23 +15,24 @@ system assignment.
 The feature supports these cases:
 
 1. A provisional person contains one face (a singleton provisional person).
-2. A provisional person contains a small number of faces, with five faces as
-   the default maximum.
+2. A named provisional person contains a small number of faces, with five
+   faces as the default maximum.
+3. An unnamed, system-created temporary person contains up to 50 faces by
+   default.
 3. A face is `unknown`, with no person assignment.
 4. A face is `ambiguous`, because the user could not identify it.
 5. A face is `unassigned`, where processing has not produced an acceptable
    person assignment.
 
-The feature should also support an explicit option to include
-`assigned-system` faces. They may be useful when checking whether an existing
-automatic assignment should instead belong to another established person, but
-they must not be included in the default review set.
+`assigned-system` faces are excluded. Once a face reaches any `assigned-*`
+state, the user must explicitly change it before it becomes eligible.
 
 ## Terminology
 
 - A *target face* is a face being evaluated for possible alternative people.
 - A *target provisional person* is a provisional person associated with one to
-  five currently provisional faces.
+  five currently provisional faces, or an unnamed temporary person associated
+  with one to 50 faces by default.
 - A *candidate person* is an established person with at least one approved
   reference face.
 - A *possible candidate* is a candidate person that has been scored for a target
@@ -48,13 +49,13 @@ The default run includes faces satisfying at least one of these conditions:
 
 - The current assignment state is `unknown`, `ambiguous`, or `unassigned`.
 - The face has a `provisional` assignment and its assigned person is
-  provisional.
-- The face belongs to a provisional person whose total current provisional
-  face count is between one and five, inclusive.
+  provisional, with a total current provisional face count within the
+  applicable limit: five for named provisional people and 50 for unnamed
+  temporary people.
 
 The default run excludes:
 
-- `assigned-user` faces.
+- `assigned-user` and `assigned-system` faces.
 - Faces marked `dont-track`, unless an explicit include-don't-track option is
   supplied.
 - Reference faces belonging to the candidate person being evaluated.
@@ -69,10 +70,10 @@ historical result of an earlier run.
 The following values are configuration parameters:
 
 - Maximum provisional faces per target person: default `5`.
+- Maximum faces per unnamed temporary person: default `50`.
 - Maximum candidates retained per face: default `5`.
 - Minimum candidate similarity retained: default `0.25`, matching the low
   similarity boundary in the recognition settings.
-- Whether `assigned-system` faces are included: default `false`.
 - Whether don't-track faces are included: default `false`.
 - Whether candidates are generated for one person, one collection, or all
   accessible collections.

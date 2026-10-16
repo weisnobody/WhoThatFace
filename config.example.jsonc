@@ -67,6 +67,7 @@
   // Possible-candidate discovery settings. These retain likely people for
   // review without changing face assignments.
   // "possible_max_provisional_faces": 5,
+  // "possible_max_temporary_faces": 50,
   // "possible_max_candidates": 5,
   // "possible_min_similarity": 0.25,
   // "possible_include_assigned_system": false,

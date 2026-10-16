@@ -57,9 +57,9 @@ type File struct {
 	ClusteringSimilarityThreshold float32 `json:"clustering_similarity_threshold,omitempty"`
 	ClusteringCandidateScope      string  `json:"clustering_candidate_scope,omitempty"`
 	PossibleMaxProvisionalFaces   int     `json:"possible_max_provisional_faces,omitempty"`
+	PossibleMaxTemporaryFaces     int     `json:"possible_max_temporary_faces,omitempty"`
 	PossibleMaxCandidates         int     `json:"possible_max_candidates,omitempty"`
 	PossibleMinSimilarity         float32 `json:"possible_min_similarity,omitempty"`
-	PossibleIncludeAssignedSystem *bool   `json:"possible_include_assigned_system,omitempty"`
 	PossibleIncludeDontTrack      *bool   `json:"possible_include_dont_track,omitempty"`
 }
 
@@ -214,14 +214,14 @@ func Load(configPath string) (Resolved, error) {
 	if settings.PossibleMaxProvisionalFaces != 0 {
 		possibleConfig.MaxProvisionalFaces = settings.PossibleMaxProvisionalFaces
 	}
+	if settings.PossibleMaxTemporaryFaces != 0 {
+		possibleConfig.MaxTemporaryFaces = settings.PossibleMaxTemporaryFaces
+	}
 	if settings.PossibleMaxCandidates != 0 {
 		possibleConfig.MaxCandidates = settings.PossibleMaxCandidates
 	}
 	if settings.PossibleMinSimilarity != 0 {
 		possibleConfig.MinSimilarity = settings.PossibleMinSimilarity
-	}
-	if settings.PossibleIncludeAssignedSystem != nil {
-		possibleConfig.IncludeAssignedSystem = *settings.PossibleIncludeAssignedSystem
 	}
 	if settings.PossibleIncludeDontTrack != nil {
 		possibleConfig.IncludeDontTrack = *settings.PossibleIncludeDontTrack
