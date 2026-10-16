@@ -59,6 +59,24 @@ func TestLoadRejectsDirectAssignmentAtOrBelowHighSimilarity(t *testing.T) {
 	}
 }
 
+func TestLoadOverridesDirectAssignmentSimilarity(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "settings.json")
+	data, err := json.Marshal(File{RecognitionDirectAssignmentSimilarity: 0.85})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.RecognitionThresholds.DirectAssignmentSimilarity != 0.85 {
+		t.Fatalf("DirectAssignmentSimilarity = %v, want 0.85", got.RecognitionThresholds.DirectAssignmentSimilarity)
+	}
+}
+
 func formatFloat(value float32) string {
 	return fmt.Sprintf("%.2f", value)
 }
