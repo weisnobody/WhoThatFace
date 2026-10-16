@@ -17,27 +17,28 @@ const (
 )
 
 type Thresholds struct {
-	HighSimilarity     float32
-	MediumSimilarity   float32
-	LowSimilarity      float32
-	Margin             float32
-	HighSupport        int
-	MediumSupport      int
-	HighQuality        float32
-	MediumQuality      float32
-	HighDetection      float32
-	MediumDetection    float32
-	HighPurity         float32
-	MediumPurity       float32
-	HighConnectivity   float32
-	MediumConnectivity float32
-	RequireAgreement   bool
+	HighSimilarity             float32
+	DirectAssignmentSimilarity float32
+	MediumSimilarity           float32
+	LowSimilarity              float32
+	Margin                     float32
+	HighSupport                int
+	MediumSupport              int
+	HighQuality                float32
+	MediumQuality              float32
+	HighDetection              float32
+	MediumDetection            float32
+	HighPurity                 float32
+	MediumPurity               float32
+	HighConnectivity           float32
+	MediumConnectivity         float32
+	RequireAgreement           bool
 }
 
 // DefaultThresholds are the production evidence thresholds from the spec.
 func DefaultThresholds() Thresholds {
 	return Thresholds{
-		HighSimilarity: 0.50, MediumSimilarity: 0.40, LowSimilarity: 0.25,
+		HighSimilarity: 0.50, DirectAssignmentSimilarity: 0.75, MediumSimilarity: 0.40, LowSimilarity: 0.25,
 		Margin: 0.05, HighSupport: 5, MediumSupport: 3,
 		HighQuality: 0.75, MediumQuality: 0.60,
 		HighDetection: 0.75, MediumDetection: 0.60,

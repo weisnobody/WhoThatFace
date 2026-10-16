@@ -44,6 +44,7 @@
 
   // Recognition evidence thresholds. Scores are fractions from 0 to 1.
   // "recognition_high_similarity": 0.50,
+  // "recognition_direct_assignment_similarity": 0.75,
   // "recognition_medium_similarity": 0.40,
   // "recognition_low_similarity": 0.25,
   // "recognition_margin": 0.05,

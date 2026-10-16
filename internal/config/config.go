@@ -27,40 +27,41 @@ const (
 // File contains settings that may be supplied by a JSON configuration file.
 // Empty paths use the runtime data root and its standard subdirectories.
 type File struct {
-	RuntimeDataRoot               string  `json:"runtime_data_root,omitempty"`
-	DatabasePath                  string  `json:"database_path,omitempty"`
-	ModelRoot                     string  `json:"model_root,omitempty"`
-	PythonPath                    string  `json:"python_path,omitempty"`
-	Provider                      string  `json:"provider,omitempty"`
-	ServeAddress                  string  `json:"serve_address,omitempty"`
-	LogRoot                       string  `json:"log_root,omitempty"`
-	TempRoot                      string  `json:"temp_root,omitempty"`
-	ExportRoot                    string  `json:"export_root,omitempty"`
-	BackupRoot                    string  `json:"backup_root,omitempty"`
-	NeighborSearchMethod          string  `json:"neighbor_search_method,omitempty"`
-	RecognitionHighSimilarity     float32 `json:"recognition_high_similarity,omitempty"`
-	RecognitionMediumSimilarity   float32 `json:"recognition_medium_similarity,omitempty"`
-	RecognitionLowSimilarity      float32 `json:"recognition_low_similarity,omitempty"`
-	RecognitionMargin             float32 `json:"recognition_margin,omitempty"`
-	RecognitionHighSupport        int     `json:"recognition_high_support,omitempty"`
-	RecognitionMediumSupport      int     `json:"recognition_medium_support,omitempty"`
-	RecognitionHighQuality        float32 `json:"recognition_high_quality,omitempty"`
-	RecognitionMediumQuality      float32 `json:"recognition_medium_quality,omitempty"`
-	RecognitionHighDetection      float32 `json:"recognition_high_detection,omitempty"`
-	RecognitionMediumDetection    float32 `json:"recognition_medium_detection,omitempty"`
-	RecognitionHighPurity         float32 `json:"recognition_high_purity,omitempty"`
-	RecognitionMediumPurity       float32 `json:"recognition_medium_purity,omitempty"`
-	RecognitionHighConnectivity   float32 `json:"recognition_high_connectivity,omitempty"`
-	RecognitionMediumConnectivity float32 `json:"recognition_medium_connectivity,omitempty"`
-	RecognitionRequireAgreement   *bool   `json:"recognition_require_agreement,omitempty"`
-	ClusteringK                   int     `json:"clustering_k,omitempty"`
-	ClusteringSimilarityThreshold float32 `json:"clustering_similarity_threshold,omitempty"`
-	ClusteringCandidateScope      string  `json:"clustering_candidate_scope,omitempty"`
-	PossibleMaxProvisionalFaces   int     `json:"possible_max_provisional_faces,omitempty"`
-	PossibleMaxTemporaryFaces     int     `json:"possible_max_temporary_faces,omitempty"`
-	PossibleMaxCandidates         int     `json:"possible_max_candidates,omitempty"`
-	PossibleMinSimilarity         float32 `json:"possible_min_similarity,omitempty"`
-	PossibleIncludeDontTrack      *bool   `json:"possible_include_dont_track,omitempty"`
+	RuntimeDataRoot                       string  `json:"runtime_data_root,omitempty"`
+	DatabasePath                          string  `json:"database_path,omitempty"`
+	ModelRoot                             string  `json:"model_root,omitempty"`
+	PythonPath                            string  `json:"python_path,omitempty"`
+	Provider                              string  `json:"provider,omitempty"`
+	ServeAddress                          string  `json:"serve_address,omitempty"`
+	LogRoot                               string  `json:"log_root,omitempty"`
+	TempRoot                              string  `json:"temp_root,omitempty"`
+	ExportRoot                            string  `json:"export_root,omitempty"`
+	BackupRoot                            string  `json:"backup_root,omitempty"`
+	NeighborSearchMethod                  string  `json:"neighbor_search_method,omitempty"`
+	RecognitionHighSimilarity             float32 `json:"recognition_high_similarity,omitempty"`
+	RecognitionDirectAssignmentSimilarity float32 `json:"recognition_direct_assignment_similarity,omitempty"`
+	RecognitionMediumSimilarity           float32 `json:"recognition_medium_similarity,omitempty"`
+	RecognitionLowSimilarity              float32 `json:"recognition_low_similarity,omitempty"`
+	RecognitionMargin                     float32 `json:"recognition_margin,omitempty"`
+	RecognitionHighSupport                int     `json:"recognition_high_support,omitempty"`
+	RecognitionMediumSupport              int     `json:"recognition_medium_support,omitempty"`
+	RecognitionHighQuality                float32 `json:"recognition_high_quality,omitempty"`
+	RecognitionMediumQuality              float32 `json:"recognition_medium_quality,omitempty"`
+	RecognitionHighDetection              float32 `json:"recognition_high_detection,omitempty"`
+	RecognitionMediumDetection            float32 `json:"recognition_medium_detection,omitempty"`
+	RecognitionHighPurity                 float32 `json:"recognition_high_purity,omitempty"`
+	RecognitionMediumPurity               float32 `json:"recognition_medium_purity,omitempty"`
+	RecognitionHighConnectivity           float32 `json:"recognition_high_connectivity,omitempty"`
+	RecognitionMediumConnectivity         float32 `json:"recognition_medium_connectivity,omitempty"`
+	RecognitionRequireAgreement           *bool   `json:"recognition_require_agreement,omitempty"`
+	ClusteringK                           int     `json:"clustering_k,omitempty"`
+	ClusteringSimilarityThreshold         float32 `json:"clustering_similarity_threshold,omitempty"`
+	ClusteringCandidateScope              string  `json:"clustering_candidate_scope,omitempty"`
+	PossibleMaxProvisionalFaces           int     `json:"possible_max_provisional_faces,omitempty"`
+	PossibleMaxTemporaryFaces             int     `json:"possible_max_temporary_faces,omitempty"`
+	PossibleMaxCandidates                 int     `json:"possible_max_candidates,omitempty"`
+	PossibleMinSimilarity                 float32 `json:"possible_min_similarity,omitempty"`
+	PossibleIncludeDontTrack              *bool   `json:"possible_include_dont_track,omitempty"`
 }
 
 // Resolved is the complete configuration used by application services.
@@ -155,6 +156,12 @@ func Load(configPath string) (Resolved, error) {
 	thresholds := recognition.DefaultThresholds()
 	if settings.RecognitionHighSimilarity != 0 {
 		thresholds.HighSimilarity = settings.RecognitionHighSimilarity
+	}
+	if settings.RecognitionDirectAssignmentSimilarity != 0 {
+		thresholds.DirectAssignmentSimilarity = settings.RecognitionDirectAssignmentSimilarity
+	}
+	if thresholds.DirectAssignmentSimilarity <= thresholds.HighSimilarity {
+		return Resolved{}, fmt.Errorf("recognition_direct_assignment_similarity (%.3f) must be greater than recognition_high_similarity (%.3f)", thresholds.DirectAssignmentSimilarity, thresholds.HighSimilarity)
 	}
 	if settings.RecognitionMediumSimilarity != 0 {
 		thresholds.MediumSimilarity = settings.RecognitionMediumSimilarity

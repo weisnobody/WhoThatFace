@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -35,6 +36,31 @@ func TestLoadUsesDefaultsWhenConfigurationDoesNotExist(t *testing.T) {
 	if got.Provider != defaultProvider {
 		t.Fatalf("Provider = %q, want %q", got.Provider, defaultProvider)
 	}
+	if got.RecognitionThresholds.DirectAssignmentSimilarity != 0.75 {
+		t.Fatalf("DirectAssignmentSimilarity = %v, want 0.75", got.RecognitionThresholds.DirectAssignmentSimilarity)
+	}
+}
+
+func TestLoadRejectsDirectAssignmentAtOrBelowHighSimilarity(t *testing.T) {
+	for _, value := range []float32{0.50, 0.49} {
+		t.Run("threshold-"+formatFloat(value), func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "settings.json")
+			data, err := json.Marshal(File{RecognitionDirectAssignmentSimilarity: value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(configPath); err == nil {
+				t.Fatalf("Load() accepted direct assignment threshold %v", value)
+			}
+		})
+	}
+}
+
+func formatFloat(value float32) string {
+	return fmt.Sprintf("%.2f", value)
 }
 
 func TestLoadResolvesConfiguredRootAndRelativePaths(t *testing.T) {
