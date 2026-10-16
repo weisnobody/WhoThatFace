@@ -2508,10 +2508,7 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if !hasReferences {
 				return recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID)
 			}
-			if err := recognitionProcessor.ProcessPerson(jobContext, payload.PersonID); err != nil {
-				return err
-			}
-			if err := recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID); err != nil {
+			if err := recognitionProcessor.ProcessDiscovery(jobContext, payload.PersonID, nil); err != nil {
 				return err
 			}
 			version, err := candidates.ReferenceSetVersion(jobContext, application.DB)

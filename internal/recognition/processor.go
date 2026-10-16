@@ -56,7 +56,7 @@ func (p Processor) processAll(ctx context.Context, since *time.Time) error {
 		SELECT f.id, f.embedding, f.embedding_dimension, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0), COALESCE(ca.state, 'unassigned')
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
-		WHERE COALESCE(ca.state, 'unassigned') <> 'assigned-user'`
+		WHERE COALESCE(ca.state, 'unassigned') NOT IN ('assigned-user', 'assigned-system')`
 	args := []any{}
 	if p.personID != "" {
 		query += ` AND (ca.person_id = ? OR EXISTS (SELECT 1 FROM current_face_references fr WHERE fr.face_id = f.id AND fr.person_id = ?) OR EXISTS (SELECT 1 FROM recognition_candidates rc WHERE rc.face_id = f.id AND rc.person_id = ?))`
@@ -102,21 +102,27 @@ func (p Processor) processAll(ctx context.Context, since *time.Time) error {
 		}
 		candidate := candidates[0]
 		level := ClassifyStandalone(candidate, p.thresholds)
+		directAssignment := candidate.Similarity >= p.thresholds.DirectAssignmentSimilarity
 		state := review.Unknown
 		personID := ""
-		if level == EvidenceHigh {
+		reason := "recognition"
+		if directAssignment {
+			state = review.AssignedSystem
+			personID = candidate.PersonID
+			reason = "direct-similarity"
+		} else if level == EvidenceHigh {
 			state = review.AssignedSystem
 			personID = candidate.PersonID
 		} else if level == EvidenceMedium {
 			state = review.Provisional
 			personID = candidate.PersonID
 		}
-		if p.discovery && level != EvidenceHigh && level != EvidenceMedium && assignmentState != string(review.Unassigned) {
+		if p.discovery && !directAssignment && level != EvidenceHigh && level != EvidenceMedium && assignmentState != string(review.Unassigned) {
 			continue
 		}
 		similarity, margin := candidate.Similarity, candidate.Margin
 		support, candidateQuality, candidateDetection := candidate.Support, candidate.Quality, candidate.Detection
-		if _, err := p.review.Assign(ctx, faceID, personID, state, review.Actor{Type: "system"}, review.Evidence{Similarity: &similarity, Margin: &margin, Support: &support, Quality: &candidateQuality, Detection: &candidateDetection}, "recognition"); err != nil {
+		if _, err := p.review.Assign(ctx, faceID, personID, state, review.Actor{Type: "system"}, review.Evidence{Similarity: &similarity, Margin: &margin, Support: &support, Quality: &candidateQuality, Detection: &candidateDetection}, reason); err != nil {
 			return err
 		}
 	}
