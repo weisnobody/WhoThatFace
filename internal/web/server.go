@@ -235,7 +235,7 @@ func newServer(authStore auth.Store, database *sql.DB, pythonPath string, thresh
 	//  body{font-family:system-ui,sans-serif;max-width:70rem;margin:2rem auto;padding:0 1rem}
 
 	page := template.Must(template.New("page").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>{{.Title}}</title>
+<html lang="en"><head><meta charset="utf-8"><title>FMB: {{.Title}}</title>
 <style>
  body { font: 14px system-ui; margin: 20px; color: #222 }
  .page-header { position: sticky; top: 0; z-index: 10; background: #fff; padding: 2px 0}
