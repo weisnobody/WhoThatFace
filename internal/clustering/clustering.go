@@ -49,6 +49,7 @@ type Cluster struct {
 	Consistency      float32
 	Connectivity     float32
 	Mixed            bool
+	NeedsReview      bool
 }
 
 type Result struct {

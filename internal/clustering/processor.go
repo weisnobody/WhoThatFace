@@ -115,6 +115,26 @@ func (p Processor) run(ctx context.Context, scope string, faceIDs []string) (str
 			cluster.ProposedPersonID = personID
 		}
 	}
+	// A recognition candidate that disagrees with the cluster proposal is
+	// evidence for review. Determine this before persisting the result so the
+	// cluster is created with the correct review status.
+	for index := range result.Clusters {
+		cluster := &result.Clusters[index]
+		if cluster.ProposedPersonID == "" || cluster.Mixed {
+			continue
+		}
+		for _, faceID := range cluster.FaceIDs {
+			var candidatePerson string
+			err := p.db.QueryRowContext(ctx, `SELECT person_id FROM recognition_candidates WHERE face_id = ? ORDER BY created_at DESC, rank LIMIT 1`, faceID).Scan(&candidatePerson)
+			if err == nil && candidatePerson != cluster.ProposedPersonID {
+				cluster.NeedsReview = true
+				break
+			}
+			if err != nil && err != sql.ErrNoRows {
+				return "", err
+			}
+		}
+	}
 	if err := p.store.PersistResult(ctx, runID, result); err != nil {
 		return "", err
 	}
@@ -149,12 +169,10 @@ func (p Processor) run(ctx context.Context, scope string, faceIDs []string) (str
 					thresholds = recognition.DefaultThresholds()
 				}
 				level := recognition.Classify(candidate, thresholds)
-				if !agreementValue {
-					state = review.Unknown
-				} else if level == recognition.EvidenceHigh {
+				if level == recognition.EvidenceHigh && agreementValue {
 					state = review.AssignedSystem
 				}
-				if level == recognition.EvidenceManual {
+				if level == recognition.EvidenceManual && agreementValue {
 					state = review.Unknown
 				}
 			}

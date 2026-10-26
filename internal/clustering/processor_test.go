@@ -42,6 +42,9 @@ func TestProcessorRunsAndActivatesClustering(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := database.Exec(`INSERT INTO people (id, name, is_provisional, created_at, updated_at) VALUES ('recognized-person', 'Recognized', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP); INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-face-a', 'face-a', 'recognized-person', 1, 0.10, 0.01, 1, 0.5, 0.5, 'manual-review', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
 	runID, err := NewProcessor(database, Config{K: 1, SimilarityThreshold: .9}).Run(context.Background(), "all")
 	if err != nil {
 		t.Fatal(err)
@@ -52,5 +55,12 @@ func TestProcessorRunsAndActivatesClustering(t *testing.T) {
 	}
 	if status != "active" {
 		t.Errorf("status = %q", status)
+	}
+	var assignmentState, assignedPerson, reviewStatus string
+	if err := database.QueryRow(`SELECT COALESCE(ca.state, ''), COALESCE(ca.person_id, ''), c.review_status FROM current_face_assignments ca JOIN cluster_memberships cm ON cm.face_id = ca.face_id JOIN clusters c ON c.id = cm.cluster_id WHERE ca.face_id = 'face-a' AND c.clustering_run_id = ?`, runID).Scan(&assignmentState, &assignedPerson, &reviewStatus); err != nil {
+		t.Fatal(err)
+	}
+	if assignmentState != "provisional" || assignedPerson == "recognized-person" || reviewStatus != "needs-review" {
+		t.Fatalf("disagreement assignment = %q/%q, cluster review status = %q; want provisional cluster person and needs-review", assignmentState, assignedPerson, reviewStatus)
 	}
 }

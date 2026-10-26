@@ -57,7 +57,7 @@ func (s RunStore) PersistResult(ctx context.Context, runID string, result Result
 			return err
 		}
 		status := "unreviewed"
-		if cluster.Mixed {
+		if cluster.Mixed || cluster.NeedsReview {
 			status = "needs-review"
 		}
 		if _, err := tx.ExecContext(ctx, `
