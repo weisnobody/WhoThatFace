@@ -263,6 +263,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/photos", s.photos)
 	mux.HandleFunc("GET /api/photos/{pathID}", s.photo)
 	mux.HandleFunc("GET /static/person.js", s.personScript)
+	mux.HandleFunc("GET /static/people.js", s.peopleScript)
 	mux.HandleFunc("GET /static/photo.js", s.photoScript)
 	mux.HandleFunc("GET /static/cluster.js", s.clusterScript)
 	mux.HandleFunc("GET /static/admin.js", s.adminScript)
@@ -470,7 +471,10 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	}
 	var collectionID, relative string
 	var width, height int
-	if err := s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0) FROM photo_paths pp JOIN photo_assets pa ON pa.id = pp.asset_id WHERE pp.id = ? AND pp.missing_at IS NULL`, pathID).Scan(&collectionID, &relative, &width, &height); err != nil {
+	if err := s.db.QueryRowContext(r.Context(), `SELECT pp.collection_id, pp.relative_path,
+		COALESCE((SELECT a.source_width FROM analyses a WHERE a.asset_id = pp.asset_id AND a.status = 'completed' ORDER BY a.completed_at DESC, a.created_at DESC LIMIT 1), pa.width, 0),
+		COALESCE((SELECT a.source_height FROM analyses a WHERE a.asset_id = pp.asset_id AND a.status = 'completed' ORDER BY a.completed_at DESC, a.created_at DESC LIMIT 1), pa.height, 0)
+		FROM photo_paths pp JOIN photo_assets pa ON pa.id = pp.asset_id WHERE pp.id = ? AND pp.missing_at IS NULL`, pathID).Scan(&collectionID, &relative, &width, &height); err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -573,6 +577,59 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
+	query := r.URL.Query()
+	type collectionOption struct{ ID, Name string }
+	collectionQuery := `SELECT id, name FROM collections`
+	collectionArgs := []any{}
+	if allowed != nil {
+		if len(allowed) == 0 {
+			s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(`<h1>People</h1><p>No collections are assigned to this account.</p>`)})
+			return
+		}
+		collectionQuery += ` WHERE id IN (` + placeholders(len(allowed)) + `)`
+		for _, collectionID := range allowed {
+			collectionArgs = append(collectionArgs, collectionID)
+		}
+	}
+	collectionQuery += ` ORDER BY LOWER(name), id`
+	collectionRows, err := s.db.QueryContext(r.Context(), collectionQuery, collectionArgs...)
+	if err != nil {
+		http.Error(w, "collection lookup failed", http.StatusInternalServerError)
+		return
+	}
+	var collections []collectionOption
+	for collectionRows.Next() {
+		var collection collectionOption
+		if err := collectionRows.Scan(&collection.ID, &collection.Name); err != nil {
+			collectionRows.Close()
+			http.Error(w, "collection lookup failed", http.StatusInternalServerError)
+			return
+		}
+		collections = append(collections, collection)
+	}
+	if err := collectionRows.Err(); err != nil {
+		collectionRows.Close()
+		http.Error(w, "collection lookup failed", http.StatusInternalServerError)
+		return
+	}
+	collectionRows.Close()
+	collectionID := query.Get("collection_id")
+	if collectionID != "" {
+		found := false
+		for _, collection := range collections {
+			if collection.ID == collectionID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			collectionID = ""
+		}
+	}
+	visibleCollectionIDs := allowed
+	if collectionID != "" {
+		visibleCollectionIDs = []string{collectionID}
+	}
 	view := r.URL.Query().Get("view")
 	if view != "possibles" && view != "dont-track" && view != "no-faces" {
 		view = "all"
@@ -580,15 +637,16 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	possibleCount := `(SELECT COUNT(DISTINCT pc.face_id) FROM possible_face_candidates pc WHERE pc.person_id = p.id AND pc.is_current = 1)`
 	clusterCount := `(SELECT COUNT(DISTINCT c.id) FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cr.status = 'active' AND (c.proposed_person_id = p.id OR EXISTS (SELECT 1 FROM cluster_memberships cm JOIN current_face_assignments cca ON cca.face_id = cm.face_id WHERE cm.cluster_id = c.id AND cca.person_id = p.id)))`
 	var possibleArgs []any
-	if allowed != nil {
-		placeholders := make([]string, len(allowed))
-		for i := range allowed {
+	if visibleCollectionIDs != nil {
+		placeholders := make([]string, len(visibleCollectionIDs))
+		for i := range visibleCollectionIDs {
 			placeholders[i] = "?"
-			possibleArgs = append(possibleArgs, allowed[i])
+			possibleArgs = append(possibleArgs, visibleCollectionIDs[i])
 		}
 		possibleCount = `(SELECT COUNT(DISTINCT pc.face_id) FROM possible_face_candidates pc JOIN faces pcf ON pcf.id = pc.face_id JOIN analyses pca ON pca.id = pcf.analysis_id JOIN photo_paths pcp ON pcp.asset_id = pca.asset_id WHERE pc.person_id = p.id AND pc.is_current = 1 AND pcp.collection_id IN (` + strings.Join(placeholders, ",") + `))`
 	}
-	peopleQuery := `SELECT p.id, COALESCE(NULLIF(p.name, ''), substr(p.id, -8)), p.dont_track,
+	peopleQuery := `SELECT p.id, COALESCE(NULLIF(p.name, ''), substr(p.id, -8)),
+		CASE WHEN p.name IS NOT NULL AND trim(p.name) <> '' THEN 1 ELSE 0 END, p.dont_track,
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL THEN ca.face_id END),
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND ca.state = 'assigned-user' THEN ca.face_id END),
 		COUNT(DISTINCT CASE WHEN pp.missing_at IS NULL AND ca.state = 'assigned-system' THEN ca.face_id END),
@@ -607,19 +665,14 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		LEFT JOIN reference_recommendations rr ON rr.face_id = ca.face_id AND rr.person_id = p.id
 		WHERE `
 	args := append([]any(nil), possibleArgs...)
-	if allowed != nil && view != "no-faces" {
-		if len(allowed) == 0 {
-			body := `<h1>People</h1><p>No collections are assigned to this account.</p>`
-			s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body)})
-			return
-		}
-		placeholders := make([]string, len(allowed))
-		for i := range allowed {
+	if visibleCollectionIDs != nil && (view != "no-faces" || collectionID != "") {
+		placeholders := make([]string, len(visibleCollectionIDs))
+		for i := range visibleCollectionIDs {
 			placeholders[i] = "?"
 		}
 		peopleQuery += ` (EXISTS (SELECT 1 FROM faces f2 JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id JOIN current_face_assignments ca2 ON ca2.face_id = f2.id WHERE ca2.person_id = p.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
 		peopleQuery += `)`
-		for _, id := range allowed {
+		for _, id := range visibleCollectionIDs {
 			args = append(args, id)
 		}
 	} else {
@@ -634,13 +687,14 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	type personRow struct {
 		ID, Name                                                                                  string
+		Named                                                                                     int
 		DontTrack, Faces, User, System, Provisional, References, Recommended, Clusters, Possibles int
 	}
 	var people []personRow
 	for rows.Next() {
 		var id, name string
 		var row personRow
-		if err := rows.Scan(&id, &name, &row.DontTrack, &row.Faces, &row.User, &row.System, &row.Provisional, &row.References, &row.Recommended, &row.Clusters, &row.Possibles); err != nil {
+		if err := rows.Scan(&id, &name, &row.Named, &row.DontTrack, &row.Faces, &row.User, &row.System, &row.Provisional, &row.References, &row.Recommended, &row.Clusters, &row.Possibles); err != nil {
 			http.Error(w, "people lookup failed", http.StatusInternalServerError)
 			return
 		}
@@ -651,10 +705,15 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
 		return
 	}
-	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-	includeDontTrack := r.URL.Query().Get("include_dont_track") == "true"
-	includePossibles := r.URL.Query().Get("include_possibles") != "false"
-	includeNoFaces := r.URL.Query().Get("include_no_faces") == "true"
+	q := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	nameFilter := query.Get("name")
+	if nameFilter != "named" && nameFilter != "unnamed" {
+		nameFilter = "all"
+	}
+	includeDontTrack := query.Get("include_dont_track") == "true"
+	includePossibles := query.Get("include_possibles") != "false"
+	includeNoFaces := query.Get("include_no_faces") == "true"
+	minFaces, maxFaces := parseIntFilter(query.Get("min_faces")), parseIntFilter(query.Get("max_faces"))
 	assignmentFiltersSpecified := false
 	for _, name := range []string{"assignment_user", "assignment_system", "assignment_provisional", "assignment_other"} {
 		if _, ok := r.URL.Query()[name]; ok {
@@ -668,7 +727,16 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	includeAssignmentOther := !assignmentFiltersSpecified || r.URL.Query().Get("assignment_other") == "true"
 	filtered := people[:0]
 	for _, person := range people {
+		if nameFilter == "named" && person.Named == 0 {
+			continue
+		}
+		if nameFilter == "unnamed" && person.Named != 0 {
+			continue
+		}
 		if q != "" && !strings.Contains(strings.ToLower(person.Name), q) {
+			continue
+		}
+		if minFaces > 0 && person.Faces < minFaces || maxFaces > 0 && person.Faces > maxFaces {
 			continue
 		}
 		switch view {
@@ -725,6 +793,8 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 			left, right = fmt.Sprintf("%09d", people[i].System), fmt.Sprintf("%09d", people[j].System)
 		case "provisional":
 			left, right = fmt.Sprintf("%09d", people[i].Provisional), fmt.Sprintf("%09d", people[j].Provisional)
+		case "references":
+			left, right = fmt.Sprintf("%09d", people[i].References), fmt.Sprintf("%09d", people[j].References)
 		case "clusters":
 			left, right = fmt.Sprintf("%09d", people[i].Clusters), fmt.Sprintf("%09d", people[j].Clusters)
 		default:
@@ -777,8 +847,12 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		return "/review/people?" + values.Encode()
 	}
 	var body strings.Builder
-	body.WriteString(`<h1>People (` + fmt.Sprint(len(pagePeople)) + `/` + fmt.Sprint(total) + `)</h1><form id="create-person"><input name="name" placeholder="New person name" required><button>Create person</button></form><form id="people-controls" method="get"><strong>Filter</strong> <input name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `" placeholder="Filter name"><label><strong>View</strong> <select name="view"><option value="all"` + selectedAttr("all", view) + `>All</option><option value="possibles"` + selectedAttr("possibles", view) + `>Possibles</option><option value="dont-track"` + selectedAttr("dont-track", view) + `>Don't Track</option><option value="no-faces"` + selectedAttr("no-faces", view) + `>No Faces</option></select></label><strong>Include:</strong> <label><input type="checkbox" name="include_possibles" value="true"` + checkedAttr(includePossibles) + `> Possibles</label><label><input type="checkbox" name="include_no_faces" value="true"` + checkedAttr(includeNoFaces) + `> No Faces</label><label><input type="checkbox" name="include_dont_track" value="true"` + checkedAttr(includeDontTrack) + `> Don't Track</label><strong>Assignment:</strong> <label><input type="checkbox" name="assignment_user" value="true"` + checkedAttr(includeAssignmentUser) + `> User</label><label><input type="checkbox" name="assignment_system" value="true"` + checkedAttr(includeAssignmentSystem) + `> System</label><label><input type="checkbox" name="assignment_provisional" value="true"` + checkedAttr(includeAssignmentProvisional) + `> Provisional</label><label><input type="checkbox" name="assignment_other" value="true"` + checkedAttr(includeAssignmentOther) + `> Other</label><span class="people-controls-break"></span><label><strong>Sort</strong> <select name="sort">`)
-	for _, option := range []struct{ Value, Label string }{{"name", "Name"}, {"faces", "Faces"}, {"user", "User"}, {"system", "System"}, {"provisional", "Provisional"}, {"clusters", "Clusters"}} {
+	body.WriteString(`<h1>People (` + fmt.Sprint(len(pagePeople)) + `/` + fmt.Sprint(total) + `)</h1><form id="people-controls" method="get"><strong>Filter</strong> <input name="q" value="` + template.HTMLEscapeString(query.Get("q")) + `" placeholder="Filter name"><label><strong>Name</strong> <select name="name"><option value="all"` + selectedAttr("all", nameFilter) + `>All</option><option value="named"` + selectedAttr("named", nameFilter) + `>With name</option><option value="unnamed"` + selectedAttr("unnamed", nameFilter) + `>Without name</option></select></label><label><strong>Collection</strong> <select name="collection_id"><option value=""` + selectedAttr("", collectionID) + `>All accessible</option>`)
+	for _, collection := range collections {
+		body.WriteString(`<option value="` + template.HTMLEscapeString(collection.ID) + `"` + selectedAttr(collection.ID, collectionID) + `>` + template.HTMLEscapeString(collection.Name) + `</option>`)
+	}
+	body.WriteString(`</select></label><label><strong>View</strong> <select name="view"><option value="all"` + selectedAttr("all", view) + `>All</option><option value="possibles"` + selectedAttr("possibles", view) + `>Possibles</option><option value="dont-track"` + selectedAttr("dont-track", view) + `>Don't Track</option><option value="no-faces"` + selectedAttr("no-faces", view) + `>No Faces</option></select></label><strong>Include:</strong> <label><input type="checkbox" name="include_possibles" value="true"` + checkedAttr(includePossibles) + `> Possibles</label><label><input type="checkbox" name="include_no_faces" value="true"` + checkedAttr(includeNoFaces) + `> No Faces</label><label><input type="checkbox" name="include_dont_track" value="true"` + checkedAttr(includeDontTrack) + `> Don't Track</label><strong>Assignment:</strong> <label><input type="checkbox" name="assignment_user" value="true"` + checkedAttr(includeAssignmentUser) + `> User</label><label><input type="checkbox" name="assignment_system" value="true"` + checkedAttr(includeAssignmentSystem) + `> System</label><label><input type="checkbox" name="assignment_provisional" value="true"` + checkedAttr(includeAssignmentProvisional) + `> Provisional</label><label><input type="checkbox" name="assignment_other" value="true"` + checkedAttr(includeAssignmentOther) + `> Other</label><label>Min faces <input name="min_faces" type="number" min="1" value="` + template.HTMLEscapeString(query.Get("min_faces")) + `"></label><label>Max faces <input name="max_faces" type="number" min="1" value="` + template.HTMLEscapeString(query.Get("max_faces")) + `"></label><span class="people-controls-break"></span><label><strong>Sort</strong> <select name="sort">`)
+	for _, option := range []struct{ Value, Label string }{{"name", "Name"}, {"faces", "Faces"}, {"user", "User"}, {"system", "System"}, {"provisional", "Provisional"}, {"references", "References"}, {"clusters", "Clusters"}} {
 		body.WriteString(`<option value="` + option.Value + `"` + selectedAttr(option.Value, sortKey) + `>` + option.Label + `</option>`)
 	}
 	body.WriteString(`</select></label><label><strong>Direction</strong> <select name="direction"><option value="asc"` + selectedAttr("asc", r.URL.Query().Get("direction")) + `>Ascending</option><option value="desc"` + selectedAttr("desc", r.URL.Query().Get("direction")) + `>Descending</option></select></label><label><strong>Per Page</strong> <select name="per_page" onchange="this.form.submit()">`)
@@ -787,7 +861,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</select></label><button>Apply</button></form>`)
 	renderPager := func() {
-		body.WriteString(`<nav class="pager people-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><label>Jump to Page <input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"></label><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(r.URL.Query().Get("q")) + `"><input type="hidden" name="view" value="` + template.HTMLEscapeString(view) + `"><input type="hidden" name="include_possibles" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_possibles")) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_no_faces")) + `"><input type="hidden" name="include_dont_track" value="` + template.HTMLEscapeString(r.URL.Query().Get("include_dont_track")) + `"><input type="hidden" name="assignment_user" value="` + template.HTMLEscapeString(r.URL.Query().Get("assignment_user")) + `"><input type="hidden" name="assignment_system" value="` + template.HTMLEscapeString(r.URL.Query().Get("assignment_system")) + `"><input type="hidden" name="assignment_provisional" value="` + template.HTMLEscapeString(r.URL.Query().Get("assignment_provisional")) + `"><input type="hidden" name="assignment_other" value="` + template.HTMLEscapeString(r.URL.Query().Get("assignment_other")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(r.URL.Query().Get("direction")) + `"></form></nav>`)
+		body.WriteString(`<nav class="pager people-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get"><label>Jump to Page <input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"></label><input type="hidden" name="per_page" value="` + fmt.Sprint(perPage) + `"><input type="hidden" name="q" value="` + template.HTMLEscapeString(query.Get("q")) + `"><input type="hidden" name="name" value="` + template.HTMLEscapeString(nameFilter) + `"><input type="hidden" name="collection_id" value="` + template.HTMLEscapeString(collectionID) + `"><input type="hidden" name="view" value="` + template.HTMLEscapeString(view) + `"><input type="hidden" name="include_possibles" value="` + template.HTMLEscapeString(query.Get("include_possibles")) + `"><input type="hidden" name="include_no_faces" value="` + template.HTMLEscapeString(query.Get("include_no_faces")) + `"><input type="hidden" name="include_dont_track" value="` + template.HTMLEscapeString(query.Get("include_dont_track")) + `"><input type="hidden" name="assignment_user" value="` + template.HTMLEscapeString(query.Get("assignment_user")) + `"><input type="hidden" name="assignment_system" value="` + template.HTMLEscapeString(query.Get("assignment_system")) + `"><input type="hidden" name="assignment_provisional" value="` + template.HTMLEscapeString(query.Get("assignment_provisional")) + `"><input type="hidden" name="assignment_other" value="` + template.HTMLEscapeString(query.Get("assignment_other")) + `"><input type="hidden" name="min_faces" value="` + template.HTMLEscapeString(query.Get("min_faces")) + `"><input type="hidden" name="max_faces" value="` + template.HTMLEscapeString(query.Get("max_faces")) + `"><input type="hidden" name="sort" value="` + template.HTMLEscapeString(sortKey) + `"><input type="hidden" name="direction" value="` + template.HTMLEscapeString(query.Get("direction")) + `"></form></nav>`)
 	}
 	renderPager()
 	body.WriteString(`<table class="people-table"><tr><th>Name</th><th>Faces</th><th>User</th><th>System</th><th>Provisional</th><th>Clusters</th><th>References</th><th>Ref Recs</th><th>Don't track</th><th>Possibles</th></tr>`)
@@ -804,7 +878,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</table>`)
 	renderPager()
-	body.WriteString(`<script>(function(){const form=document.getElementById('create-person');form.onsubmit=async function(e){e.preventDefault();const response=await fetch('/api/people',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'` + template.JSEscapeString(csrfCookie(r)) + `'},body:JSON.stringify({name:form.name.value})});if(!response.ok){alert(await response.text());return}location.reload()}})();</script>`)
+	body.WriteString(`<hr><form id="create-person" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `"><input name="name" placeholder="New person name" required><button>Create person</button></form><script src="/static/people.js" defer></script>`)
 	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`#create-person{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0}#people-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#people-controls .people-controls-break{flex-basis:100%;height:0}#people-controls>button{margin-left:4rem}.people-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.people-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.people-table{width:max-content}`)})
 }
 
@@ -914,7 +988,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		s.render(w, map[string]any{"Title": personName, "Account": account, "Breadcrumb": template.HTML(`<a href="/review/people">People</a>`), "Body": template.HTML(`<h1>` + template.HTMLEscapeString(personName) + `</h1><p>No collections are assigned to this account.</p>`)})
 		return
 	}
-	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(col.name, ''), COALESCE(pa.width, a.source_width, 0), COALESCE(pa.height, a.source_height, 0),
+	query := `SELECT f.id, pp.id, pp.relative_path, COALESCE(col.name, ''), COALESCE(a.source_width, pa.width, 0), COALESCE(a.source_height, pa.height, 0),
 		f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
 		CASE WHEN ae.reason = 'cluster-provisional' AND COALESCE(ae.support_count, 0) = 0 AND COALESCE(ae.quality, 0) = 0 AND COALESCE(ae.detection_confidence, 0) = 0 AND ae.agreement IS NULL THEN NULL ELSE ae.similarity END, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(NULLIF(ca_person.name, ''), substr(ca.person_id, -8), ''), COALESCE(cfr.reference, 0)
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
@@ -969,6 +1043,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 		PossibleSimilarity                       float64
 	}
 	var faces []personFace
+	seenFaceIDs := make(map[string]struct{})
 	referenceCount := 0
 	for rows.Next() {
 		var face personFace
@@ -978,6 +1053,14 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "person faces lookup failed", http.StatusInternalServerError)
 			return
 		}
+		// An asset may have multiple path rows, including duplicate paths in
+		// one collection. A face belongs to the analysis/asset, not to each
+		// path row, so render it only once and never submit its ID twice in a
+		// bulk assignment.
+		if _, exists := seenFaceIDs[face.FaceID]; exists {
+			continue
+		}
+		seenFaceIDs[face.FaceID] = struct{}{}
 		if confidence.Valid {
 			face.Confidence, face.ConfidenceAvailable = confidence.Float64, true
 		}
@@ -1407,7 +1490,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 			placeholders[i] = "?"
 			peopleArgs = append(peopleArgs, collectionID)
 		}
-		peopleQuery += ` WHERE EXISTS (SELECT 1 FROM current_face_assignments ca2 JOIN faces f2 ON f2.id = ca2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE ca2.person_id = people.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
+		peopleQuery += ` WHERE (TRIM(COALESCE(people.name, '')) <> '' OR EXISTS (SELECT 1 FROM current_face_assignments ca2 JOIN faces f2 ON f2.id = ca2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE ca2.person_id = people.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `)))`
 	}
 	peopleQuery += ` ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8), id)), id`
 	peopleRows, peopleErr := s.db.QueryContext(r.Context(), peopleQuery, peopleArgs...)
@@ -1807,7 +1890,7 @@ func (s *Server) reviewPersonReferences(w http.ResponseWriter, r *http.Request) 
 		s.render(w, map[string]any{"Title": "Person references", "Account": account, "Body": template.HTML(`<h1>References</h1><p>No collections are assigned to this account.</p>`)})
 		return
 	}
-	referenceQuery := `SELECT rr.face_id, rr.is_current, COALESCE(rr.recommendation_score, 0), pp.id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0), f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0), COALESCE(cfr.reference, 0) FROM reference_recommendations rr JOIN faces f ON f.id = rr.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_references cfr ON cfr.face_id = rr.face_id AND cfr.person_id = rr.person_id WHERE rr.person_id = ?`
+	referenceQuery := `SELECT rr.face_id, rr.is_current, COALESCE(rr.recommendation_score, 0), pp.id, pp.relative_path, COALESCE(a.source_width, pa.width, 0), COALESCE(a.source_height, pa.height, 0), f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0), COALESCE(cfr.reference, 0) FROM reference_recommendations rr JOIN faces f ON f.id = rr.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id LEFT JOIN current_face_references cfr ON cfr.face_id = rr.face_id AND cfr.person_id = rr.person_id WHERE rr.person_id = ?`
 	referenceArgs := []any{personID}
 	if allowed != nil {
 		placeholders := make([]string, len(allowed))
@@ -1891,7 +1974,9 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
     });
     if (!response.ok) { alert(await response.text()); return; }
     const result = await response.json();
-    alert('Reference recommendation job queued for ' + page.dataset.personName + ': ' + result.job_id);
+    alert(result.queued
+      ? 'Reference recommendation job queued for ' + page.dataset.personName + ': ' + (result.job_id || result.status)
+      : 'Reference recommendations were not queued for ' + page.dataset.personName + ': ' + (result.status || 'unknown reason'));
   };
   const reprocessButton = document.querySelector('[data-action="reprocess-references"]');
   if (reprocessButton) reprocessButton.onclick = async () => {
@@ -1900,7 +1985,9 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
     });
     if (!response.ok) { alert(await response.text()); return; }
     const result = await response.json();
-    alert('Reference reprocess job queued for ' + page.dataset.personName + ': ' + result.job_id);
+    alert(result.queued
+      ? 'Reference reprocess job queued for ' + page.dataset.personName + ': ' + (result.job_id || result.status)
+      : 'Reference reprocess was not queued for ' + page.dataset.personName + ': ' + (result.status || 'unknown reason'));
   };
   const dontTrackButton = document.querySelector('[data-action="person-dont-track"]');
   if (dontTrackButton) dontTrackButton.onclick = async () => {
@@ -1987,6 +2074,25 @@ func (s *Server) personScript(w http.ResponseWriter, _ *http.Request) {
       const person = personID(document.getElementById('page-assignment-person'));
       sendBulk('assigned-user', person);
     };
+  });
+})();
+`))
+}
+
+func (s *Server) peopleScript(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	_, _ = w.Write([]byte(`(function () {
+  const form = document.getElementById('create-person');
+  if (!form) return;
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const response = await fetch('/api/people', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': form.dataset.csrf || ''},
+      body: JSON.stringify({name: form.name.value})
+    });
+    if (!response.ok) { alert(await response.text()); return; }
+    location.reload();
   });
 })();
 `))
@@ -2206,9 +2312,6 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		for _, id := range accessibleCollections {
 			countArgs = append(countArgs, id)
 		}
-	} else {
-		countQuery += ` AND cpp.collection_id = ?`
-		countArgs = append(countArgs, collectionID)
 	}
 	if err := s.db.QueryRowContext(r.Context(), countQuery, countArgs...).Scan(&visibleFaceCount, &visibleCandidateCount, &visibleToAssignCount); err != nil {
 		http.Error(w, "cluster face count failed", http.StatusInternalServerError)
@@ -2223,9 +2326,6 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		for _, id := range accessibleCollections {
 			representedArgs = append(representedArgs, id)
 		}
-	} else {
-		representedQuery += ` AND pp.collection_id = ?`
-		representedArgs = append(representedArgs, collectionID)
 	}
 	representedQuery += ` GROUP BY ca.person_id`
 	representedRows, err := s.db.QueryContext(r.Context(), representedQuery, representedArgs...)
@@ -2290,7 +2390,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	faceQuery := `
 		SELECT cm.face_id, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''),
 		       COALESCE((SELECT disposition FROM current_face_dispositions WHERE face_id = cm.face_id), ''),
-		       COALESCE(pp.id, ''), COALESCE(pp.relative_path, ''), COALESCE(pa.width, 0), COALESCE(pa.height, 0),
+		       COALESCE(pp.id, ''), COALESCE(pp.relative_path, ''), COALESCE(a.source_width, pa.width, 0), COALESCE(a.source_height, pa.height, 0),
 		       f.box_left, f.box_top, f.box_right, f.box_bottom,
 		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0)
 		FROM cluster_memberships cm
@@ -2306,14 +2406,15 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		for _, id := range accessibleCollections {
 			faceArgs = append(faceArgs, id)
 		}
-	} else {
-		faceQuery += ` AND pp.collection_id = ?`
-		faceArgs = append(faceArgs, collectionID)
 	}
 	detailQuery := r.URL.Query()
 	if value := detailQuery.Get("assignment_state"); value != "" {
-		faceQuery += ` AND COALESCE(ca.state, 'unassigned') = ?`
-		faceArgs = append(faceArgs, value)
+		if value == "to-assign" {
+			faceQuery += ` AND COALESCE(ca.state, 'unassigned') NOT IN ('assigned-user', 'assigned-system')`
+		} else {
+			faceQuery += ` AND COALESCE(ca.state, 'unassigned') = ?`
+			faceArgs = append(faceArgs, value)
+		}
 	}
 	if value := strings.TrimSpace(detailQuery.Get("assigned_person")); value != "" {
 		faceQuery += ` AND (LOWER(COALESCE(ca.person_id, '')) LIKE ? OR EXISTS (SELECT 1 FROM people fp WHERE fp.id = ca.person_id AND LOWER(COALESCE(fp.name, '')) LIKE ?))`
@@ -2434,6 +2535,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`<option value="">No default</option></select></label> <label>Status <select id="cluster-status"` + disabledAttr + `>` + clusterOption("unreviewed", "Unreviewed", reviewStatus) + clusterOption("in-progress", "In progress", reviewStatus) + clusterOption("partially-reviewed", "Partially reviewed", reviewStatus) + clusterOption("reviewed", "Reviewed", reviewStatus) + clusterOption("needs-review", "Needs review", reviewStatus) + `</select></label> <label>Note <input id="cluster-note" size="45"` + disabledAttr + `></label> <button id="save-cluster" type="button"` + disabledAttr + `>Save review</button></div>`)
 	body.WriteString(`<form id="cluster-detail-controls" method="get"><div><strong>Filter:</strong> <label>Assignment <select name="assignment_state"><option value="">Any</option>`)
+	body.WriteString(clusterOption("to-assign", "To Assign", detailQuery.Get("assignment_state")))
 	for _, value := range []string{"unassigned", "unknown", "ambiguous", "provisional", "assigned-system", "assigned-user"} {
 		body.WriteString(clusterOption(value, assignmentLabel(value), detailQuery.Get("assignment_state")))
 	}
@@ -2475,6 +2577,9 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		dispositionActive := disposition != ""
 		body.WriteString(`<article class="` + template.HTMLEscapeString("card cluster-face "+func() string {
 			if state == string(review.AssignedUser) || state == string(review.AssignedSystem) {
+				if state == string(review.AssignedUser) {
+					return "assigned assigned-user"
+				}
 				return "assigned"
 			}
 			if state == string(review.Provisional) {
@@ -2522,6 +2627,11 @@ func (s *Server) clusterScript(w http.ResponseWriter, _ *http.Request) {
   const page = document.getElementById('cluster-page'); if (!page) return;
   const message = document.getElementById('cluster-message');
   const dispositionLabels = {'incorrect-assignment':['Incorrect','Correct'], 'false-detection':['No Face','Has Face'], 'dont-track':["Don't Track",'Track']};
+  async function send(faceID, url, payload) {
+    const response = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':page.dataset.csrf}, body:JSON.stringify(payload)});
+    if (!response.ok) { message.textContent = await response.text(); message.className = 'error'; return; }
+    location.reload();
+  }
   function stateFor(card) { const person = card.querySelector('.face-person').value; const pendingState = card.dataset.pendingState; if (person === '__ambiguous__') return 'ambiguous'; if (person) return person === card.dataset.originalPerson && (pendingState === 'assigned-system' || pendingState === 'provisional') ? pendingState : 'assigned-user'; return 'unknown'; }
   function refresh(card) { const state = stateFor(card); card.dataset.pendingState = state; card.style.borderColor = state === 'assigned-user' ? '#2a9d50' : (state === 'unknown' || state === 'ambiguous' ? '#c62828' : '#d6a800'); }
   function refreshDispositionButtons(card) { const current = card.dataset.dispositionActive === 'true' ? card.querySelector('.face-disposition').value : ''; card.querySelectorAll('[data-action="disposition"]').forEach((button) => { const labels = dispositionLabels[button.dataset.disposition]; button.textContent = current === button.dataset.disposition ? labels[1] : labels[0]; }); }
@@ -2529,6 +2639,9 @@ func (s *Server) clusterScript(w http.ResponseWriter, _ *http.Request) {
   document.querySelectorAll('.cluster-face').forEach((card) => { const select = card.querySelector('.face-person'); select.addEventListener('change', () => { card.dataset.pendingState = select.value ? (select.value === '__ambiguous__' ? 'ambiguous' : 'assigned-user') : 'unknown'; refresh(card); }); refreshDispositionButtons(card); refresh(card); });
   document.querySelectorAll('.cluster-face [data-action="unknown"], .cluster-face [data-action="ambiguous"]').forEach((button) => { button.onclick = () => { const card = button.closest('.cluster-face'); const select = card.querySelector('.face-person'); select.value = button.dataset.action === 'ambiguous' ? '__ambiguous__' : ''; card.dataset.pendingState = button.dataset.action; refresh(card); saveReview(); }; });
   document.querySelectorAll('.cluster-face [data-action="disposition"]').forEach((button) => { button.onclick = () => { const card = button.closest('.cluster-face'); const disposition = card.querySelector('.face-disposition'); const active = card.dataset.dispositionActive === 'true' && disposition.value === button.dataset.disposition; disposition.value = button.dataset.disposition; card.dataset.dispositionActive = active ? 'false' : 'true'; refreshDispositionButtons(card); saveReview(); }; });
+  document.querySelectorAll('[data-action="assign-candidate"]').forEach((button) => {
+    button.onclick = () => send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment', {person_id:button.dataset.personId, state:'assigned-user', candidate_id:button.dataset.candidateId});
+  });
   async function saveReview() {
     const decisions = Array.from(document.querySelectorAll('.cluster-face')).map((card) => { const person = card.querySelector('.face-person').value; const disposition = card.querySelector('.face-disposition').value; const dispositionActive = card.dataset.dispositionActive === 'true'; const state = stateFor(card); const dispositionChanged = dispositionActive !== Boolean(card.dataset.originalDisposition) || (dispositionActive && disposition !== card.dataset.originalDisposition); return {face_id: card.dataset.faceId, person_id: person === '__ambiguous__' ? '' : person, state: state, disposition: dispositionChanged ? disposition : '', disposition_active: dispositionActive, original_state: card.dataset.originalState, original_person: card.dataset.originalPerson}; }).filter((decision) => decision.disposition || decision.state !== decision.original_state || decision.person_id !== decision.original_person);
     const selectedStatus = document.getElementById('cluster-status').value;
@@ -3320,7 +3433,7 @@ func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	offset := (page - 1) * limit
 	rowsArgs := append(append([]any{}, whereArgs...), limit, offset)
-	rows, err := s.db.QueryContext(r.Context(), "SELECT id, kind, status, priority, created_at, COALESCE(started_at,''), COALESCE(completed_at,'') FROM jobs "+where+" ORDER BY "+order+", id LIMIT ? OFFSET ?", rowsArgs...)
+	rows, err := s.db.QueryContext(r.Context(), "SELECT id, kind, status, priority, created_at, COALESCE(started_at,''), COALESCE(completed_at,''), (COALESCE(error_code,'') <> '' OR COALESCE(error_message,'') <> '' OR EXISTS (SELECT 1 FROM job_items ji WHERE ji.job_id = jobs.id AND (COALESCE(ji.error_code,'') <> '' OR COALESCE(ji.error_message,'') <> ''))) FROM jobs "+where+" ORDER BY "+order+", id LIMIT ? OFFSET ?", rowsArgs...)
 	if err != nil {
 		http.Error(w, "job lookup failed", 500)
 		return
@@ -3341,17 +3454,47 @@ func (s *Server) adminJobs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job filter lookup failed", 500)
 		return
 	}
-	body := `<h1>Jobs</h1>` + adminNav() + `<form><input name="q" value="` + template.HTMLEscapeString(search) + `" placeholder="Filter"><label>Kind <select name="kind_filter"><option value="">All</option>` + adminSelectOptions(kinds, kindFilter) + `</select></label><label>Status <select name="status_filter"><option value="">All</option>` + adminSelectOptions(statuses, statusFilter) + `</select></label><label>Priority <select name="priority_filter"><option value="">All</option>` + adminSelectOptions(priorities, priorityFilter) + `</select></label><select name="sort"><option value="created">Created</option><option value="kind">Kind</option><option value="status">Status</option></select><select name="order">` + adminOrderOptions(r, "created") + `</select><select name="limit"><option>20</option><option>50</option><option>100</option></select><button>Filter</button></form>` + adminPager(r, search, order, limit, page, total) + `<table><tr><th>ID</th><th>Kind</th><th>Status</th><th>Priority</th><th>Created</th><th>Started</th><th>Completed</th></tr>`
+	body := `<h1>Jobs</h1>` + adminNav() + `<form><input name="q" value="` + template.HTMLEscapeString(search) + `" placeholder="Filter"><label>Kind <select name="kind_filter"><option value="">All</option>` + adminSelectOptions(kinds, kindFilter) + `</select></label><label>Status <select name="status_filter"><option value="">All</option>` + adminSelectOptions(statuses, statusFilter) + `</select></label><label>Priority <select name="priority_filter"><option value="">All</option>` + adminSelectOptions(priorities, priorityFilter) + `</select></label><select name="sort"><option value="created">Created</option><option value="kind">Kind</option><option value="status">Status</option></select><select name="order">` + adminOrderOptions(r, "created") + `</select><select name="limit"><option>20</option><option>50</option><option>100</option></select><button>Filter</button></form>` + adminPager(r, search, order, limit, page, total) + `<table><tr><th>ID</th><th>Kind</th><th>Status</th><th>Priority</th><th>Created</th><th>Started</th><th>Completed</th><th>Errors</th></tr>`
 	for rows.Next() {
 		var id, kind, status, created, started, completed string
-		var priority int
-		if err := rows.Scan(&id, &kind, &status, &priority, &created, &started, &completed); err != nil {
+		var priority, hasErrors int
+		if err := rows.Scan(&id, &kind, &status, &priority, &created, &started, &completed, &hasErrors); err != nil {
 			continue
 		}
-		body += `<tr><td>` + adminIDLink("/admin/jobs/", id) + `</td><td>` + template.HTMLEscapeString(kind) + `</td><td>` + template.HTMLEscapeString(status) + `</td><td>` + fmt.Sprint(priority) + `</td><td>` + template.HTMLEscapeString(created) + `</td><td>` + template.HTMLEscapeString(started) + `</td><td>` + template.HTMLEscapeString(completed) + `</td></tr>`
+		errorsCell := ""
+		if hasErrors != 0 {
+			errorsCell = `<a href="/admin/jobs?show_errors=` + template.HTMLEscapeString(url.QueryEscape(id)) + `">Show Errors</a>`
+		}
+		body += `<tr><td>` + adminIDLink("/admin/jobs/", id) + `</td><td>` + template.HTMLEscapeString(kind) + `</td><td>` + template.HTMLEscapeString(status) + `</td><td>` + fmt.Sprint(priority) + `</td><td>` + template.HTMLEscapeString(created) + `</td><td>` + template.HTMLEscapeString(started) + `</td><td>` + template.HTMLEscapeString(completed) + `</td><td>` + errorsCell + `</td></tr>`
 	}
 	body += `</table>`
+	if jobID := r.URL.Query().Get("show_errors"); jobID != "" {
+		body += s.adminJobErrors(r.Context(), jobID)
+	}
 	s.render(w, map[string]any{"Title": "Jobs", "Account": account, "Body": template.HTML(body)})
+}
+
+func (s *Server) adminJobErrors(ctx context.Context, id string) string {
+	var body strings.Builder
+	body.WriteString(`<h2>Errors for job ` + template.HTMLEscapeString(id) + `</h2><table><tr><th>Item</th><th>Status</th><th>Attempts</th><th>Code</th><th>Message</th></tr>`)
+	var errorCode, errorMessage string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(error_code,''), COALESCE(error_message,'') FROM jobs WHERE id = ?`, id).Scan(&errorCode, &errorMessage); err == nil && (errorCode != "" || errorMessage != "") {
+		body.WriteString(`<tr><td>(job)</td><td></td><td></td><td>` + template.HTMLEscapeString(errorCode) + `</td><td>` + template.HTMLEscapeString(errorMessage) + `</td></tr>`)
+	}
+	errorRows, err := s.db.QueryContext(ctx, `SELECT item_key, status, attempts, COALESCE(error_code,''), COALESCE(error_message,'') FROM job_items WHERE job_id = ? AND (COALESCE(error_code,'') <> '' OR COALESCE(error_message,'') <> '') ORDER BY item_key`, id)
+	if err == nil {
+		defer errorRows.Close()
+		for errorRows.Next() {
+			var itemKey, itemStatus, itemCode, itemMessage string
+			var attempts int
+			if err := errorRows.Scan(&itemKey, &itemStatus, &attempts, &itemCode, &itemMessage); err != nil {
+				continue
+			}
+			body.WriteString(`<tr><td>` + template.HTMLEscapeString(itemKey) + `</td><td>` + template.HTMLEscapeString(itemStatus) + `</td><td>` + fmt.Sprint(attempts) + `</td><td>` + template.HTMLEscapeString(itemCode) + `</td><td>` + template.HTMLEscapeString(itemMessage) + `</td></tr>`)
+		}
+	}
+	body.WriteString(`</table>`)
+	return body.String()
 }
 
 func (s *Server) adminRuns(w http.ResponseWriter, r *http.Request) {
@@ -3565,7 +3708,11 @@ func (s *Server) adminObjectDetail(w http.ResponseWriter, r *http.Request, table
 		}
 		body += `<tr><th>` + template.HTMLEscapeString(name) + `</th><td><pre>` + template.HTMLEscapeString(value) + `</pre></td></tr>`
 	}
-	body += `</table><p><a href="` + template.HTMLEscapeString(prefix) + `">Back to list</a></p>`
+	body += `</table>`
+	if table == "jobs" && r.URL.Query().Get("show_errors") == "true" {
+		body += s.adminJobErrors(r.Context(), id)
+	}
+	body += `<p><a href="` + template.HTMLEscapeString(prefix) + `">Back to list</a></p>`
 	s.render(w, map[string]any{"Title": title, "Account": account, "Body": template.HTML(body)})
 }
 

@@ -22,6 +22,7 @@ const (
 	defaultSearchMethod = "exact"
 	defaultServeAddress = "127.0.0.1:8080"
 	defaultProvider     = "CPUExecutionProvider"
+	defaultMaxPixels    = int64(100_000_000)
 )
 
 // File contains settings that may be supplied by a JSON configuration file.
@@ -37,6 +38,12 @@ type File struct {
 	TempRoot                              string  `json:"temp_root,omitempty"`
 	ExportRoot                            string  `json:"export_root,omitempty"`
 	BackupRoot                            string  `json:"backup_root,omitempty"`
+	AnalysisMaxPixels                     int64   `json:"analysis_max_pixels,omitempty"`
+	AnalysisMaxWidth                      int     `json:"analysis_max_width,omitempty"`
+	AnalysisMaxHeight                     int     `json:"analysis_max_height,omitempty"`
+	AnalysisMaxPixelsOverride             int64   `json:"analysis_max_pixels_override,omitempty"`
+	AnalysisMaxWidthOverride              int     `json:"analysis_max_width_override,omitempty"`
+	AnalysisMaxHeightOverride             int     `json:"analysis_max_height_override,omitempty"`
 	NeighborSearchMethod                  string  `json:"neighbor_search_method,omitempty"`
 	RecognitionHighSimilarity             float32 `json:"recognition_high_similarity,omitempty"`
 	RecognitionDirectAssignmentSimilarity float32 `json:"recognition_direct_assignment_similarity,omitempty"`
@@ -66,21 +73,27 @@ type File struct {
 
 // Resolved is the complete configuration used by application services.
 type Resolved struct {
-	ConfigFile            string
-	RuntimeDataRoot       string
-	DatabasePath          string
-	ModelRoot             string
-	PythonPath            string
-	Provider              string
-	ServeAddress          string
-	LogRoot               string
-	TempRoot              string
-	ExportRoot            string
-	BackupRoot            string
-	NeighborSearchMethod  string
-	RecognitionThresholds recognition.Thresholds
-	ClusteringConfig      clustering.Config
-	PossibleCandidates    candidates.Config
+	ConfigFile                string
+	RuntimeDataRoot           string
+	DatabasePath              string
+	ModelRoot                 string
+	PythonPath                string
+	Provider                  string
+	ServeAddress              string
+	LogRoot                   string
+	TempRoot                  string
+	ExportRoot                string
+	BackupRoot                string
+	AnalysisMaxPixels         int64
+	AnalysisMaxWidth          int
+	AnalysisMaxHeight         int
+	AnalysisMaxPixelsOverride int64
+	AnalysisMaxWidthOverride  int
+	AnalysisMaxHeightOverride int
+	NeighborSearchMethod      string
+	RecognitionThresholds     recognition.Thresholds
+	ClusteringConfig          clustering.Config
+	PossibleCandidates        candidates.Config
 }
 
 // DefaultConfigFile returns the default configuration file for the current
@@ -233,6 +246,28 @@ func Load(configPath string) (Resolved, error) {
 	if settings.PossibleIncludeDontTrack != nil {
 		possibleConfig.IncludeDontTrack = *settings.PossibleIncludeDontTrack
 	}
+	maxPixels := settings.AnalysisMaxPixels
+	if maxPixels == 0 {
+		maxPixels = defaultMaxPixels
+	}
+	if maxPixels < 0 || settings.AnalysisMaxWidth < 0 || settings.AnalysisMaxHeight < 0 || settings.AnalysisMaxPixelsOverride < 0 || settings.AnalysisMaxWidthOverride < 0 || settings.AnalysisMaxHeightOverride < 0 {
+		return Resolved{}, fmt.Errorf("analysis resource limits must not be negative")
+	}
+	maxPixelsOverride := settings.AnalysisMaxPixelsOverride
+	if maxPixelsOverride == 0 {
+		maxPixelsOverride = maxPixels
+	}
+	maxWidthOverride := settings.AnalysisMaxWidthOverride
+	if maxWidthOverride == 0 {
+		maxWidthOverride = settings.AnalysisMaxWidth
+	}
+	maxHeightOverride := settings.AnalysisMaxHeightOverride
+	if maxHeightOverride == 0 {
+		maxHeightOverride = settings.AnalysisMaxHeight
+	}
+	if maxPixelsOverride < maxPixels || (maxWidthOverride != 0 && settings.AnalysisMaxWidth != 0 && maxWidthOverride < settings.AnalysisMaxWidth) || (maxHeightOverride != 0 && settings.AnalysisMaxHeight != 0 && maxHeightOverride < settings.AnalysisMaxHeight) {
+		return Resolved{}, fmt.Errorf("analysis override limits must be greater than or equal to configured limits")
+	}
 	pythonPath := settings.PythonPath
 	if pythonPath == "" {
 		if runtime.GOOS == "windows" {
@@ -255,21 +290,27 @@ func Load(configPath string) (Resolved, error) {
 		provider = defaultProvider
 	}
 	return Resolved{
-		ConfigFile:            configPath,
-		RuntimeDataRoot:       root,
-		DatabasePath:          resolvePath(settings.DatabasePath, root, defaultDatabase),
-		ModelRoot:             resolvePath(settings.ModelRoot, root, "models"),
-		PythonPath:            pythonPath,
-		Provider:              provider,
-		ServeAddress:          serveAddress,
-		LogRoot:               resolvePath(settings.LogRoot, root, "logs"),
-		TempRoot:              resolvePath(settings.TempRoot, root, "tmp"),
-		ExportRoot:            resolvePath(settings.ExportRoot, root, "exports"),
-		BackupRoot:            resolvePath(settings.BackupRoot, root, "backups"),
-		NeighborSearchMethod:  searchMethod(settings.NeighborSearchMethod),
-		RecognitionThresholds: thresholds,
-		ClusteringConfig:      clusteringConfig,
-		PossibleCandidates:    possibleConfig,
+		ConfigFile:                configPath,
+		RuntimeDataRoot:           root,
+		DatabasePath:              resolvePath(settings.DatabasePath, root, defaultDatabase),
+		ModelRoot:                 resolvePath(settings.ModelRoot, root, "models"),
+		PythonPath:                pythonPath,
+		Provider:                  provider,
+		ServeAddress:              serveAddress,
+		LogRoot:                   resolvePath(settings.LogRoot, root, "logs"),
+		TempRoot:                  resolvePath(settings.TempRoot, root, "tmp"),
+		ExportRoot:                resolvePath(settings.ExportRoot, root, "exports"),
+		BackupRoot:                resolvePath(settings.BackupRoot, root, "backups"),
+		AnalysisMaxPixels:         maxPixels,
+		AnalysisMaxWidth:          settings.AnalysisMaxWidth,
+		AnalysisMaxHeight:         settings.AnalysisMaxHeight,
+		AnalysisMaxPixelsOverride: maxPixelsOverride,
+		AnalysisMaxWidthOverride:  maxWidthOverride,
+		AnalysisMaxHeightOverride: maxHeightOverride,
+		NeighborSearchMethod:      searchMethod(settings.NeighborSearchMethod),
+		RecognitionThresholds:     thresholds,
+		ClusteringConfig:          clusteringConfig,
+		PossibleCandidates:        possibleConfig,
 	}, nil
 }
 

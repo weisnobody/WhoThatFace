@@ -28,6 +28,18 @@ func TestHelpListsCommandsWithoutOpeningDatabase(t *testing.T) {
 	}
 }
 
+func TestHelpFlagWithoutCommandListsCommands(t *testing.T) {
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"--help"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"Usage: face-me-bro", "collection", "Global options"} {
+		if !strings.Contains(output.String(), text) {
+			t.Errorf("help output is missing %q: %s", text, output.String())
+		}
+	}
+}
+
 func TestHasApprovedReferences(t *testing.T) {
 	ctx := context.Background()
 	database, err := db.Open(ctx, filepath.Join(t.TempDir(), "catalog.sqlite3"))

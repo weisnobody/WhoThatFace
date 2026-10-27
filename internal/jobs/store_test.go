@@ -66,10 +66,10 @@ func TestReferenceReprocessRequiresApprovedReferenceAndHonorsDelay(t *testing.T)
 	}
 	defer database.Close()
 	store := NewStore(database)
-	if _, queued, err := store.EnqueueReferenceReprocess(context.Background(), "person-without-references"); err != nil {
+	if job, queued, err := store.EnqueueReferenceReprocess(context.Background(), "person-without-references"); err != nil {
 		t.Fatal(err)
-	} else if queued {
-		t.Fatal("reference reprocess was queued without an approved reference")
+	} else if !queued || job.ID == "" {
+		t.Fatal("reference reprocess was not queued without an approved reference")
 	}
 	job, err := store.enqueueAt(context.Background(), "reference-reprocess", 1, map[string]string{"person_id": "person"}, time.Now().UTC().Add(time.Minute))
 	if err != nil {

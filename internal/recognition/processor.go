@@ -175,9 +175,14 @@ func (p Processor) RefreshRecommendations(ctx context.Context, personID string) 
 		LEFT JOIN recognition_candidates rc ON rc.id = (
 			SELECT id FROM recognition_candidates
 			WHERE face_id = ca.face_id ORDER BY created_at DESC, rank LIMIT 1)
-		LEFT JOIN cluster_memberships cm ON cm.face_id = ca.face_id
-		LEFT JOIN clusters cl ON cl.id = cm.cluster_id AND cl.clustering_run_id = (
-			SELECT id FROM clustering_runs WHERE status = 'active' ORDER BY accepted_at DESC LIMIT 1)
+		LEFT JOIN clusters cl ON cl.id = (
+			SELECT c2.id
+			FROM cluster_memberships cm2
+			JOIN clusters c2 ON c2.id = cm2.cluster_id
+			JOIN clustering_runs cr2 ON cr2.id = c2.clustering_run_id
+			WHERE cm2.face_id = ca.face_id AND cr2.status = 'active'
+			ORDER BY cr2.accepted_at DESC, c2.id
+			LIMIT 1)
 		WHERE ca.person_id = ? AND ca.state IN ('assigned-system', 'assigned-user')
 		  AND fr.face_id IS NULL`, personID)
 	if err != nil {

@@ -133,8 +133,11 @@ func (r Runner) persistSummary(ctx context.Context, job Job, before Metrics, sta
 	if err != nil {
 		return err
 	}
-	completed, failed, skipped, running := 0, 0, 0, 0
+	completed, failed, skipped, running, errors := 0, 0, 0, 0, 0
 	for _, item := range items {
+		if item.ErrorCode != "" || item.Error != "" {
+			errors++
+		}
 		switch item.Status {
 		case "completed":
 			completed++
@@ -160,6 +163,7 @@ func (r Runner) persistSummary(ctx context.Context, job Job, before Metrics, sta
 			"failed":    failed,
 			"skipped":   skipped,
 			"running":   running,
+			"errors":    errors,
 		},
 		"metrics_before": before,
 		"metrics_after":  after,

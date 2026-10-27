@@ -137,19 +137,33 @@ def handle(message):
                     return True
             import cv2  # type: ignore
 
-            image = load_oriented_image(path, cv2)
+            requested_max_pixels = int(message.get("max_pixels", 0) or 0)
+            requested_max_width = int(message.get("max_width", 0) or 0)
+            requested_max_height = int(message.get("max_height", 0) or 0)
+            if RUNTIME["max_pixels"] and requested_max_pixels > RUNTIME["max_pixels"]:
+                error(message_id, "resource_limit", "requested pixel limit exceeds configured override ceiling", False, str(RUNTIME["max_pixels"]))
+                return True
+            if RUNTIME["max_width"] and requested_max_width > RUNTIME["max_width"]:
+                error(message_id, "resource_limit", "requested width limit exceeds configured override ceiling", False, str(RUNTIME["max_width"]))
+                return True
+            if RUNTIME["max_height"] and requested_max_height > RUNTIME["max_height"]:
+                error(message_id, "resource_limit", "requested height limit exceeds configured override ceiling", False, str(RUNTIME["max_height"]))
+                return True
+            max_pixels = requested_max_pixels if "max_pixels" in message else RUNTIME["max_pixels"]
+            max_width = requested_max_width if "max_width" in message else RUNTIME["max_width"]
+            max_height = requested_max_height if "max_height" in message else RUNTIME["max_height"]
+            image = load_oriented_image(path, cv2, max_pixels)
             if image is None:
                 error(message_id, "decode_failed", "Pillow could not decode the image", False)
                 return True
             source_height, source_width = image.shape[:2]
-            max_pixels = int(message.get("max_pixels", 0) or 0)
             if max_pixels and source_width * source_height > max_pixels:
                 error(message_id, "resource_limit", "image exceeds configured pixel limit", False, f"{source_width}x{source_height}")
                 return True
-            if RUNTIME["max_width"] and source_width > RUNTIME["max_width"]:
+            if max_width and source_width > max_width:
                 error(message_id, "resource_limit", "image exceeds configured width limit", False, str(source_width))
                 return True
-            if RUNTIME["max_height"] and source_height > RUNTIME["max_height"]:
+            if max_height and source_height > max_height:
                 error(message_id, "resource_limit", "image exceeds configured height limit", False, str(source_height))
                 return True
             detected = ordered_detections(MODEL.get(image))
@@ -216,13 +230,16 @@ def ordered_detections(detected):
     return sorted(detected, key=lambda face: (float(face.bbox[1]), float(face.bbox[0])))
 
 
-def load_oriented_image(path, cv2):
+def load_oriented_image(path, cv2, max_pixels=0):
     """Decode and apply EXIF orientation before inference.
 
     InsightFace receives the oriented pixel matrix, so returned boxes are in
     the same coordinate system as the stored source dimensions.
     """
     from PIL import Image, ImageOps  # type: ignore
+    if max_pixels:
+        pillow_limit = max(int(max_pixels * 1.1), max_pixels + 1)
+        Image.MAX_IMAGE_PIXELS = pillow_limit
     try:
         from pillow_heif import register_heif_opener  # type: ignore
     except ImportError:
@@ -268,6 +285,9 @@ def main():
     parser.add_argument("--preprocessing-config-json", default="{}")
     parser.add_argument("--modules", default="detection,recognition")
     parser.add_argument("--pipeline-id", default="")
+    parser.add_argument("--max-pixels", type=int, default=0)
+    parser.add_argument("--max-width", type=int, default=0)
+    parser.add_argument("--max-height", type=int, default=0)
     args = parser.parse_args()
     RUNTIME["model"] = args.model
     RUNTIME["model_root"] = args.model_root
@@ -288,6 +308,9 @@ def main():
                     RUNTIME[key] = max(0, int(detector[key]))
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         parser.error(f"invalid pipeline configuration: {exc}")
+    RUNTIME["max_pixels"] = max(0, args.max_pixels)
+    RUNTIME["max_width"] = max(0, args.max_width)
+    RUNTIME["max_height"] = max(0, args.max_height)
     load_model()
     for line in sys.stdin:
         try:

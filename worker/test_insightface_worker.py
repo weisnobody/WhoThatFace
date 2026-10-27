@@ -68,7 +68,7 @@ class WorkerContractTests(unittest.TestCase):
             old_width = worker.RUNTIME["max_width"]
             old_cv2 = sys.modules.get("cv2")
             worker.MODEL = Model()
-            worker.load_oriented_image = lambda _path, _cv2: Image()
+            worker.load_oriented_image = lambda _path, _cv2, *_limits: Image()
             worker.RUNTIME["max_width"] = 10
             sys.modules["cv2"] = types.ModuleType("cv2")
             try:
@@ -107,7 +107,7 @@ class WorkerContractTests(unittest.TestCase):
             old_loader = worker.load_oriented_image
             old_cv2 = sys.modules.get("cv2")
             worker.MODEL = Model(source.name)
-            worker.load_oriented_image = lambda _path, _cv2: Image()
+            worker.load_oriented_image = lambda _path, _cv2, *_limits: Image()
             sys.modules["cv2"] = types.ModuleType("cv2")
             try:
                 output = io.StringIO()
@@ -178,6 +178,7 @@ class WorkerContractTests(unittest.TestCase):
                 return self
 
         image_module = types.ModuleType("PIL.Image")
+        image_module.MAX_IMAGE_PIXELS = 89
         image_module.open = lambda _path: Source()
         image_ops = types.ModuleType("PIL.ImageOps")
         image_ops.exif_transpose = lambda _source: (calls.append(("transpose",)) or Oriented())
@@ -194,7 +195,8 @@ class WorkerContractTests(unittest.TestCase):
         old_modules = {name: sys.modules.get(name) for name in ("PIL", "PIL.Image", "PIL.ImageOps", "numpy", "pillow_heif")}
         sys.modules.update({"PIL": pil_package, "PIL.Image": image_module, "PIL.ImageOps": image_ops, "numpy": numpy_module, "pillow_heif": heif_module})
         try:
-            self.assertEqual(worker.load_oriented_image("photo.jpg", cv2_module), "bgr-pixels")
+            self.assertEqual(worker.load_oriented_image("photo.jpg", cv2_module, 100), "bgr-pixels")
+            self.assertEqual(image_module.MAX_IMAGE_PIXELS, 110)
             self.assertEqual(calls, [("heif",), ("transpose",), ("convert", "RGB"), ("cvt", "rgb-pixels", "rgb2bgr")])
         finally:
             for name, value in old_modules.items():

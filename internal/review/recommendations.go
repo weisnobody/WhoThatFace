@@ -44,6 +44,19 @@ func RankRecommendations(candidates []ReferenceCandidate, limit int) []Reference
 	sort.SliceStable(result, func(left, right int) bool {
 		return recommendationScore(result[left]) > recommendationScore(result[right])
 	})
+	// A face can be encountered more than once when recommendation metadata
+	// comes from historical relationships. Recommendations are face-level, so
+	// retain only the highest-scoring occurrence before assigning the limit.
+	unique := result[:0]
+	seenFaces := make(map[string]struct{}, len(result))
+	for _, candidate := range result {
+		if _, exists := seenFaces[candidate.FaceID]; exists {
+			continue
+		}
+		seenFaces[candidate.FaceID] = struct{}{}
+		unique = append(unique, candidate)
+	}
+	result = unique
 	if len(result) > limit {
 		result = result[:limit]
 	}

@@ -24,6 +24,8 @@ type Message struct {
 	ExpectedSHA256  string        `json:"expected_sha256,omitempty"`
 	ExpectedSize    int64         `json:"expected_size,omitempty"`
 	MaxPixels       int64         `json:"max_pixels,omitempty"`
+	MaxWidth        int           `json:"max_width"`
+	MaxHeight       int           `json:"max_height"`
 	OK              *bool         `json:"ok,omitempty"`
 	Capabilities    *Capabilities `json:"capabilities,omitempty"`
 	Model           *ModelInfo    `json:"model,omitempty"`

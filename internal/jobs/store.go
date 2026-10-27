@@ -116,16 +116,9 @@ func (s Store) enqueueAt(ctx context.Context, kind string, priority int, payload
 
 // EnqueueReferenceReprocess queues one delayed reprocess for a person. A
 // pending job for the same person absorbs subsequent reference changes during
-// the debounce window. No job is created until the person has at least one
-// approved reference face, which is the minimum needed for matching.
+// the debounce window. The worker handles both people with approved reference
+// faces and people who only have trusted assigned faces.
 func (s Store) EnqueueReferenceReprocess(ctx context.Context, personID string) (Job, bool, error) {
-	var references int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM current_face_references WHERE person_id = ? AND reference = 1`, personID).Scan(&references); err != nil {
-		return Job{}, false, err
-	}
-	if references == 0 {
-		return Job{}, false, nil
-	}
 	var existingID string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id FROM jobs

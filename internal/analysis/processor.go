@@ -17,6 +17,10 @@ type IdentityAnalyzer interface {
 	AnalyzeWithIdentity(context.Context, string, string, int64, string, int64) (worker.Message, error)
 }
 
+type LimitsAnalyzer interface {
+	AnalyzeWithLimits(context.Context, string, string, worker.ResourceLimits, string, int64) (worker.Message, error)
+}
+
 type Processor struct {
 	db         *sql.DB
 	store      Store
@@ -24,10 +28,16 @@ type Processor struct {
 	analyzer   Analyzer
 	pipelineID string
 	maxPixels  int64
+	maxWidth   int
+	maxHeight  int
 }
 
 func NewProcessor(database *sql.DB, analyzer Analyzer, pipelineID string, maxPixels int64) Processor {
-	return Processor{db: database, store: NewStore(database), review: review.NewStore(database), analyzer: analyzer, pipelineID: pipelineID, maxPixels: maxPixels}
+	return NewProcessorWithLimits(database, analyzer, pipelineID, worker.ResourceLimits{MaxPixels: maxPixels})
+}
+
+func NewProcessorWithLimits(database *sql.DB, analyzer Analyzer, pipelineID string, limits worker.ResourceLimits) Processor {
+	return Processor{db: database, store: NewStore(database), review: review.NewStore(database), analyzer: analyzer, pipelineID: pipelineID, maxPixels: limits.MaxPixels, maxWidth: limits.MaxWidth, maxHeight: limits.MaxHeight}
 }
 
 // ProcessCollection analyzes each distinct asset in a collection once, even
@@ -108,7 +118,9 @@ func (p Processor) processCollection(ctx context.Context, collectionID string, p
 		}
 		path := filepath.Join(asset.root, filepath.FromSlash(asset.relative))
 		var response worker.Message
-		if identityAnalyzer, ok := p.analyzer.(IdentityAnalyzer); ok {
+		if limitsAnalyzer, ok := p.analyzer.(LimitsAnalyzer); ok {
+			response, err = limitsAnalyzer.AnalyzeWithLimits(ctx, path, p.pipelineID, worker.ResourceLimits{MaxPixels: p.maxPixels, MaxWidth: p.maxWidth, MaxHeight: p.maxHeight}, expectedSHA, expectedSize)
+		} else if identityAnalyzer, ok := p.analyzer.(IdentityAnalyzer); ok {
 			response, err = identityAnalyzer.AnalyzeWithIdentity(ctx, path, p.pipelineID, p.maxPixels, expectedSHA, expectedSize)
 		} else {
 			response, err = p.analyzer.Analyze(ctx, path, p.pipelineID, p.maxPixels)

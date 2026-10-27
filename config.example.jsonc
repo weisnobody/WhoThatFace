@@ -37,6 +37,17 @@
   // Database backups created by the backup command.
   // "backup_root": "backups",
 
+  // Analysis safety limits. Zero disables width/height limits; the default
+  // maximum decoded pixel count is 100000000.
+  // "analysis_max_pixels": 100000000,
+  // "analysis_max_width": 0,
+  // "analysis_max_height": 0,
+  // Admin-only scan override ceilings. These must be at least the configured
+  // analysis limits; zero uses the corresponding configured limit.
+  // "analysis_max_pixels_override": 200000000,
+  // "analysis_max_width_override": 0,
+  // "analysis_max_height_override": 0,
+
   // Neighbor-search method for grouping. Use "exact" for the correctness
   // reference path or "ann" for the evaluation ANN prototype. A collection
   // can override this with `collection set-search`.

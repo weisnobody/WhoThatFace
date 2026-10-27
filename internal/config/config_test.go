@@ -36,8 +36,43 @@ func TestLoadUsesDefaultsWhenConfigurationDoesNotExist(t *testing.T) {
 	if got.Provider != defaultProvider {
 		t.Fatalf("Provider = %q, want %q", got.Provider, defaultProvider)
 	}
+	if got.AnalysisMaxPixels != defaultMaxPixels || got.AnalysisMaxWidth != 0 || got.AnalysisMaxHeight != 0 || got.AnalysisMaxPixelsOverride != defaultMaxPixels || got.AnalysisMaxWidthOverride != 0 || got.AnalysisMaxHeightOverride != 0 {
+		t.Fatalf("analysis limits = %d/%d/%d with overrides %d/%d/%d, want %d/0/0 with overrides %d/0/0", got.AnalysisMaxPixels, got.AnalysisMaxWidth, got.AnalysisMaxHeight, got.AnalysisMaxPixelsOverride, got.AnalysisMaxWidthOverride, got.AnalysisMaxHeightOverride, defaultMaxPixels, defaultMaxPixels)
+	}
 	if got.RecognitionThresholds.DirectAssignmentSimilarity != 0.75 {
 		t.Fatalf("DirectAssignmentSimilarity = %v, want 0.75", got.RecognitionThresholds.DirectAssignmentSimilarity)
+	}
+}
+
+func TestLoadOverridesAnalysisResourceLimits(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "settings.json")
+	data, err := json.Marshal(File{AnalysisMaxPixels: 12345, AnalysisMaxWidth: 2048, AnalysisMaxHeight: 1536, AnalysisMaxPixelsOverride: 23456, AnalysisMaxWidthOverride: 4096, AnalysisMaxHeightOverride: 3072})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AnalysisMaxPixels != 12345 || got.AnalysisMaxWidth != 2048 || got.AnalysisMaxHeight != 1536 || got.AnalysisMaxPixelsOverride != 23456 || got.AnalysisMaxWidthOverride != 4096 || got.AnalysisMaxHeightOverride != 3072 {
+		t.Fatalf("analysis limits = %d/%d/%d with overrides %d/%d/%d", got.AnalysisMaxPixels, got.AnalysisMaxWidth, got.AnalysisMaxHeight, got.AnalysisMaxPixelsOverride, got.AnalysisMaxWidthOverride, got.AnalysisMaxHeightOverride)
+	}
+}
+
+func TestLoadRejectsAnalysisOverrideBelowConfiguredLimit(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "settings.json")
+	data, err := json.Marshal(File{AnalysisMaxPixels: 200, AnalysisMaxPixelsOverride: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("Load accepted an override below the configured limit")
 	}
 }
 

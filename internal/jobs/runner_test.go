@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -66,5 +67,51 @@ func TestRunnerRetriesThenPersistsPermanentFailure(t *testing.T) {
 		if attempt == 3 && (got.Status != Failed || got.CompletedAt == nil) {
 			t.Fatalf("final job=%+v", got)
 		}
+	}
+}
+
+func TestRunnerSummaryCountsItemsWithErrors(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "summary-errors.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewStore(database)
+	job, err := store.Enqueue(context.Background(), "test", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{Store: store, Handlers: map[string]Handler{
+		"test": func(ctx context.Context, received Job) error {
+			if err := store.EnsureItems(ctx, received.ID, []string{"ok", "error"}); err != nil {
+				return err
+			}
+			if claimed, err := store.ClaimItem(ctx, received.ID, "ok"); err != nil || !claimed {
+				return err
+			}
+			if err := store.CompleteItem(ctx, received.ID, "ok"); err != nil {
+				return err
+			}
+			if claimed, err := store.ClaimItem(ctx, received.ID, "error"); err != nil || !claimed {
+				return err
+			}
+			return store.FailItem(ctx, received.ID, "error", "analysis_failed", "image too large", false)
+		},
+	}}
+	if worked, err := runner.RunOnce(context.Background()); err != nil || !worked {
+		t.Fatalf("worked=%v error=%v", worked, err)
+	}
+	finished, err := store.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var summary struct {
+		Items map[string]int `json:"items"`
+	}
+	if err := json.Unmarshal(finished.Summary, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Items["total"] != 2 || summary.Items["completed"] != 1 || summary.Items["errors"] != 1 {
+		t.Fatalf("summary items = %#v", summary.Items)
 	}
 }

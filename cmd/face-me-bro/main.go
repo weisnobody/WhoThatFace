@@ -106,7 +106,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		command = flags.Arg(0)
 	}
 	if *help || command == "help" || command == "?" {
-		helpArgs := flags.Args()[1:]
+		var helpArgs []string
+		if command == "help" || command == "?" {
+			helpArgs = flags.Args()[1:]
+		}
 		if *help && flags.NArg() > 0 {
 			helpArgs = []string{command}
 		}
@@ -198,7 +201,7 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 		if jsonOutput {
 			return writeJSON(stdout, envelope(command, status))
 		}
-		fmt.Fprintf(stdout, "Config file:      %s\nRuntime root:     %s\nDatabase:         %s\nModel root:       %s\nPython:           %s\nDefault provider: %s\nServe address:    %s\nLog root:         %s\nTemp root:        %s\nExport root:      %s\nBackup root:      %s\nSearch method:    %s\n", status.ConfigFile, status.RuntimeDataRoot, status.DatabasePath, status.ModelRoot, status.PythonPath, status.DefaultProvider, status.ServeAddress, status.LogRoot, status.TempRoot, status.ExportRoot, status.BackupRoot, status.NeighborSearchMethod)
+		fmt.Fprintf(stdout, "Config file:      %s\nRuntime root:     %s\nDatabase:         %s\nModel root:       %s\nPython:           %s\nDefault provider: %s\nServe address:    %s\nLog root:         %s\nTemp root:        %s\nExport root:      %s\nBackup root:      %s\nMax pixels:       %d\nMax width:        %d\nMax height:       %d\nMax pixels override: %d\nMax width override:  %d\nMax height override: %d\nSearch method:    %s\n", status.ConfigFile, status.RuntimeDataRoot, status.DatabasePath, status.ModelRoot, status.PythonPath, status.DefaultProvider, status.ServeAddress, status.LogRoot, status.TempRoot, status.ExportRoot, status.BackupRoot, status.AnalysisMaxPixels, status.AnalysisMaxWidth, status.AnalysisMaxHeight, status.AnalysisMaxPixelsOverride, status.AnalysisMaxWidthOverride, status.AnalysisMaxHeightOverride, status.NeighborSearchMethod)
 		if status.PipelineID == nil {
 			fmt.Fprintln(stdout, "Pipeline:         not configured")
 		} else {
@@ -258,7 +261,7 @@ type helpTopic struct {
 var commandHelp = map[string]helpTopic{
 	"status":     {Usage: "face-me-bro [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
 	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
-	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
+	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; optional CLI-admin limit overrides: --max-pixels N --max-width N --max-height N; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
 	"job":        {Usage: "face-me-bro job <list|get|status|reference-reprocess|reference-discovery|possible-candidates|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; possible-candidates: --person-id ID or --collection-id ID or --all; controls use JOB_ID"},
 	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
 	"setup":      {Usage: "face-me-bro setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
@@ -736,11 +739,39 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 	flags := flag.NewFlagSet("scan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	collectionID := flags.String("collection-id", "", "collection ID")
+	maxPixels := flags.Int64("max-pixels", 0, "CLI-admin decoded pixel limit override")
+	maxWidth := flags.Int("max-width", 0, "CLI-admin decoded width limit override")
+	maxHeight := flags.Int("max-height", 0, "CLI-admin decoded height limit override")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *collectionID == "" {
 		return fmt.Errorf("scan requires --collection-id")
+	}
+	limits := worker.ResourceLimits{MaxPixels: application.Config.AnalysisMaxPixels, MaxWidth: application.Config.AnalysisMaxWidth, MaxHeight: application.Config.AnalysisMaxHeight}
+	adminAccountID := ""
+	provided := map[string]bool{}
+	flags.Visit(func(value *flag.Flag) { provided[value.Name] = true })
+	overrideRequested := provided["max-pixels"] || provided["max-width"] || provided["max-height"]
+	if overrideRequested {
+		adminAccountID = "cli"
+		if provided["max-pixels"] && *maxPixels <= 0 || *maxWidth < 0 || *maxHeight < 0 {
+			return fmt.Errorf("scan limit overrides must be positive")
+		}
+		if provided["max-pixels"] {
+			limits.MaxPixels = *maxPixels
+		}
+		if provided["max-width"] {
+			limits.MaxWidth = *maxWidth
+		}
+		if provided["max-height"] {
+			limits.MaxHeight = *maxHeight
+		}
+		if limits.MaxPixels > application.Config.AnalysisMaxPixelsOverride ||
+			(limits.MaxWidth != 0 && application.Config.AnalysisMaxWidthOverride != 0 && limits.MaxWidth > application.Config.AnalysisMaxWidthOverride) ||
+			(limits.MaxHeight != 0 && application.Config.AnalysisMaxHeightOverride != 0 && limits.MaxHeight > application.Config.AnalysisMaxHeightOverride) {
+			return fmt.Errorf("scan limit override exceeds configured administrator ceiling")
+		}
 	}
 	var root string
 	if err := application.DB.QueryRowContext(ctx, "SELECT root_path FROM collections WHERE id = ?", *collectionID).Scan(&root); err != nil {
@@ -778,7 +809,12 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 	if err := mediaStore.FinishScan(ctx, scanRunID, "completed", ""); err != nil {
 		return err
 	}
-	job, err := jobs.NewStore(application.DB).Enqueue(ctx, "analysis", 5, map[string]any{"collection_id": *collectionID})
+	payload := map[string]any{"collection_id": *collectionID}
+	if overrideRequested {
+		payload["analysis_limits"] = limits
+		payload["admin_account_id"] = adminAccountID
+	}
+	job, err := jobs.NewStore(application.DB).Enqueue(ctx, "analysis", 5, payload)
 	if err != nil {
 		return err
 	}
@@ -2339,12 +2375,17 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 	pipelineID := flags.String("pipeline-id", "", "pipeline ID")
 	pythonPath := flags.String("python", application.Config.PythonPath, "Python executable override")
 	workerScript := flags.String("script", "worker/insightface_worker.py", "worker script")
-	maxPixels := flags.Int64("max-pixels", 100_000_000, "maximum decoded pixels")
+	maxPixels := flags.Int64("max-pixels", application.Config.AnalysisMaxPixels, "maximum decoded pixels")
+	maxWidth := flags.Int("max-width", application.Config.AnalysisMaxWidth, "maximum decoded image width")
+	maxHeight := flags.Int("max-height", application.Config.AnalysisMaxHeight, "maximum decoded image height")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *pipelineID == "" {
 		return fmt.Errorf("worker requires --pipeline-id")
+	}
+	if *maxPixels < 0 || *maxWidth < 0 || *maxHeight < 0 || *maxPixels > application.Config.AnalysisMaxPixelsOverride || (*maxWidth != 0 && application.Config.AnalysisMaxWidthOverride != 0 && *maxWidth > application.Config.AnalysisMaxWidthOverride) || (*maxHeight != 0 && application.Config.AnalysisMaxHeightOverride != 0 && *maxHeight > application.Config.AnalysisMaxHeightOverride) {
+		return fmt.Errorf("worker resource limits exceed configured administrator ceilings")
 	}
 	var modelFamily, provider, checksumsJSON, detectorJSON, preprocessingJSON string
 	var dimension int
@@ -2369,7 +2410,9 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 	}, *workerScript, "--model", modelFamily, "--model-root", application.Config.ModelRoot,
 		"--providers", provider, "--model-checksums-json", checksumsJSON,
 		"--detector-config-json", detectorJSON, "--preprocessing-config-json", preprocessingJSON,
-		"--modules", "detection,recognition", "--pipeline-id", *pipelineID)
+		"--modules", "detection,recognition", "--pipeline-id", *pipelineID,
+		"--max-pixels", strconv.FormatInt(application.Config.AnalysisMaxPixelsOverride, 10),
+		"--max-width", strconv.Itoa(application.Config.AnalysisMaxWidthOverride), "--max-height", strconv.Itoa(application.Config.AnalysisMaxHeightOverride))
 	if err := client.Start(ctx); err != nil {
 		return err
 	}
@@ -2379,12 +2422,14 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 		return err
 	}
 	defer os.Remove(pidPath)
-	processor := analysis.NewProcessor(application.DB, client, *pipelineID, *maxPixels)
+	processor := analysis.NewProcessorWithLimits(application.DB, client, *pipelineID, worker.ResourceLimits{MaxPixels: *maxPixels, MaxWidth: *maxWidth, MaxHeight: *maxHeight})
 	jobStore := jobs.NewStore(application.DB)
 	runner := jobs.Runner{Store: jobStore, Handlers: map[string]jobs.Handler{
 		"analysis": func(jobContext context.Context, job jobs.Job) error {
 			var payload struct {
-				CollectionID string `json:"collection_id"`
+				CollectionID   string                 `json:"collection_id"`
+				AnalysisLimits *worker.ResourceLimits `json:"analysis_limits,omitempty"`
+				AdminAccountID string                 `json:"admin_account_id,omitempty"`
 			}
 			if err := json.Unmarshal(job.Payload, &payload); err != nil {
 				return err
@@ -2411,7 +2456,25 @@ func workerCommand(ctx context.Context, application *app.App, args []string, std
 			if err := jobStore.EnsureItems(jobContext, job.ID, assetIDs); err != nil {
 				return err
 			}
-			if err := processor.ProcessCollectionWithItemProgress(jobContext, payload.CollectionID, func(assetID string, itemErr error) error {
+			jobProcessor := processor
+			if payload.AnalysisLimits != nil {
+				limits := *payload.AnalysisLimits
+				if payload.AdminAccountID != "cli" {
+					var role string
+					if err := application.DB.QueryRowContext(jobContext, `SELECT role FROM accounts WHERE id = ? AND disabled_at IS NULL`, payload.AdminAccountID).Scan(&role); err != nil || role != string(auth.SystemAdmin) {
+						return fmt.Errorf("analysis job limit override is not authorized")
+					}
+				}
+				if limits.MaxPixels < application.Config.AnalysisMaxPixels || limits.MaxPixels > application.Config.AnalysisMaxPixelsOverride ||
+					(limits.MaxWidth != 0 && application.Config.AnalysisMaxWidth != 0 && limits.MaxWidth < application.Config.AnalysisMaxWidth) ||
+					(limits.MaxWidth != 0 && application.Config.AnalysisMaxWidthOverride != 0 && limits.MaxWidth > application.Config.AnalysisMaxWidthOverride) ||
+					(limits.MaxHeight != 0 && application.Config.AnalysisMaxHeight != 0 && limits.MaxHeight < application.Config.AnalysisMaxHeight) ||
+					(limits.MaxHeight != 0 && application.Config.AnalysisMaxHeightOverride != 0 && limits.MaxHeight > application.Config.AnalysisMaxHeightOverride) {
+					return fmt.Errorf("analysis job resource limits are outside configured bounds")
+				}
+				jobProcessor = analysis.NewProcessorWithLimits(application.DB, client, *pipelineID, limits)
+			}
+			if err := jobProcessor.ProcessCollectionWithItemProgress(jobContext, payload.CollectionID, func(assetID string, itemErr error) error {
 				claimed, claimErr := jobStore.ClaimItem(jobContext, job.ID, assetID)
 				if claimErr != nil {
 					return claimErr

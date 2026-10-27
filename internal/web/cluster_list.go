@@ -22,6 +22,7 @@ type clusterListRow struct {
 
 type clusterListPerson struct {
 	ID, Name string
+	Named    bool
 	Count    int
 }
 
@@ -131,6 +132,10 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := strings.ToLower(strings.TrimSpace(query.Get("q")))
+	personNameFilter := query.Get("person_name")
+	if personNameFilter != "named" && personNameFilter != "unnamed" {
+		personNameFilter = "all"
+	}
 	minFaces, maxFaces := parseIntFilter(query.Get("min_faces")), parseIntFilter(query.Get("max_faces"))
 	minConsistency, maxConsistency := parseScoreFilter(query.Get("min_consistency")), parseScoreFilter(query.Get("max_consistency"))
 	rating := query.Get("rating")
@@ -138,6 +143,9 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	toAssignFilter := query.Get("to_assign") == "true"
 	filtered := clusters[:0]
 	for _, row := range clusters {
+		if !clusterMatchesPersonNameFilter(row.People, personNameFilter) {
+			continue
+		}
 		personText := strings.ToLower(row.ProposedPersonID + " " + row.ProposedPersonName)
 		for _, person := range row.People {
 			personText += " " + strings.ToLower(person.ID+" "+person.Name)
@@ -212,6 +220,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</select></label>`)
 	body.WriteString(`<label><strong>Rating</strong> <select name="rating">` + clusterOption("", "Any rating", rating) + clusterOption("high", "High", rating) + clusterOption("medium", "Medium", rating) + clusterOption("low", "Low", rating) + `</select></label>`)
+	body.WriteString(`<label><strong>Person's Name</strong> <select name="person_name">` + clusterOption("all", "All", personNameFilter) + clusterOption("named", "With name", personNameFilter) + clusterOption("unnamed", "Without name", personNameFilter) + `</select></label>`)
 	body.WriteString(`<label><input type="checkbox" name="include_dont_track" value="true"` + checkedAttr(query.Get("include_dont_track") == "true") + `> Include Don’t Track</label>`)
 	body.WriteString(`<label><input type="checkbox" name="other" value="true"` + checkedAttr(otherFilter) + `> Other &gt; 0</label><label><input type="checkbox" name="to_assign" value="true"` + checkedAttr(toAssignFilter) + `> To Assign &gt; 0</label>`)
 	body.WriteString(`<label>Min faces <input name="min_faces" type="number" min="1" value="` + template.HTMLEscapeString(query.Get("min_faces")) + `"></label><label>Max faces <input name="max_faces" type="number" min="1" value="` + template.HTMLEscapeString(query.Get("max_faces")) + `"></label>`)
@@ -252,7 +261,7 @@ func (s *Server) reviewClusters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) clusterListPeople(r *http.Request, clusterID string, allowed []string) ([]clusterListPerson, error) {
-	query := `SELECT ca.person_id, COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ca.person_id), COUNT(*)
+	query := `SELECT ca.person_id, COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ca.person_id), CASE WHEN p.name IS NOT NULL AND trim(p.name) <> '' THEN 1 ELSE 0 END, COUNT(*)
 		FROM cluster_memberships cm JOIN current_face_assignments ca ON ca.face_id = cm.face_id
 		JOIN people p ON p.id = ca.person_id JOIN faces f ON f.id = cm.face_id JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
 		WHERE cm.cluster_id = ? AND ca.state IN ('assigned-user', 'assigned-system') AND pp.missing_at IS NULL`
@@ -272,12 +281,26 @@ func (s *Server) clusterListPeople(r *http.Request, clusterID string, allowed []
 	var people []clusterListPerson
 	for rows.Next() {
 		var person clusterListPerson
-		if err := rows.Scan(&person.ID, &person.Name, &person.Count); err != nil {
+		var named int
+		if err := rows.Scan(&person.ID, &person.Name, &named, &person.Count); err != nil {
 			return nil, err
 		}
+		person.Named = named != 0
 		people = append(people, person)
 	}
 	return people, rows.Err()
+}
+
+func clusterMatchesPersonNameFilter(people []clusterListPerson, filter string) bool {
+	if filter == "all" {
+		return true
+	}
+	for _, person := range people {
+		if filter == "named" && person.Named || filter == "unnamed" && !person.Named {
+			return true
+		}
+	}
+	return false
 }
 
 func clusterPeopleHTML(row clusterListRow) string {
@@ -292,11 +315,18 @@ func clusterPeopleHTML(row clusterListRow) string {
 		body.WriteString(`<strong>Multiple</strong> `)
 	}
 	body.WriteString(`<span class="cluster-people-list">`)
-	for index, person := range row.People {
+	visiblePeople := row.People
+	if len(visiblePeople) > 2 {
+		visiblePeople = visiblePeople[:2]
+	}
+	for index, person := range visiblePeople {
 		if index > 0 {
 			body.WriteString(`, `)
 		}
 		body.WriteString(`<img loading="lazy" alt="" src="/api/people/` + template.HTMLEscapeString(person.ID) + `/representative"> <a href="/review/people/` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</a> (` + strconv.Itoa(person.Count) + `)`)
+	}
+	if len(row.People) > len(visiblePeople) {
+		body.WriteString(`, ` + strconv.Itoa(len(row.People)-len(visiblePeople)) + ` more`)
 	}
 	body.WriteString(`</span>`)
 	return body.String()

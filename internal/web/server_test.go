@@ -12,6 +12,7 @@ import (
 
 	"github.com/pjg/face_me_bro/internal/auth"
 	"github.com/pjg/face_me_bro/internal/db"
+	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/review"
 )
 
@@ -53,6 +54,44 @@ func TestCandidateRenderersFormatAssignedPerson(t *testing.T) {
 	possible := renderPossibleMatches([]possibleCandidateView{{PersonID: "person-1", PersonName: "One"}}, "face-1", "person-1", false)
 	if !strings.Contains(possible, `<strong><a href="/review/people/person-1">One</a></strong>`) {
 		t.Fatalf("possible-match rendering did not emphasize the assigned person: %s", possible)
+	}
+}
+
+func TestClusterScriptHandlesCandidateAssignments(t *testing.T) {
+	server := &Server{}
+	response := httptest.NewRecorder()
+	server.clusterScript(response, httptest.NewRequest(http.MethodGet, "/static/cluster.js", nil))
+	body := response.Body.String()
+	if !strings.Contains(body, `data-action="assign-candidate"`) || !strings.Contains(body, `/api/faces/`) || !strings.Contains(body, `candidate_id:button.dataset.candidateId`) {
+		t.Fatalf("cluster script does not handle candidate assignments: %s", body)
+	}
+}
+
+func TestClusterPeopleHTMLLimitsDisplayedPeople(t *testing.T) {
+	body := clusterPeopleHTML(clusterListRow{People: []clusterListPerson{
+		{ID: "person-1", Name: "One", Count: 3},
+		{ID: "person-2", Name: "Two", Count: 2},
+		{ID: "person-3", Name: "Three", Count: 1},
+		{ID: "person-4", Name: "Four", Count: 1},
+	}})
+	if !strings.Contains(body, "One") || !strings.Contains(body, "Two") || !strings.Contains(body, "2 more") {
+		t.Fatalf("cluster people summary omitted visible people or count: %s", body)
+	}
+	if strings.Contains(body, "Three") || strings.Contains(body, "Four") {
+		t.Fatalf("cluster people summary rendered more than two people: %s", body)
+	}
+}
+
+func TestClusterPersonNameFilter(t *testing.T) {
+	people := []clusterListPerson{{ID: "person-1", Name: "Unnamed", Named: false}, {ID: "person-2", Name: "Named", Named: true}}
+	if !clusterMatchesPersonNameFilter(people, "all") || !clusterMatchesPersonNameFilter(people, "named") || !clusterMatchesPersonNameFilter(people, "unnamed") {
+		t.Fatal("mixed cluster should match all person-name filter modes")
+	}
+	if clusterMatchesPersonNameFilter([]clusterListPerson{{ID: "person-2", Name: "Named", Named: true}}, "unnamed") {
+		t.Fatal("named-only cluster matched unnamed person filter")
+	}
+	if clusterMatchesPersonNameFilter([]clusterListPerson{{ID: "person-1", Name: "Unnamed", Named: false}}, "named") {
+		t.Fatal("unnamed-only cluster matched named person filter")
 	}
 }
 
@@ -122,16 +161,89 @@ func TestReviewPeopleWorksForRestrictedCollectionAccount(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "People") {
 		t.Fatalf("unexpected response: %s", response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), `<strong>Sort</strong> <select name="sort">`) || !strings.Contains(response.Body.String(), `value="clusters">Clusters</option>`) || !strings.Contains(response.Body.String(), `<th>Clusters</th><th>References</th>`) || !strings.Contains(response.Body.String(), `</select></label><label><strong>Direction</strong>`) || !strings.Contains(response.Body.String(), `<strong>Per Page</strong>`) || !strings.Contains(response.Body.String(), `<button>Apply</button>`) || !strings.Contains(response.Body.String(), `class="people-controls-break"`) || !strings.Contains(response.Body.String(), `#people-controls>button{margin-left:4rem}`) || !strings.Contains(response.Body.String(), `<label>Jump to Page <input type="number" name="page"`) {
+	if !strings.Contains(response.Body.String(), `<strong>Sort</strong> <select name="sort">`) || !strings.Contains(response.Body.String(), `value="references">References</option>`) || !strings.Contains(response.Body.String(), `value="clusters">Clusters</option>`) || !strings.Contains(response.Body.String(), `<th>Clusters</th><th>References</th>`) || !strings.Contains(response.Body.String(), `name="collection_id"`) || !strings.Contains(response.Body.String(), `value="collection-1">Photos</option>`) || !strings.Contains(response.Body.String(), `name="min_faces"`) || !strings.Contains(response.Body.String(), `name="max_faces"`) || !strings.Contains(response.Body.String(), `</select></label><label><strong>Direction</strong>`) || !strings.Contains(response.Body.String(), `<strong>Per Page</strong>`) || !strings.Contains(response.Body.String(), `<button>Apply</button>`) || !strings.Contains(response.Body.String(), `class="people-controls-break"`) || !strings.Contains(response.Body.String(), `#people-controls>button{margin-left:4rem}`) || !strings.Contains(response.Body.String(), `<label>Jump to Page <input type="number" name="page"`) {
 		t.Fatalf("people filter form has malformed sort labels: %s", response.Body.String())
 	}
-	for _, value := range []string{`<select name="view">`, `>All</option>`, `>Possibles</option>`, `>Don't Track</option>`, `>No Faces</option>`, `<strong>Assignment:</strong>`, `name="assignment_user"`, `name="assignment_system"`, `name="assignment_provisional"`, `name="assignment_other"`} {
+	for _, value := range []string{`<select name="name">`, `value="all" selected>All</option>`, `>With name</option>`, `>Without name</option>`, `<select name="view">`, `>All</option>`, `>Possibles</option>`, `>Don't Track</option>`, `>No Faces</option>`, `<strong>Assignment:</strong>`, `name="assignment_user"`, `name="assignment_system"`, `name="assignment_provisional"`, `name="assignment_other"`} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("people filter form is missing %q: %s", value, response.Body.String())
 		}
 	}
+	if strings.Index(response.Body.String(), `<hr><form id="create-person"`) < strings.Index(response.Body.String(), `<table class="people-table">`) {
+		t.Fatalf("new person form should be below the people table: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `<script src="/static/people.js" defer></script>`) || strings.Contains(response.Body.String(), `<script>(function(){const form=document.getElementById('create-person')`) {
+		t.Fatalf("create-person form should use an external CSP-compatible script: %s", response.Body.String())
+	}
 	if strings.Count(response.Body.String(), `name="assignment_user" value="true" checked`) != 1 || strings.Count(response.Body.String(), `name="assignment_system" value="true" checked`) != 1 || strings.Count(response.Body.String(), `name="assignment_provisional" value="true" checked`) != 1 || strings.Count(response.Body.String(), `name="assignment_other" value="true" checked`) != 1 {
 		t.Fatalf("assignment filters are not checked by default: %s", response.Body.String())
+	}
+	createRequest := httptest.NewRequest(http.MethodPost, "/api/people", strings.NewReader(`{"name":"Created Person"}`))
+	createRequest.Header.Set("Content-Type", "application/json")
+	createRequest.Header.Set("X-CSRF-Token", "csrf-token")
+	createRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	createRequest.AddCookie(&http.Cookie{Name: "csrf", Value: "csrf-token"})
+	createResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createResponse, createRequest)
+	if createResponse.Code != http.StatusCreated {
+		t.Fatalf("create person status = %d, body = %s", createResponse.Code, createResponse.Body.String())
+	}
+	var createdName string
+	if err := database.QueryRowContext(ctx, `SELECT name FROM people WHERE name = 'Created Person'`).Scan(&createdName); err != nil || createdName != "Created Person" {
+		t.Fatalf("created person name = %q, err = %v", createdName, err)
+	}
+}
+
+func TestAdminJobsShowsItemErrors(t *testing.T) {
+	ctx := context.Background()
+	database, err := db.Open(ctx, filepath.Join(t.TempDir(), "admin-jobs.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authStore := auth.NewStore(database)
+	account, err := authStore.CreateAccount(ctx, "admin", "Password1", auth.SystemAdmin, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobStore := jobs.NewStore(database)
+	job, err := jobStore.Enqueue(ctx, "analysis", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.EnsureItems(ctx, job.ID, []string{"asset-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := jobStore.ClaimItem(ctx, job.ID, "asset-1"); err != nil || !claimed {
+		t.Fatalf("claim item = %v, %v", claimed, err)
+	}
+	if err := jobStore.FailItem(ctx, job.ID, "asset-1", "analysis_failed", "image too large", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.SetStatus(ctx, job.ID, jobs.CompletedWithError, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := authStore.CreateSession(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(authStore, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin/jobs", nil)
+	request.AddCookie(&http.Cookie{Name: "session", Value: token})
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Show Errors") {
+		t.Fatalf("jobs page did not show error button: status=%d body=%s", response.Code, response.Body.String())
+	}
+	detailRequest := httptest.NewRequest(http.MethodGet, "/admin/jobs?show_errors="+url.QueryEscape(job.ID), nil)
+	detailRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	detailResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(detailResponse, detailRequest)
+	if detailResponse.Code != http.StatusOK || !strings.Contains(detailResponse.Body.String(), "image too large") || !strings.Contains(detailResponse.Body.String(), "asset-1") {
+		t.Fatalf("jobs page did not show errors: status=%d body=%s", detailResponse.Code, detailResponse.Body.String())
 	}
 }
 
@@ -397,8 +509,9 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	}
 	if _, err := database.ExecContext(ctx, `
 		INSERT INTO collections (id, name, root_path, created_at, updated_at) VALUES ('collection-1', 'Photos', '/photos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
-		INSERT INTO photo_assets (id, content_sha256, byte_size, media_kind, width, height, created_at, updated_at) VALUES ('asset-1', 'hash-1', 10, 'still', 1000, 800, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO photo_assets (id, content_sha256, byte_size, media_kind, width, height, created_at, updated_at) VALUES ('asset-1', 'hash-1', 10, 'still', 800, 1000, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO photo_paths (id, collection_id, asset_id, relative_path, first_seen_at, last_seen_at, file_size, media_kind) VALUES ('path-1', 'collection-1', 'asset-1', 'person/photo.jpg', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 10, 'still');
+		INSERT INTO photo_paths (id, collection_id, asset_id, relative_path, first_seen_at, last_seen_at, file_size, media_kind) VALUES ('path-duplicate', 'collection-1', 'asset-1', 'z-person/photo-duplicate.jpg', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 10, 'still');
 		INSERT INTO pipelines (id, model_family, model_version, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension, embedding_dtype, normalization, execution_provider, dependency_versions_json, created_at) VALUES ('pipeline-1', 'test', '1', '{}', '{}', '{}', 2, 'float32', 'l2', 'cpu', '{}', CURRENT_TIMESTAMP);
 		INSERT INTO analyses (id, asset_id, pipeline_id, status, source_width, source_height, created_at) VALUES ('analysis-1', 'asset-1', 'pipeline-1', 'completed', 1000, 800, CURRENT_TIMESTAMP);
 		INSERT INTO faces (id, analysis_id, face_index, box_left, box_top, box_right, box_bottom, detection_confidence, quality, created_at) VALUES ('face-1', 'analysis-1', 0, 100, 80, 300, 320, 0.99, 0.90, CURRENT_TIMESTAMP);
@@ -441,6 +554,10 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	}{
 		{query: "view=no-faces", want: "person-2", avoid: "person-1"},
 		{query: "assignment_user=true", want: "person-1", avoid: "person-2"},
+		{query: "name=named&view=no-faces", want: "Second Person", avoid: "person-1"},
+		{query: "name=unnamed&include_no_faces=true", want: "person-1", avoid: "Second Person"},
+		{query: "min_faces=2", want: "People (0/0)", avoid: "person-1"},
+		{query: "collection_id=collection-1", want: "person-1", avoid: "Second Person"},
 	} {
 		filteredRequest := httptest.NewRequest(http.MethodGet, "/review/people?"+testCase.query, nil)
 		filteredRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
@@ -457,10 +574,16 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if clusterResponse.Code != http.StatusOK || !strings.Contains(clusterResponse.Body.String(), "Sp: 4") || strings.Contains(clusterResponse.Body.String(), "support 1") {
 		t.Fatalf("cluster detail did not restrict candidates to the latest batch: status=%d body=%s", clusterResponse.Code, clusterResponse.Body.String())
 	}
+	if !strings.Contains(clusterResponse.Body.String(), `left:10.000%;top:10.000%;width:20.000%;height:30.000%`) {
+		t.Fatalf("cluster detail did not render face boxes using analysis dimensions: %s", clusterResponse.Body.String())
+	}
 	if !strings.Contains(clusterResponse.Body.String(), "<dt>Candidates</dt><dd>N/A</dd>") {
 		t.Fatalf("cluster detail did not render N/A for an all-assigned cluster: %s", clusterResponse.Body.String())
 	}
-	for _, value := range []string{"Face-Me-Bro", `class="breadcrumb">› <a href="/review/clusters">Clusters</a>`, "cluster-detail-controls", "Proposed person", "Consistency", "Review version", "Candidate confidence", "class=\"grid cluster-grid\"", "class=\"card cluster-face assigned\"", `value="person-1" selected`, "User:</strong> Cs:", `data-action="unknown"`, `data-action="ambiguous"`, `data-disposition="incorrect-assignment"`, `data-disposition="false-detection">No Face`, `data-disposition="dont-track">Don't Track`, "person-select-filter", "data-action=\"assign\"", "/review/photos?path_id=path-1", "/review/people/person-1"} {
+	if !strings.Contains(clusterResponse.Body.String(), `value="person-2"`) {
+		t.Fatalf("cluster detail omitted named person with no assigned faces: %s", clusterResponse.Body.String())
+	}
+	for _, value := range []string{"Face-Me-Bro", `class="breadcrumb">› <a href="/review/clusters">Clusters</a>`, "cluster-detail-controls", `value="to-assign">To Assign</option>`, "Proposed person", "Consistency", "Review version", "Candidate confidence", "class=\"grid cluster-grid\"", "class=\"card cluster-face assigned assigned-user\"", `value="person-1" selected`, "User:</strong> Cs:", `data-action="unknown"`, `data-action="ambiguous"`, `data-disposition="incorrect-assignment"`, `data-disposition="false-detection">No Face`, `data-disposition="dont-track">Don't Track`, "person-select-filter", "data-action=\"assign\"", "/review/photos?path_id=path-1", "/review/people/person-1"} {
 		if !strings.Contains(clusterResponse.Body.String(), value) {
 			t.Errorf("cluster detail missing %q: %s", value, clusterResponse.Body.String())
 		}
@@ -472,11 +595,18 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if filteredClusterResponse.Code != http.StatusOK || !strings.Contains(filteredClusterResponse.Body.String(), `name="min_quality"`) || !strings.Contains(filteredClusterResponse.Body.String(), `value="80"`) || !strings.Contains(filteredClusterResponse.Body.String(), `value="desc" selected`) {
 		t.Fatalf("cluster detail filters were not preserved: status=%d body=%s", filteredClusterResponse.Code, filteredClusterResponse.Body.String())
 	}
+	toAssignRequest := httptest.NewRequest(http.MethodGet, "/review/clusters/cluster-active?assignment_state=to-assign", nil)
+	toAssignRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	toAssignResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(toAssignResponse, toAssignRequest)
+	if toAssignResponse.Code != http.StatusOK || !strings.Contains(toAssignResponse.Body.String(), `value="to-assign" selected`) || strings.Contains(toAssignResponse.Body.String(), `id="face-face-1"`) {
+		t.Fatalf("cluster detail To Assign filter failed: status=%d body=%s", toAssignResponse.Code, toAssignResponse.Body.String())
+	}
 	clusterListRequest := httptest.NewRequest(http.MethodGet, "/review/clusters", nil)
 	clusterListRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
 	clusterListResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(clusterListResponse, clusterListRequest)
-	if clusterListResponse.Code != http.StatusOK || !strings.Contains(clusterListResponse.Body.String(), ">1</td><td>N/A</td><td>0</td><td>0</td><td>1</td>") {
+	if clusterListResponse.Code != http.StatusOK || !strings.Contains(clusterListResponse.Body.String(), `name="person_name"`) || !strings.Contains(clusterListResponse.Body.String(), ">1</td><td>N/A</td><td>0</td><td>0</td><td>1</td>") {
 		t.Fatalf("cluster list did not count latest candidates only: status=%d body=%s", clusterListResponse.Code, clusterListResponse.Body.String())
 	}
 	bulkRequest := httptest.NewRequest(http.MethodPost, "/api/faces/assignments", strings.NewReader(`{"face_ids":["face-1"],"person_id":"person-1","state":"assigned-user"}`))
@@ -500,6 +630,9 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if policy := response.Header().Get("Content-Security-Policy"); !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("CSP does not allow the page styles: %s", policy)
 	}
+	if !strings.Contains(response.Body.String(), `value="person-2"`) {
+		t.Fatalf("person detail omitted named person with no assigned faces: %s", response.Body.String())
+	}
 	for _, value := range []string{"person-1", `class="breadcrumb">› <a href="/review/people">People</a>`, "/api/photos/path-1", "class=\"box reference\"", "class=\"card assigned\"", "class=\"grid\"", "dark green indicates", "User:", "90.0%", "Unknown", "Ambiguous", "Evaluation", "Key Photo", "Save", "/static/person.js", `class="person-summary-table"`, "<dt>Similarity</dt><dd>91.0% - 91.0%", "<dt>Cluster Min/Max</dt>", "<dt>Faces</dt><dd>1 / 1", "<dt>Possibles</dt><dd>0 / 0", "<dt>References</dt><dd>1", "<strong>Filter:</strong>", "<strong>Sort:</strong>", "All non-assigned", `value="assigned-system">assigned-system</option>`, "id=\"page-assignment-state\"", `data-person-filter="assignment-options-face-1"`, `value="person-1" selected`, `value="collection"`, `>Collection</option>`, `value="cluster"`, `>Cluster</option>`, `value="consistency"`, `>Consistency</option>`, `value="possibles"`, `>Possibles</option>`, `value="ref_recs"`, `>Ref Recs</option>`, `value="reference-or-recommended"`, `>Ref / Rec Refs</option>`, `value="without" selected`, `>With Out</option>`, `value="only"`, `>Only</option>`, `value="all"`, `>All</option>`} {
 		if !strings.Contains(response.Body.String(), value) {
 			t.Errorf("person page is missing %q: %s", value, response.Body.String())
@@ -513,6 +646,12 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "Candidates:") || !strings.Contains(response.Body.String(), "S: 91.0% M: 12.0% Sp: 4 Q: 90.0% D: 99.0%") {
 		t.Fatalf("person page did not render the latest recognition candidates: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `left:10.000%;top:10.000%;width:20.000%;height:30.000%`) {
+		t.Fatalf("person page did not render face boxes using analysis dimensions: %s", response.Body.String())
+	}
+	if strings.Count(response.Body.String(), `id="face-face-1"`) != 1 {
+		t.Fatalf("person page rendered a face more than once for duplicate asset paths: %s", response.Body.String())
 	}
 	headEnd := strings.Index(response.Body.String(), "</head>")
 	gridStyle := strings.Index(response.Body.String(), ".grid{")
@@ -562,6 +701,9 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 		if !strings.Contains(photoResponse.Body.String(), value) {
 			t.Errorf("photo review is missing %q: %s", value, photoResponse.Body.String())
 		}
+	}
+	if !strings.Contains(photoResponse.Body.String(), `left:10.000%;top:10.000%;width:20.000%;height:30.000%`) {
+		t.Fatalf("photo page did not render face boxes using analysis dimensions: %s", photoResponse.Body.String())
 	}
 	assignmentIndex := strings.Index(response.Body.String(), `class="person-assignment"`)
 	articleEnd := strings.Index(response.Body.String(), `</article>`)
