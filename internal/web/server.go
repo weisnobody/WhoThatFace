@@ -417,51 +417,316 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
 		return
 	}
-	if candidatePerson := strings.TrimSpace(query.Get("candidate_person")); candidatePerson != "" {
-		candidateQuery := `SELECT DISTINCT pp.id, pp.relative_path, COALESCE(pa.width, 0), COALESCE(pa.height, 0), COUNT(DISTINCT f.id)
-			FROM possible_face_candidates pc JOIN faces f ON f.id = pc.face_id JOIN analyses a ON a.id = f.analysis_id
-			JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id
-			WHERE pc.person_id = ? AND pc.is_current = 1 AND pp.missing_at IS NULL`
-		candidateArgs := []any{candidatePerson}
-		if allowed != nil {
-			candidateQuery += ` AND pp.collection_id IN (` + strings.TrimRight(strings.Repeat("?,", len(allowed)), ",") + `)`
-			for _, collectionID := range allowed {
-				candidateArgs = append(candidateArgs, collectionID)
-			}
-		}
-		candidateQuery += ` GROUP BY pp.id, pp.relative_path, pa.width, pa.height ORDER BY pp.relative_path`
-		candidateRows, candidateErr := s.db.QueryContext(r.Context(), candidateQuery, candidateArgs...)
-		if candidateErr != nil {
-			http.Error(w, "candidate photo lookup failed", http.StatusInternalServerError)
-			return
-		}
-		var body strings.Builder
-		body.WriteString(`<h1>Possible candidate photos</h1><p>Photos containing current possible matches for ` + template.HTMLEscapeString(idSuffix(candidatePerson)) + `.</p>`)
-		for candidateRows.Next() {
-			var pathID, relative string
-			var width, height, faceCount int
-			if err := candidateRows.Scan(&pathID, &relative, &width, &height, &faceCount); err != nil {
-				candidateRows.Close()
-				http.Error(w, "candidate photo lookup failed", http.StatusInternalServerError)
-				return
-			}
-			body.WriteString(`<figure><a href="/review/photos?path_id=` + template.HTMLEscapeString(pathID) + `"><img loading="lazy" style="max-width:20rem;max-height:15rem" src="/api/photos/` + template.HTMLEscapeString(pathID) + `"></a><figcaption><a href="/review/photos?path_id=` + template.HTMLEscapeString(pathID) + `">` + template.HTMLEscapeString(relative) + `</a> (` + fmt.Sprint(faceCount) + ` faces)</figcaption></figure>`)
-		}
-		candidateRows.Close()
-		s.render(w, map[string]any{"Title": "Possible candidate photos", "Account": account, "Body": template.HTML(body.String())})
+	collections, err := s.reviewPhotoCollections(r.Context(), allowed)
+	if err != nil {
+		http.Error(w, "collection lookup failed", http.StatusInternalServerError)
 		return
 	}
-	result, err := search.NewStore(s.db).Photos(r.Context(), search.Options{AllowedCollectionIDs: allowed, CollectionID: query.Get("collection_id"), RelativePrefix: query.Get("directory"), ReviewMode: true, IncludeAssignedSystem: query.Get("include_assigned_system") == "true", IncludeAssignedUser: query.Get("include_assigned_user") == "true", IncludeDontTrack: query.Get("include_dont_track") == "true"})
+	collectionID := query.Get("collection_id")
+	if !containsCollection(collections, collectionID) {
+		collectionID = ""
+	}
+	faceMode := query.Get("faces")
+	if faceMode != "with" && faceMode != "without" {
+		faceMode = "all"
+	}
+	assignmentStates := reviewPhotoAssignmentStates(query)
+	statusFilters := query["status"]
+	validStatus := map[string]bool{"dont-track": true, "unknown": true, "possibles": true}
+	filteredStatuses := statusFilters[:0]
+	for _, value := range statusFilters {
+		if validStatus[value] {
+			filteredStatuses = append(filteredStatuses, value)
+		}
+	}
+	result, err := search.NewStore(s.db).ReviewPhotos(r.Context(), search.ReviewPhotoOptions{
+		AllowedCollectionIDs: allowed,
+		CollectionID:         collectionID,
+		PathQuery:            query.Get("path"),
+		FaceMode:             faceMode,
+		AssignmentStates:     assignmentStates,
+		StatusFilters:        filteredStatuses,
+		PersonQuery:          query.Get("person"),
+	})
 	if err != nil {
 		http.Error(w, "search failed", http.StatusInternalServerError)
 		return
 	}
-	var body strings.Builder
-	body.WriteString(`<h1>Photos</h1><p>Review faces and use the face API to assign people or select references.</p>`)
-	for _, photo := range result {
-		body.WriteString(`<figure><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" style="max-width:20rem;max-height:15rem" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `"></a><figcaption><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `">` + template.HTMLEscapeString(photo.RelativePath) + `</a> (` + fmt.Sprint(photo.FaceCount) + ` faces)</figcaption></figure>`)
+	sortKey := query.Get("sort")
+	if sortKey != "faces" && sortKey != "person" && sortKey != "assigned" && sortKey != "to-assign" {
+		sortKey = "path"
 	}
-	s.render(w, map[string]any{"Title": "Photos", "Account": account, "Body": template.HTML(body.String())})
+	direction := query.Get("direction")
+	desc := direction == "desc"
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := "", ""
+		switch sortKey {
+		case "faces":
+			left, right = fmt.Sprintf("%09d", result[i].FaceCount), fmt.Sprintf("%09d", result[j].FaceCount)
+		case "assigned":
+			left, right = photoAssignedSortKey(result[i]), photoAssignedSortKey(result[j])
+		case "to-assign":
+			left, right = fmt.Sprintf("%09d", result[i].NeedsReviewCount), fmt.Sprintf("%09d", result[j].NeedsReviewCount)
+		case "person":
+			left, right = result[i].PersonSortName, result[j].PersonSortName
+		default:
+			left, right = strings.ToLower(result[i].RelativePath), strings.ToLower(result[j].RelativePath)
+		}
+		if left == right {
+			left, right = result[i].PathID, result[j].PathID
+		}
+		if desc {
+			return left > right
+		}
+		return left < right
+	})
+	total := len(result)
+	perPage := 10
+	if value, parseErr := strconv.Atoi(query.Get("per_page")); parseErr == nil && (value == 10 || value == 20 || value == 25 || value == 50 || value == 100) {
+		perPage = value
+	}
+	page := 1
+	if value, parseErr := strconv.Atoi(query.Get("page")); parseErr == nil && value > 0 {
+		page = value
+	}
+	pageCount := (total + perPage - 1) / perPage
+	if pageCount == 0 {
+		pageCount = 1
+	}
+	if page > pageCount {
+		page = pageCount
+	}
+	start := (page - 1) * perPage
+	end := minInt(total, start+perPage)
+	pagePhotos := result
+	if start < total {
+		pagePhotos = result[start:end]
+	} else {
+		pagePhotos = nil
+	}
+	pageSize := photoSize(query.Get("photo_size"))
+	pageURL := func(target int) string {
+		values := copyQuery(query)
+		values.Set("page", strconv.Itoa(target))
+		values.Set("per_page", strconv.Itoa(perPage))
+		return "/review/photos?" + values.Encode()
+	}
+	var body strings.Builder
+	body.WriteString(`<h1>Photos (` + fmt.Sprint(len(pagePhotos)) + `/` + fmt.Sprint(total) + `)</h1><p>Review faces and use the face API to assign people.</p>`)
+	body.WriteString(`<form id="photos-controls" method="get"><strong>Filter</strong> <input name="path" value="` + template.HTMLEscapeString(query.Get("path")) + `" placeholder="Filter path or file name"><label><strong>Collection</strong> <select name="collection_id"><option value=""` + selectedAttr("", collectionID) + `>All accessible</option>`)
+	for _, collection := range collections {
+		body.WriteString(`<option value="` + template.HTMLEscapeString(collection.ID) + `"` + selectedAttr(collection.ID, collectionID) + `>` + template.HTMLEscapeString(collection.Name) + `</option>`)
+	}
+	body.WriteString(`</select></label><label><strong>Faces</strong> <select name="faces"><option value="all"` + selectedAttr("all", faceMode) + `>All</option><option value="with"` + selectedAttr("with", faceMode) + `>With faces</option><option value="without"` + selectedAttr("without", faceMode) + `>Without faces</option></select></label><label><strong>Person</strong> <input name="person" value="` + template.HTMLEscapeString(query.Get("person")) + `" placeholder="Name or ID"></label><strong>Include:</strong>`)
+	for _, item := range []struct{ Value, Label string }{{"dont-track", "Don't Track"}, {"unknown", "Unknown"}, {"possibles", "Possibles"}} {
+		body.WriteString(`<label><input type="checkbox" name="status" value="` + item.Value + `"` + checkedAttr(containsString(filteredStatuses, item.Value)) + `> ` + item.Label + `</label>`)
+	}
+	body.WriteString(`<strong>Assignment:</strong>`)
+	for _, item := range []struct{ Value, Label string }{{"assigned-user", "User"}, {"assigned-system", "System"}, {"provisional", "Provisional"}, {"other", "Other"}} {
+		body.WriteString(`<label><input type="checkbox" name="assignment" value="` + item.Value + `"` + checkedAttr(reviewPhotoAssignmentSelected(query, item.Value)) + `> ` + item.Label + `</label>`)
+	}
+	body.WriteString(`<span class="photos-controls-break"></span><label><strong>Sort</strong> <select name="sort">`)
+	for _, item := range []struct{ Value, Label string }{{"path", "Path"}, {"faces", "Faces"}, {"person", "Person"}, {"assigned", "Assigned"}, {"to-assign", "To Be Assigned"}} {
+		body.WriteString(`<option value="` + item.Value + `"` + selectedAttr(item.Value, sortKey) + `>` + item.Label + `</option>`)
+	}
+	body.WriteString(`</select></label><label><strong>Direction</strong> <select name="direction"><option value="asc"` + selectedAttr("asc", direction) + `>Ascending</option><option value="desc"` + selectedAttr("desc", direction) + `>Descending</option></select></label><label><strong>Per Page</strong> <select name="per_page" onchange="this.form.submit()">`)
+	for _, size := range []int{10, 20, 25, 50, 100} {
+		body.WriteString(`<option value="` + fmt.Sprint(size) + `"` + selectedAttr(fmt.Sprint(size), fmt.Sprint(perPage)) + `>` + fmt.Sprint(size) + `</option>`)
+	}
+	body.WriteString(`</select></label><fieldset class="photo-size"><legend>Photo size</legend>`)
+	for _, size := range []string{"0.25", "0.5", "1", "1.5", "2"} {
+		body.WriteString(`<label><input type="radio" name="photo_size" value="` + size + `"` + checkedAttr(size == pageSize) + `> ` + size + `</label>`)
+	}
+	body.WriteString(`</fieldset><button>Apply</button></form>`)
+	renderPager := func() {
+		body.WriteString(`<nav class="pager photos-page-pager"><a href="` + template.HTMLEscapeString(pageURL(1)) + `">First</a> <a href="` + template.HTMLEscapeString(pageURL(maxInt(1, page-1))) + `">Previous</a> <span>Page ` + fmt.Sprint(page) + `/` + fmt.Sprint(pageCount) + `</span> <a href="` + template.HTMLEscapeString(pageURL(minInt(pageCount, page+1))) + `">Next</a> <a href="` + template.HTMLEscapeString(pageURL(pageCount)) + `">Last</a> <form class="page-jump" method="get" action="/review/photos"><label>Jump to Page <input type="number" name="page" min="1" value="` + fmt.Sprint(page) + `" onkeydown="if(event.key==='Enter')this.form.submit()"></label>`)
+		values := copyQuery(query)
+		values.Del("page")
+		for key, list := range values {
+			for _, value := range list {
+				body.WriteString(`<input type="hidden" name="` + template.HTMLEscapeString(key) + `" value="` + template.HTMLEscapeString(value) + `">`)
+			}
+		}
+		body.WriteString(`</form></nav>`)
+	}
+	renderPager()
+	body.WriteString(`<div class="photo-list photo-size-` + strings.ReplaceAll(pageSize, ".", "-") + `">`)
+	for _, photo := range pagePhotos {
+		cardClass := photoCardClass(photo.Faces)
+		body.WriteString(`<article class="card photo-card ` + cardClass + `"><a class="photo-preview" href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `" alt="` + template.HTMLEscapeString(photo.RelativePath) + `"></a><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `">` + template.HTMLEscapeString(photo.RelativePath) + `</a></div><div class="photo-meta">Faces: ` + fmt.Sprint(photo.NeedsReviewCount) + ` / ` + fmt.Sprint(photo.FaceCount) + `; ` + photoPeopleSummary(photo.Faces) + `</div></article>`)
+	}
+	if len(pagePhotos) == 0 {
+		body.WriteString(`<p class="photo-empty">No photos match the active filters.</p>`)
+	}
+	body.WriteString(`</div>`)
+	renderPager()
+	style := template.CSS(`#photos-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#photos-controls .photos-controls-break{flex-basis:100%;height:0}#photos-controls>button{margin-left:4rem}.photos-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.photos-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.photo-size{border:0;padding:0;margin:0;display:flex;gap:.35rem;align-items:center}.photo-list{display:flex;flex-wrap:wrap;gap:18px}.photo-card{width:min(calc(420px * var(--photo-scale)),calc(45vw * var(--photo-scale)));border:2px solid #c62828;padding:10px}.photo-card.assigned{border-color:#0a2}.photo-card.provisional{border-color:#d6a800}.photo-card .photo-preview{display:block}.photo-card img{display:block;width:100%;height:auto;max-height:55vh;object-fit:contain}.photo-card .path{margin-top:8px;overflow-wrap:anywhere}.photo-meta{margin-top:6px;line-height:1.35}.photo-size-0-25{--photo-scale:.25}.photo-size-0-5{--photo-scale:.5}.photo-size-1{--photo-scale:1}.photo-size-1-5{--photo-scale:1.5}.photo-size-2{--photo-scale:2}.photo-empty{width:100%;padding:.75rem;border:1px solid #c62828;background:#fff1f1}@media(max-width:600px){.photo-card{width:100%}}`)
+	s.render(w, map[string]any{"Title": "Photos", "Account": account, "Body": template.HTML(body.String()), "PageStyle": style})
+}
+
+type reviewPhotoCollection struct{ ID, Name string }
+
+func (s *Server) reviewPhotoCollections(ctx context.Context, allowed []string) ([]reviewPhotoCollection, error) {
+	query := `SELECT id, name FROM collections`
+	args := []any{}
+	if allowed != nil {
+		if len(allowed) == 0 {
+			return nil, nil
+		}
+		query += ` WHERE id IN (` + placeholders(len(allowed)) + `)`
+		for _, id := range allowed {
+			args = append(args, id)
+		}
+	}
+	query += ` ORDER BY lower(name), id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []reviewPhotoCollection
+	for rows.Next() {
+		var value reviewPhotoCollection
+		if err := rows.Scan(&value.ID, &value.Name); err != nil {
+			return nil, err
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
+func containsCollection(collections []reviewPhotoCollection, id string) bool {
+	if id == "" {
+		return true
+	}
+	for _, collection := range collections {
+		if collection.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewPhotoAssignmentStates(query url.Values) []string {
+	requested := false
+	for _, value := range query["assignment"] {
+		if value != "" {
+			requested = true
+			break
+		}
+	}
+	if !requested {
+		return nil
+	}
+	var states []string
+	for _, value := range query["assignment"] {
+		switch value {
+		case "assigned-user", "assigned-system", "provisional":
+			states = append(states, value)
+		case "other":
+			states = append(states, "unassigned", "unknown", "ambiguous")
+		}
+	}
+	return states
+}
+
+func reviewPhotoAssignmentSelected(query url.Values, expected string) bool {
+	values, specified := query["assignment"]
+	if !specified {
+		return true
+	}
+	return containsString(values, expected)
+}
+
+func photoAssignedSortKey(photo search.ReviewPhoto) string {
+	if photo.FaceCount == 0 {
+		return "000000000000000000"
+	}
+	return fmt.Sprintf("%09d", photo.AssignedCount*100000/photo.FaceCount)
+}
+
+func photoSize(value string) string {
+	switch value {
+	case "0.25", "0.5", "1", "1.5", "2":
+		return value
+	default:
+		return "1"
+	}
+}
+
+func photoCardClass(faces []search.ReviewPhotoFace) string {
+	if len(faces) == 0 {
+		return "needs-attention"
+	}
+	allAssigned := true
+	allProvisionallySafe := true
+	for _, face := range faces {
+		switch face.State {
+		case "assigned-user", "assigned-system":
+		case "provisional":
+			allAssigned = false
+		default:
+			allAssigned = false
+			allProvisionallySafe = false
+		}
+	}
+	if allAssigned {
+		return "assigned"
+	}
+	if allProvisionallySafe {
+		return "provisional"
+	}
+	return "needs-attention"
+}
+
+func photoPeopleSummary(faces []search.ReviewPhotoFace) string {
+	if len(faces) == 0 {
+		return "Unassigned"
+	}
+	parts := make([]string, 0, len(faces))
+	for index, face := range faces {
+		name := "Unassigned"
+		if face.PersonName != "" {
+			name = template.HTMLEscapeString(face.PersonName)
+		}
+		if face.PersonID != "" && face.PersonName != "" {
+			name = `<a href="/review/people/` + template.HTMLEscapeString(face.PersonID) + `">` + name + `</a>`
+		}
+		parts = append(parts, fmt.Sprintf("%d. %s (%s)", index+1, name, template.HTMLEscapeString(shortAssignment(face.State))))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func shortAssignment(state string) string {
+	switch state {
+	case "assigned-user":
+		return "User"
+	case "assigned-system":
+		return "System"
+	case "provisional":
+		return "Prov"
+	default:
+		return assignmentLabel(state)
+	}
+}
+
+func copyQuery(values url.Values) url.Values {
+	copyValues := url.Values{}
+	for key, list := range values {
+		for _, value := range list {
+			copyValues.Add(key, value)
+		}
+	}
+	return copyValues
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathID string) {
