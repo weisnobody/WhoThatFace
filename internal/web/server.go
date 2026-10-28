@@ -439,48 +439,12 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 			filteredStatuses = append(filteredStatuses, value)
 		}
 	}
-	result, err := search.NewStore(s.db).ReviewPhotos(r.Context(), search.ReviewPhotoOptions{
-		AllowedCollectionIDs: allowed,
-		CollectionID:         collectionID,
-		PathQuery:            query.Get("path"),
-		FaceMode:             faceMode,
-		AssignmentStates:     assignmentStates,
-		StatusFilters:        filteredStatuses,
-		PersonQuery:          query.Get("person"),
-	})
-	if err != nil {
-		http.Error(w, "search failed", http.StatusInternalServerError)
-		return
-	}
 	sortKey := query.Get("sort")
 	if sortKey != "faces" && sortKey != "person" && sortKey != "assigned" && sortKey != "to-assign" {
 		sortKey = "path"
 	}
 	direction := query.Get("direction")
 	desc := direction == "desc"
-	sort.SliceStable(result, func(i, j int) bool {
-		left, right := "", ""
-		switch sortKey {
-		case "faces":
-			left, right = fmt.Sprintf("%09d", result[i].FaceCount), fmt.Sprintf("%09d", result[j].FaceCount)
-		case "assigned":
-			left, right = photoAssignedSortKey(result[i]), photoAssignedSortKey(result[j])
-		case "to-assign":
-			left, right = fmt.Sprintf("%09d", result[i].NeedsReviewCount), fmt.Sprintf("%09d", result[j].NeedsReviewCount)
-		case "person":
-			left, right = result[i].PersonSortName, result[j].PersonSortName
-		default:
-			left, right = strings.ToLower(result[i].RelativePath), strings.ToLower(result[j].RelativePath)
-		}
-		if left == right {
-			left, right = result[i].PathID, result[j].PathID
-		}
-		if desc {
-			return left > right
-		}
-		return left < right
-	})
-	total := len(result)
 	perPage := 10
 	if value, parseErr := strconv.Atoi(query.Get("per_page")); parseErr == nil && (value == 10 || value == 20 || value == 25 || value == 50 || value == 100) {
 		perPage = value
@@ -489,6 +453,24 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 	if value, parseErr := strconv.Atoi(query.Get("page")); parseErr == nil && value > 0 {
 		page = value
 	}
+	result, err := search.NewStore(s.db).ReviewPhotosPage(r.Context(), search.ReviewPhotoOptions{
+		AllowedCollectionIDs: allowed,
+		CollectionID:         collectionID,
+		PathQuery:            query.Get("path"),
+		FaceMode:             faceMode,
+		AssignmentStates:     assignmentStates,
+		StatusFilters:        filteredStatuses,
+		PersonQuery:          query.Get("person"),
+		Sort:                 sortKey,
+		Desc:                 desc,
+		Limit:                perPage,
+		Offset:               (page - 1) * perPage,
+	})
+	if err != nil {
+		http.Error(w, "search failed", http.StatusInternalServerError)
+		return
+	}
+	total := result.Total
 	pageCount := (total + perPage - 1) / perPage
 	if pageCount == 0 {
 		pageCount = 1
@@ -496,14 +478,7 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 	if page > pageCount {
 		page = pageCount
 	}
-	start := (page - 1) * perPage
-	end := minInt(total, start+perPage)
-	pagePhotos := result
-	if start < total {
-		pagePhotos = result[start:end]
-	} else {
-		pagePhotos = nil
-	}
+	pagePhotos := result.Photos
 	pageSize := photoSize(query.Get("photo_size"))
 	pageURL := func(target int) string {
 		values := copyQuery(query)
@@ -3304,17 +3279,43 @@ func (s *Server) photo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) personRepresentative(w http.ResponseWriter, r *http.Request) {
-	_, ok := s.requireAccount(w, r)
+	account, ok := s.requireAccount(w, r)
 	if !ok {
 		return
 	}
 	personID := r.PathValue("personID")
-	var exists int
-	if err := s.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM people WHERE id = ?)`, personID).Scan(&exists); err != nil {
+	allowed, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
 		http.Error(w, "representative lookup failed", http.StatusInternalServerError)
 		return
 	}
-	if exists == 0 {
+	if allowed != nil && len(allowed) == 0 {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	visibleClause := ""
+	args := []any{}
+	if allowed != nil {
+		visibleClause = ` AND pp.collection_id IN (` + placeholders(len(allowed)) + `)`
+		for _, collectionID := range allowed {
+			args = append(args, collectionID)
+		}
+	}
+	args = append(args, personID)
+	var related int
+	err = s.db.QueryRowContext(r.Context(), `WITH visible_faces AS (
+		SELECT DISTINCT f.id FROM faces f JOIN analyses a ON a.id = f.analysis_id JOIN photo_assets pa ON pa.id = a.asset_id JOIN photo_paths pp ON pp.asset_id = pa.id WHERE pp.missing_at IS NULL`+visibleClause+`
+	) SELECT EXISTS(SELECT 1 FROM people p WHERE p.id = ? AND (
+		EXISTS (SELECT 1 FROM current_face_assignments ca JOIN visible_faces vf ON vf.id = ca.face_id WHERE ca.person_id = p.id) OR
+		EXISTS (SELECT 1 FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id JOIN cluster_memberships cm ON cm.cluster_id = c.id JOIN visible_faces vf ON vf.id = cm.face_id WHERE cr.status = 'active' AND c.proposed_person_id = p.id) OR
+		EXISTS (SELECT 1 FROM recognition_candidates rc JOIN visible_faces vf ON vf.id = rc.face_id WHERE rc.person_id = p.id) OR
+		EXISTS (SELECT 1 FROM possible_face_candidates pc JOIN visible_faces vf ON vf.id = pc.face_id WHERE pc.person_id = p.id AND pc.is_current = 1)
+	))`, args...).Scan(&related)
+	if err != nil {
+		http.Error(w, "representative lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if related == 0 {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

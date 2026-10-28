@@ -47,6 +47,10 @@ type ReviewPhotoOptions struct {
 	AssignmentStates     []string
 	StatusFilters        []string // dont-track, unknown, possibles
 	PersonQuery          string
+	Sort                 string
+	Desc                 bool
+	Limit                int
+	Offset               int
 }
 
 type ReviewPhotoFace struct {
@@ -68,6 +72,11 @@ type ReviewPhoto struct {
 	PersonSortName   string
 }
 
+type ReviewPhotoPage struct {
+	Photos []ReviewPhoto
+	Total  int
+}
+
 type Store struct{ db *sql.DB }
 
 func NewStore(database *sql.DB) Store { return Store{db: database} }
@@ -80,23 +89,77 @@ func placeholders(count int) string {
 	return strings.Join(values, ",")
 }
 
-// ReviewPhotos returns permission-scoped photo rows and all faces belonging to
-// each returned photo. The caller supplies the accessible collection IDs; a
-// nil slice means unrestricted access, while an empty slice means no access.
+// ReviewPhotos returns all permission-scoped photo rows for compatibility with
+// callers that do not need pagination. ReviewPhotosPage is used by the web
+// page so filtering, sorting, counting, and pagination remain in SQL.
 func (s Store) ReviewPhotos(ctx context.Context, options ReviewPhotoOptions) ([]ReviewPhoto, error) {
-	query := strings.Builder{}
-	query.WriteString(`SELECT pp.id, pp.collection_id, pp.relative_path, pp.asset_id,
+	options.Limit = 0
+	options.Offset = 0
+	page, err := s.ReviewPhotosPage(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return page.Photos, nil
+}
+
+func (s Store) ReviewPhotosPage(ctx context.Context, options ReviewPhotoOptions) (ReviewPhotoPage, error) {
+	where, args := reviewPhotoWhere(options)
+	groupBy := ` GROUP BY pp.id, pp.collection_id, pp.relative_path, pp.asset_id, pa.capture_date`
+	countQuery := `SELECT COUNT(*) FROM (SELECT pp.id FROM photo_paths pp JOIN photo_assets pa ON pa.id = pp.asset_id LEFT JOIN analyses a ON a.asset_id = pa.id AND a.status IN ('completed', 'completed_with_errors') LEFT JOIN faces f ON f.analysis_id = a.id LEFT JOIN current_face_assignments ca ON ca.face_id = f.id LEFT JOIN people p ON p.id = ca.person_id WHERE pp.missing_at IS NULL` + where + groupBy + `)`
+	var total int
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return ReviewPhotoPage{}, fmt.Errorf("review photo count: %w", err)
+	}
+	if options.Limit > 0 && total > 0 && options.Offset >= total {
+		options.Offset = (total - 1) / options.Limit * options.Limit
+	}
+	query := `SELECT pp.id, pp.collection_id, pp.relative_path, pp.asset_id,
 		COALESCE(pa.capture_date, ''), COUNT(DISTINCT f.id),
 		COUNT(DISTINCT CASE WHEN ca.state IN ('assigned-user', 'assigned-system') THEN f.id END),
 		COUNT(DISTINCT CASE WHEN COALESCE(ca.state, 'unassigned') NOT IN ('assigned-user', 'assigned-system') THEN f.id END),
-		COALESCE(MIN(CASE WHEN p.name IS NOT NULL AND trim(p.name) <> '' THEN lower(p.name) ELSE lower(p.id) END), '')
+		` + reviewPhotoPersonSortExpression() + ` AS person_sort_name
 		FROM photo_paths pp
 		JOIN photo_assets pa ON pa.id = pp.asset_id
 		LEFT JOIN analyses a ON a.asset_id = pa.id AND a.status IN ('completed', 'completed_with_errors')
 		LEFT JOIN faces f ON f.analysis_id = a.id
 		LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
 		LEFT JOIN people p ON p.id = ca.person_id
-		WHERE pp.missing_at IS NULL`)
+		WHERE pp.missing_at IS NULL` + where + groupBy + ` ORDER BY ` + reviewPhotoOrder(options)
+	queryArgs := append([]any{}, args...)
+	if options.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		queryArgs = append(queryArgs, options.Limit, maxIntSearch(options.Offset, 0))
+	}
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return ReviewPhotoPage{}, fmt.Errorf("review photo search: %w", err)
+	}
+	defer rows.Close()
+	var result []ReviewPhoto
+	var assetIDs []string
+	for rows.Next() {
+		var photo ReviewPhoto
+		if err := rows.Scan(&photo.PathID, &photo.CollectionID, &photo.RelativePath, &photo.AssetID, &photo.CaptureDate, &photo.FaceCount, &photo.AssignedCount, &photo.NeedsReviewCount, &photo.PersonSortName); err != nil {
+			return ReviewPhotoPage{}, err
+		}
+		result = append(result, photo)
+		assetIDs = append(assetIDs, photo.AssetID)
+	}
+	if err := rows.Err(); err != nil {
+		return ReviewPhotoPage{}, err
+	}
+	faces, err := s.reviewPhotoFacesForAssets(ctx, assetIDs)
+	if err != nil {
+		return ReviewPhotoPage{}, err
+	}
+	for index := range result {
+		result[index].Faces = faces[result[index].AssetID]
+	}
+	return ReviewPhotoPage{Photos: result, Total: total}, nil
+}
+
+func reviewPhotoWhere(options ReviewPhotoOptions) (string, []any) {
+	query := strings.Builder{}
 	args := []any{}
 	add := func(condition string, values ...any) {
 		query.WriteString(" AND ")
@@ -155,56 +218,83 @@ func (s Store) ReviewPhotos(ctx context.Context, options ReviewPhotoOptions) ([]
 			EXISTS (SELECT 1 FROM analyses ra JOIN faces rf ON rf.analysis_id = ra.id JOIN recognition_candidates rc ON rc.face_id = rf.id JOIN people rp ON rp.id = rc.person_id
 			WHERE ra.asset_id = pp.asset_id AND ra.status IN ('completed', 'completed_with_errors') AND (lower(rc.person_id) LIKE lower(?) OR lower(COALESCE(rp.name, '')) LIKE lower(?))) OR
 			EXISTS (SELECT 1 FROM analyses pa JOIN faces pf ON pf.analysis_id = pa.id JOIN possible_face_candidates pc ON pc.face_id = pf.id AND pc.is_current = 1 JOIN people pp2 ON pp2.id = pc.person_id
-			WHERE pa.asset_id = pp.asset_id AND pa.status IN ('completed', 'completed_with_errors') AND (lower(pc.person_id) LIKE lower(?) OR lower(COALESCE(pp2.name, '')) LIKE lower(?))))`)
-		args = append(args, like, like, like, like, like, like)
+			WHERE pa.asset_id = pp.asset_id AND pa.status IN ('completed', 'completed_with_errors') AND (lower(pc.person_id) LIKE lower(?) OR lower(COALESCE(pp2.name, '')) LIKE lower(?))) OR
+			EXISTS (SELECT 1 FROM analyses caa JOIN faces caf ON caf.analysis_id = caa.id JOIN cluster_memberships cmm ON cmm.face_id = caf.id JOIN clusters ccp ON ccp.id = cmm.cluster_id JOIN clustering_runs crr ON crr.id = ccp.clustering_run_id JOIN people cpp ON cpp.id = ccp.proposed_person_id
+			WHERE caa.asset_id = pp.asset_id AND caa.status IN ('completed', 'completed_with_errors') AND crr.status = 'active' AND (lower(ccp.proposed_person_id) LIKE lower(?) OR lower(COALESCE(cpp.name, '')) LIKE lower(?))))`)
+		args = append(args, like, like, like, like, like, like, like, like)
 	}
-	query.WriteString(" GROUP BY pp.id, pp.collection_id, pp.relative_path, pp.asset_id, pa.capture_date ORDER BY pp.relative_path, pp.id")
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
-	if err != nil {
-		return nil, fmt.Errorf("review photo search: %w", err)
-	}
-	defer rows.Close()
-	var result []ReviewPhoto
-	for rows.Next() {
-		var photo ReviewPhoto
-		if err := rows.Scan(&photo.PathID, &photo.CollectionID, &photo.RelativePath, &photo.AssetID, &photo.CaptureDate, &photo.FaceCount, &photo.AssignedCount, &photo.NeedsReviewCount, &photo.PersonSortName); err != nil {
-			return nil, err
-		}
-		faces, err := s.reviewPhotoFaces(ctx, photo.AssetID)
-		if err != nil {
-			return nil, err
-		}
-		photo.Faces = faces
-		result = append(result, photo)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return query.String(), args
 }
 
-func (s Store) reviewPhotoFaces(ctx context.Context, assetID string) ([]ReviewPhotoFace, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT f.id, f.face_index, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ''), COALESCE(cd.disposition, ''),
+func reviewPhotoPersonSortExpression() string {
+	return `COALESCE((SELECT MIN(person_name) FROM (
+		SELECT lower(COALESCE(NULLIF(ap.name, ''), substr(aca.person_id, -8), aca.person_id)) AS person_name FROM current_face_assignments aca JOIN faces af ON af.id = aca.face_id JOIN analyses aa ON aa.id = af.analysis_id LEFT JOIN people ap ON ap.id = aca.person_id WHERE aa.asset_id = pp.asset_id
+		UNION ALL SELECT lower(COALESCE(NULLIF(cp.name, ''), substr(c.proposed_person_id, -8), c.proposed_person_id)) FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id LEFT JOIN people cp ON cp.id = c.proposed_person_id JOIN faces cf ON cf.id = cm.face_id JOIN analyses caa ON caa.id = cf.analysis_id WHERE caa.asset_id = pp.asset_id AND cr.status = 'active' AND c.proposed_person_id IS NOT NULL
+		UNION ALL SELECT lower(COALESCE(NULLIF(rp.name, ''), substr(rc.person_id, -8), rc.person_id)) FROM recognition_candidates rc JOIN people rp ON rp.id = rc.person_id JOIN faces rf ON rf.id = rc.face_id JOIN analyses ra ON ra.id = rf.analysis_id WHERE ra.asset_id = pp.asset_id
+		UNION ALL SELECT lower(COALESCE(NULLIF(ppp.name, ''), substr(pc.person_id, -8), pc.person_id)) FROM possible_face_candidates pc JOIN people ppp ON ppp.id = pc.person_id JOIN faces pf ON pf.id = pc.face_id JOIN analyses pa2 ON pa2.id = pf.analysis_id WHERE pa2.asset_id = pp.asset_id AND pc.is_current = 1
+	)), '')`
+}
+
+func reviewPhotoOrder(options ReviewPhotoOptions) string {
+	column := "lower(pp.relative_path)"
+	switch options.Sort {
+	case "faces":
+		column = "COUNT(DISTINCT f.id)"
+	case "person":
+		column = "person_sort_name"
+	case "assigned":
+		column = "CASE WHEN COUNT(DISTINCT f.id) = 0 THEN 0 ELSE COUNT(DISTINCT CASE WHEN ca.state IN ('assigned-user', 'assigned-system') THEN f.id END) * 100000 / COUNT(DISTINCT f.id) END"
+	case "to-assign":
+		column = "COUNT(DISTINCT CASE WHEN COALESCE(ca.state, 'unassigned') NOT IN ('assigned-user', 'assigned-system') THEN f.id END)"
+	}
+	direction := "ASC"
+	if options.Desc {
+		direction = "DESC"
+	}
+	return column + " " + direction + ", pp.id ASC"
+}
+
+func (s Store) reviewPhotoFacesForAssets(ctx context.Context, assetIDs []string) (map[string][]ReviewPhotoFace, error) {
+	result := make(map[string][]ReviewPhotoFace)
+	if len(assetIDs) == 0 {
+		return result, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT a.asset_id, f.id, f.face_index, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ''), COALESCE(cd.disposition, ''),
 		(SELECT COUNT(*) FROM possible_face_candidates pc WHERE pc.face_id = f.id AND pc.is_current = 1),
 		(SELECT COUNT(*) FROM recognition_candidates rc WHERE rc.face_id = f.id)
 		FROM analyses a JOIN faces f ON f.analysis_id = a.id
 		LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
 		LEFT JOIN people p ON p.id = ca.person_id
 		LEFT JOIN current_face_dispositions cd ON cd.face_id = f.id
-		WHERE a.asset_id = ? AND a.status IN ('completed', 'completed_with_errors') ORDER BY f.face_index`, assetID)
+		WHERE a.asset_id IN (`+placeholders(len(assetIDs))+`) AND a.status IN ('completed', 'completed_with_errors') ORDER BY a.asset_id, f.face_index`, stringSliceArgs(assetIDs)...)
 	if err != nil {
 		return nil, fmt.Errorf("review photo faces: %w", err)
 	}
 	defer rows.Close()
-	var result []ReviewPhotoFace
 	for rows.Next() {
+		var assetID string
 		var face ReviewPhotoFace
-		if err := rows.Scan(&face.ID, &face.Index, &face.State, &face.PersonID, &face.PersonName, &face.Disposition, &face.PossibleCount, &face.CandidateCount); err != nil {
+		if err := rows.Scan(&assetID, &face.ID, &face.Index, &face.State, &face.PersonID, &face.PersonName, &face.Disposition, &face.PossibleCount, &face.CandidateCount); err != nil {
 			return nil, err
 		}
-		result = append(result, face)
+		result[assetID] = append(result[assetID], face)
 	}
 	return result, rows.Err()
+}
+
+func stringSliceArgs(values []string) []any {
+	args := make([]any, len(values))
+	for index, value := range values {
+		args[index] = value
+	}
+	return args
+}
+
+func maxIntSearch(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func (s Store) Photos(ctx context.Context, options Options) ([]Photo, error) {

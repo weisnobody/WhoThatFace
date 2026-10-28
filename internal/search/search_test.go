@@ -113,4 +113,19 @@ func TestReviewPhotosSupportsFaceAndPersonFilters(t *testing.T) {
 	if len(result) != 1 || result[0].PathID != "p-without-face" {
 		t.Fatalf("no-face review photos = %+v", result)
 	}
+
+	page, err := store.ReviewPhotosPage(context.Background(), ReviewPhotoOptions{Sort: "path", Limit: 1, Offset: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 2 || len(page.Photos) != 1 || page.Photos[0].PathID != "p-without-face" {
+		t.Fatalf("paged review photos = %+v", page)
+	}
+	page, err = store.ReviewPhotosPage(context.Background(), ReviewPhotoOptions{Sort: "path", Limit: 1, Offset: 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Photos) != 1 || page.Photos[0].PathID != "p-without-face" {
+		t.Fatalf("clamped review photos = %+v", page)
+	}
 }
