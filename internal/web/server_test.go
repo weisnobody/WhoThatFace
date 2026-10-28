@@ -717,6 +717,23 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if sizedPhotoResponse.Code != http.StatusOK || !strings.Contains(sizedPhotoResponse.Body.String(), `photo-detail photo-size-0-5`) {
 		t.Fatalf("photo size was not preserved on detail page: status=%d body=%s", sizedPhotoResponse.Code, sizedPhotoResponse.Body.String())
 	}
+	if _, err := database.ExecContext(ctx, `INSERT INTO people (id, name, created_at, updated_at) VALUES ('person-unrelated', 'Unrelated Person', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	candidateImageRequest := httptest.NewRequest(http.MethodGet, "/api/people/person-2/representative", nil)
+	candidateImageRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	candidateImageResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(candidateImageResponse, candidateImageRequest)
+	if candidateImageResponse.Code == http.StatusForbidden {
+		t.Fatalf("candidate person's representative image was denied: status=%d body=%s", candidateImageResponse.Code, candidateImageResponse.Body.String())
+	}
+	unrelatedImageRequest := httptest.NewRequest(http.MethodGet, "/api/people/person-unrelated/representative", nil)
+	unrelatedImageRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	unrelatedImageResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unrelatedImageResponse, unrelatedImageRequest)
+	if unrelatedImageResponse.Code != http.StatusForbidden {
+		t.Fatalf("unrelated person's representative image status = %d, body=%s", unrelatedImageResponse.Code, unrelatedImageResponse.Body.String())
+	}
 	if !strings.Contains(photoResponse.Body.String(), `left:10.000%;top:10.000%;width:20.000%;height:30.000%`) {
 		t.Fatalf("photo page did not render face boxes using analysis dimensions: %s", photoResponse.Body.String())
 	}
