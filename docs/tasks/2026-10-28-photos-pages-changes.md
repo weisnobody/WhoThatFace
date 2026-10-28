@@ -1,194 +1,100 @@
 # Photos Review Pages Alignment Task List
 
-These tasks work to bring the functionality and look of the Photos review pages to align with the people and clusters pages.
+These tasks align `/review/photos` and `/review/photos?path_id=<id>` with the
+people and clusters review pages.
 
 ## Current status
 
-The photo-page alignment work is not yet complete. The checked items below
-are behaviors already present in the current implementation; the remaining
-unchecked items are still outstanding.
-
+The photo-page alignment work is implemented. Rating sorting and
+user/collection-specific display identity are future work and are not part of
+this task.
 
 ## `/review/photos` list page
 
-### Page structure and layout
+### Page structure and filters
 
-The /rev
+- [x] Add a people-style heading with visible and total counts, such as
+  `Photos (10/47)`.
+- [x] Add a dedicated `photos-controls` form with people-page spacing,
+  wrapping, responsive behavior, and Apply behavior.
+- [x] Add path/file-name and accessible-collection filters.
+- [x] Add all/with-faces/without-faces filtering.
+- [x] Add people-style OR assignment controls for User, System, Provisional,
+  and Other faces.
+- [x] Add OR status controls for Don't Track, Unknown, and Possibles.
+- [x] Add person text matching across assigned people, proposed people,
+  recognition candidates, and possible candidates.
+- [x] Preserve submitted filter values and use human-readable labels.
+- [x] Add query-parameter-backed photo-size controls for 1/4, 1/2, 1, 1.5,
+  and 2, defaulting to 1.
 
-- [ ] Add a people-style heading with the visible count and total count, for
-  example `Photos (10/47)`.
-- [ ] Give the controls form a dedicated ID and page-specific style rules.
-- [ ] Match the people page’s control spacing, wrapping, and responsive layout.
+### Sorting and pagination
 
-### Filters
+- [x] Sort by face count, person, assigned percentage, and To Be Assigned.
+- [x] Preserve selected sort and direction.
+- [x] Use photo ID as a stable secondary sort.
+- [x] Add per-page selection, First/Previous/page/Next/Last links, and a
+  page-jump input.
+- [x] Clamp invalid or out-of-range pages consistently with `/review/people`.
+- [x] Preserve filters, sort, direction, and photo size in pagination URLs.
+- Rating sorting is deferred because no photo-level rating source is defined.
 
-- [ ] Add filters for:
-  - [ ] Path / File name input field
-  - [ ] Collection pulldown (All or an individual collection that has photos)
-  - [ ] Photos with / without faces, all (default is All)
-  - [ ] Assignment types (pulldown with the assignment types, including All (default).  When something other than all is selected, only photos with at least 1 face of the specific assignment type will be included in the list
-  - [ ] Pulldown to filter list to filter by photos that at least 1 face  is "Don't Track", Unknown, Possibles (has face with possible candidates identified)
-  - [ ] Person (input field) to filter to photos with a face that may be a person with the text in their name / id.
-- [ ] Render all submitted filter values as selected or populated when the
-  page reloads.
-- [ ] Use human-readable labels instead of raw database values where useful.
-- [ ] Add radio buttons to alter the photo size displayed in the list (1/4, 1/2, 1, 1.5, 2) (default to 1 using the current size)
+### Card presentation and access
 
-### Sorting
+- [x] Render responsive photo cards with people/cluster-style spacing, borders,
+  widths, and whitespace.
+- [x] Show `Faces: <needs review> / <total>` and numbered linked people.
+- [x] Show `Unassigned` without a link when no person is linked.
+- [x] Use `System`, `User`, and `Prov` assignment labels.
+- [x] Apply green, yellow, and red card states based on face assignments.
+- [x] Preserve collection permission filtering and keep all rendered face
+  aggregates within the accessible photo scope.
+- [x] Keep aggregate counts aligned with the returned face scope.
+- [x] Allow authenticated representative-image reads without requiring access
+  to the source photo; original-photo access remains collection-protected.
 
-Add sorting, including option for ascending / descending by:
+## `/review/photos?path_id=<id>` detail page
 
-- [ ] Face count.
-- [ ] Person.
-- [ ] Rating.
-- [ ] Assigned (sort by the percentage of faces that are user / system assigned)
-- [ ] "To Be Assigned" (the number of faces that are not assigned-user / assigned-system)
-- [ ] Render the selected sort option after submission.
-- [ ] Render the selected ascending/descending direction after submission.
-- [ ] Use a stable secondary sort, such as photo ID.
+### Header, summary, and layout
 
-### Pagination
+- [x] Replace “Photo review” with the relative file path.
+- [x] Add a people-style summary for assigned/total faces, linked people, and
+  collection links back to the filtered photo list.
+- [x] Align spacing, typography, borders, responsive grid, and controls with
+  the people and cluster detail pages.
+- [x] Add the shared query-parameter-backed photo-size controls.
+- [x] Show the photo review count and add face numbers to bounding boxes.
 
-Pagination should look / work the same as on the people list page
+### Face cards
 
-- [ ] Add per-page selection.
-- [ ] Add First, Previous, page number, Next, and Last links.
-- [ ] Add a page-jump input.
-- [ ] Clamp invalid or out-of-range page values consistently with the people
-  page.
-- [ ] Preserve active filters and sort options in every pagination URL.
+- [x] Show `Unassigned` when no person is linked.
+- [x] Remove Reference and Don't Track controls.
+- [x] For user/system-assigned faces, show only the face number, person, and
+  assignment type; omit review forms and actions.
+- [x] For other faces, reuse cluster-detail conventions for candidates,
+  possible candidates, cluster context, review actions, and assignment.
+- [x] Show explicit `No cluster` when no active cluster is available.
+- [x] Link displayed people and available cluster context.
+- [x] Render every face in an accessible photo.
 
+## Shared implementation and tests
 
-### Table presentation
+- [x] Reuse people/cluster conventions for controls, pagination, selected
+  values, filter preservation, cards, metadata, and empty states.
+- [x] Preserve account and CSRF protection for existing mutations.
+- [x] Preserve collection access checks for original photos and detail pages.
+- [x] Keep private photos, embeddings, databases, and generated data out of
+  committed fixtures.
+- [x] Add search tests for filters, OR behavior, person matching, face scope,
+  aggregates, no-face behavior, sorting, and stable ties.
+- [x] Add web tests for list controls, selected values, photo size, card
+  output, pagination state, detail summaries, links, face actions, candidate
+  and cluster rendering, and permissions.
+- [x] Run the full Go test suite and `git diff --check`.
 
-Use the same table / card layout as used by the people details page, allowing mulitple photos per row if space permits.
+## Future work
 
-- [ ] Add a dedicated table class matching the people page’s table styling.
-- [ ] Use consistent cell padding, borders, width behavior, and whitespace.
-- [ ] Move the "(<count> faces)" text to the next line and add a count of faces in the photo that need review and the total count of faces i.e. "Faces: 3 / 4; "
-- [ ] After the faces count (same line), show the list of persons linked to the faces like "1. <person name> (<assignment>), 2. <person name> (assignment)".
-    * The person's name should be a link to that person's detail page
-    * If no person is linked, show "Unassigned" as the name with no link
-    * Use "System", "User", "Prov" rather than the full type
-- [ ] Card border color should match that of the people cards.
-  * Green only if all faces are user or system assigned
-  * Yellow if all faces are provisionally assigned are better
-  * Red if any face as an assignment other than user-assigned, system-assigned, or provisional
-
-
-### Access and data scope
-
-- [x] Keep collection-permission filtering consistent with the existing page.
-- [ ] Photos / Faces
-  * [x] If user doesn't have access to any faces in a photo, the photo should not show up in the list
-  * [x] Counts on the photo list page should not include photos that the user does not have access to
- - [ ] representative-images are accessable by any user even if they don't have access to the photo the face comes from
-- [x] Ensure counts and candidate totals use the same accessible face scope as
-  the rows being displayed.
-
-
-## `/review/photos/<id>` / `/review/photos?path_id=<id>` detail page
-
-
-### Header and summary
-
-- [ ] Replace the "Photo review" text with the relative path of the file
-- [ ] On the next line, have a table like on the people pages with columns for:
-  * Faces, with detail being the `<number of faces user/system assigned> / <total faces>`
-  * People, with detail being a comma seperated list of person names linked to faces in the photo (with links to their person detail page)
-  * Collections, with detail being a list of collection names that the photo is included in
-    * Each collection should be a link that opens the photos list page for that collection
-
-### Styles and layout
-
-- [ ] Styles and layout should be consistent with /review/people/<id>.  Use same css style names for both
-- [ ] Establish shared style conventions with the people detail page.
-- [ ] Use a consistent responsive grid and card width strategy
-- [ ] Use shared spacing, typography, border, and control styles.
-- [ ] Ensure the page remains usable on narrow screens.
-
-### Detail filters and sorting
-
-No filtering / sorted needed, but 
-
-- [ ] Add radio buttons to alter the photo size displayed in the list (1/4, 1/2, 1, 1.5, 2) (default to 1 using the same size as the photos detail page)
- 
-
-### Face-card content
-
-- [ ] Display an explicit fallback such as `Unassigned` when no proposed person
-  exists.
-- [ ] Remove the "Reference"  and "Don't track" buttons
-- [ ] After the file name add a count of faces in the photo that need review and the total count of faces " (3 / 4)"
-- [x] Add the face number next ot the bounding box for the face, near the top right corner.
-- [ ] If face is system or user assigned, just show `Face <#>: <Person Name> [<assignment type>]`
-    * No buttons / forms should be shown
-- [ ] For other faces, content should match the content from the /review/clusters/<id> page for a face, 
-    * Modify the first line so it is just: `Face <#>: <Person Name> [<assignment type>]"
-    * [x] Next is the list of candidates
-    * Then the cluster
-    * Then the buttons
-    * Last is form for person assignment
-
-
-### Data and links
-
-- [ ] Link each person name shown to its person detail page.
-- [ ] Link the cluster key/header to any relevant run or cluster context if
-  useful.
-
-## Shared implementation work
-
-- [ ] Reuse existing helpers from the people and clusters details pages for page controls, pagination, selected options, and filter preservation.
-- [ ] Reuse CSS classes for review tables, controls, cards, alerts, metadata, and empty states.
-- [x] Use existing functions for people and cluster specific actions
-- [x] Keep cluster and people review mutations protected by the existing account and CSRF
-  checks.
-- [x] Preserve collection access checks for both list and detail pages.
-- [x] Keep original photos and other private derived data out of generated fixtures and committed test assets.
-
-## Tests
-
-### Cluster list tests
-
-- [ ] Verify the photo page renders its heading and count.
-- [ ] Verify all filters render.
-- [ ] Verify submitted filters remain selected/populated.
-- [ ] Verify the Apply button label and layout-break behavior.
-- [ ] Verify every sort option renders.
-- [ ] Verify selected sort and direction are preserved.
-- [ ] Verify ascending and descending sorting for each supported sort.
-- [ ] Verify stable tie-breaking.
-- [ ] Verify minimum and maximum face filters.
-- [ ] Verify mixed/pure filtering.
-- [ ] Verify review-status filtering.
-- [ ] Verify rating filtering.
-- [ ] Verify Don’t Track filtering.
-- [ ] Verify collection permissions.
-- [ ] Verify pagination and page-jump links preserve all parameters.
-- [ ] Verify preview selection, if previews are added.
-
-### Photo detail tests
-
-- [ ] Verify the header summary fields.
-- [ ] Verify proposed-person and photo/person links.
-- [ ] Verify mixed-cluster warnings and disabled default assignment.
-- [ ] Verify photo controls render with the correct current values.
-- [ ] Verify face cards contain required metadata and actions.
-- [ ] Verify candidate and possible-candidate rendering.
-- [ ] Verify detail filters and sorting, if added.
-- [ ] Verify empty-state behavior.
-- [ ] Verify collection access enforcement.
-- [ ] Verify viewer/editor action differences.
-- [ ] Verify Save review behavior remains protected and version-aware.
-
-## Suggested implementation order
-
-- [ ] Align the photo list form, styles, selected values, and Apply behavior.
-- [ ] Add photo-list count, pagination, and stable sorting.
-- [ ] Align the photo table presentation and optional preview image.
-- [ ] Align the phto detail header, alerts, and page styles.
-- [ ] Align photo face-card content and links.
-- [ ] Add photo size form
-- [ ] Add or update regression tests after each group of changes.
-- [ ] Run the full Go test suite and `git diff --check`.
+- Define and implement photo-level Rating and rating sorting.
+- Define user- and collection-specific display names and representative images
+  in the design/specification review document; this is not part of the photo
+  page alignment work.

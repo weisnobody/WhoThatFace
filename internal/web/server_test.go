@@ -710,6 +710,18 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if !strings.Contains(photoResponse.Body.String(), `left:10.000%;top:10.000%;width:20.000%;height:30.000%`) {
 		t.Fatalf("photo page did not render face boxes using analysis dimensions: %s", photoResponse.Body.String())
 	}
+	listRequest := httptest.NewRequest(http.MethodGet, "/review/photos?path=photo&faces=with&assignment=assigned-user&sort=faces&direction=desc&photo_size=0.5", nil)
+	listRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	listResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("photo list status = %d, body = %s", listResponse.Code, listResponse.Body.String())
+	}
+	for _, value := range []string{"Photos (2/2)", `id="photos-controls"`, `name="path" value="photo"`, `name="faces"`, `value="with" selected`, `name="assignment" value="assigned-user" checked`, `value="faces" selected`, `value="desc" selected`, `value="0.5" checked`, "Faces: 0 / 1", "/review/photos?path_id=path-1"} {
+		if !strings.Contains(listResponse.Body.String(), value) {
+			t.Errorf("photo list is missing %q: %s", value, listResponse.Body.String())
+		}
+	}
 	assignmentIndex := strings.Index(response.Body.String(), `class="person-assignment"`)
 	articleEnd := strings.Index(response.Body.String(), `</article>`)
 	if assignmentIndex < 0 || articleEnd < 0 || assignmentIndex > articleEnd {
