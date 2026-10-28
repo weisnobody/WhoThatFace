@@ -91,8 +91,13 @@ func TestReviewPhotosSupportsFaceAndPersonFilters(t *testing.T) {
 		INSERT INTO faces (id, analysis_id, face_index, box_left, box_top, box_right, box_bottom, detection_confidence, quality, created_at) VALUES
 			('face', 'analysis', 0, 0, 0, 1, 1, .9, .9, CURRENT_TIMESTAMP);
 		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person', 'Alice Example', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO people (id, name, created_at, updated_at) VALUES ('candidate-person', 'Candidate Person', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), ('proposed-person', 'Proposed Person', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO assignment_events (id, face_id, person_id, new_state, actor_type, action, created_at) VALUES ('assignment', 'face', 'person', 'assigned-user', 'user', 'test', CURRENT_TIMESTAMP);
-		INSERT INTO current_face_assignments (face_id, person_id, state, event_id, updated_at) VALUES ('face', 'person', 'assigned-user', 'assignment', CURRENT_TIMESTAMP)`)
+		INSERT INTO current_face_assignments (face_id, person_id, state, event_id, updated_at) VALUES ('face', 'person', 'assigned-user', 'assignment', CURRENT_TIMESTAMP);
+		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate', 'face', 'candidate-person', 1, .9, .1, 1, .9, .9, 'test', CURRENT_TIMESTAMP);
+		INSERT INTO clustering_runs (id, algorithm, algorithm_version, k, similarity_threshold, neighbor_search_method, mutual_edge_policy, candidate_scope, input_face_set_json, status, created_at) VALUES ('run', 'test', '1', 1, .5, 'exact', 'mutual', 'all', '[]', 'active', CURRENT_TIMESTAMP);
+		INSERT INTO clusters (id, clustering_run_id, cluster_key, proposed_person_id, review_status, created_at) VALUES ('cluster', 'run', 'cluster-key', 'proposed-person', 'unreviewed', CURRENT_TIMESTAMP);
+		INSERT INTO cluster_memberships (cluster_id, face_id) VALUES ('cluster', 'face')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,6 +109,14 @@ func TestReviewPhotosSupportsFaceAndPersonFilters(t *testing.T) {
 	}
 	if len(result) != 1 || result[0].PathID != "p-with-face" || len(result[0].Faces) != 1 || result[0].AssignedCount != 1 || result[0].NeedsReviewCount != 0 {
 		t.Fatalf("filtered review photos = %+v", result)
+	}
+	result, err = store.ReviewPhotos(context.Background(), ReviewPhotoOptions{PersonQuery: "candidate-person"})
+	if err != nil || len(result) != 1 {
+		t.Fatalf("recognition-candidate person filter = %+v, error=%v", result, err)
+	}
+	result, err = store.ReviewPhotos(context.Background(), ReviewPhotoOptions{PersonQuery: "proposed-person", Sort: "person"})
+	if err != nil || len(result) != 1 || result[0].PersonSortName != "alice example" {
+		t.Fatalf("proposed-person filter/sort = %+v, error=%v", result, err)
 	}
 
 	result, err = store.ReviewPhotos(context.Background(), ReviewPhotoOptions{FaceMode: "without"})

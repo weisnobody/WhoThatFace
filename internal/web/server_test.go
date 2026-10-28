@@ -707,6 +707,16 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 			t.Errorf("assigned photo face should not render %q: %s", value, photoResponse.Body.String())
 		}
 	}
+	if strings.Contains(photoResponse.Body.String(), "Candidates:") || strings.Contains(photoResponse.Body.String(), `class="photo-cluster"`) {
+		t.Fatalf("assigned photo face should not render candidate or cluster metadata: %s", photoResponse.Body.String())
+	}
+	sizedPhotoRequest := httptest.NewRequest(http.MethodGet, "/review/photos?path_id=path-1&photo_size=0.5", nil)
+	sizedPhotoRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	sizedPhotoResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(sizedPhotoResponse, sizedPhotoRequest)
+	if sizedPhotoResponse.Code != http.StatusOK || !strings.Contains(sizedPhotoResponse.Body.String(), `photo-detail photo-size-0-5`) {
+		t.Fatalf("photo size was not preserved on detail page: status=%d body=%s", sizedPhotoResponse.Code, sizedPhotoResponse.Body.String())
+	}
 	if !strings.Contains(photoResponse.Body.String(), `left:10.000%;top:10.000%;width:20.000%;height:30.000%`) {
 		t.Fatalf("photo page did not render face boxes using analysis dimensions: %s", photoResponse.Body.String())
 	}
