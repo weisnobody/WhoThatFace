@@ -298,3 +298,29 @@ Review whether to:
 14. Clarify remaining decisions around `k`, thresholds, ANN, and reference
     selection.
 
+## 15. Review user- and collection-specific display identity
+
+The current person model provides one default display name and one UI-only
+representative image. A future feature may allow display identity to vary by
+viewer or collection without changing the underlying person identity.
+
+Review whether to support:
+
+- A user-specific name and representative image for a person.
+- A collection-specific name and representative image for a person, managed
+  by an administrator for that collection.
+- A default name and representative image selected from user-provided values.
+- Initial defaults based on the first name and representative image assigned by
+  a user, with administrators able to change the defaults later.
+- Clear precedence when a user-specific, collection-specific, and global
+  person value all exist.
+- Separate permissions for assigning personal overrides, managing collection
+  overrides, and changing global defaults.
+- Audit history, replacement, clearing, and fallback behavior for names and
+  representative images.
+- Privacy and access behavior when a representative image was derived from a
+  face in a collection the viewer cannot access.
+
+This feature is future work and is not part of the photo review page
+alignment implementation.
+
