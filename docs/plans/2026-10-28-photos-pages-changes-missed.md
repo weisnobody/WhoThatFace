@@ -128,3 +128,20 @@ matching/sorting, default-filter alignment, and regression coverage.
 - Proposed and candidate people participate consistently in filtering and
   person sorting.
 - The task checklist and tests accurately reflect the delivered behavior.
+
+## V2 resolution status
+
+The v2 follow-up resolved the remaining behavior details:
+
+- Actionable faces expose the incorrect-assignment action while Reference and
+  Don’t Track remain removed.
+- Assigned-face cards omit candidates, cluster metadata, and actions.
+- List-card person numbering uses persisted face indices.
+- Candidate-only automatic representatives are supported with deterministic
+  priority and ordering.
+- Representative reads remain limited to people related to visible faces in
+  accessible collections.
+- The web list defaults to completed-face photos; `faces=all` and
+  `faces=without` remain explicit modes.
+- Don’t Track is excluded by default and only appears when explicitly
+  selected.

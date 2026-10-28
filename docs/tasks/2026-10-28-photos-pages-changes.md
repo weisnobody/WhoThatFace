@@ -27,6 +27,10 @@ this task.
 - [x] Preserve submitted filter values and use human-readable labels.
 - [x] Add query-parameter-backed photo-size controls for 1/4, 1/2, 1, 1.5,
   and 2, defaulting to 1.
+- [x] Default the web list to completed-face photos; preserve explicit All and
+  Without Faces modes.
+- [x] Exclude Don't Track faces by default while keeping Unknown and Possibles
+  visible; explicit status selections use OR semantics.
 
 ### Sorting and pagination
 
@@ -46,6 +50,7 @@ this task.
 - [x] Show `Faces: <needs review> / <total>` and numbered linked people.
 - [x] Show `Unassigned` without a link when no person is linked.
 - [x] Use `System`, `User`, and `Prov` assignment labels.
+- [x] Number listed people using each face's persisted face index.
 - [x] Apply green, yellow, and red card states based on face assignments.
 - [x] Preserve collection permission filtering and keep all rendered face
   aggregates within the accessible photo scope.
@@ -73,6 +78,8 @@ this task.
   assignment type; omit review forms and actions.
 - [x] For other faces, reuse cluster-detail conventions for candidates,
   possible candidates, cluster context, review actions, and assignment.
+- [x] Include the Incorrect Assignment action for actionable faces while
+  keeping Reference and Don't Track removed.
 - [x] Show explicit `No cluster` when no active cluster is available.
 - [x] Link displayed people and available cluster context.
 - [x] Render every face in an accessible photo.
@@ -90,6 +97,8 @@ this task.
 - [x] Add web tests for list controls, selected values, photo size, card
   output, pagination state, detail summaries, links, face actions, candidate
   and cluster rendering, and permissions.
+- [x] Add representative-selection tests for candidate-only people and deny
+  unrelated person IDs.
 - [x] Run the full Go test suite and `git diff --check`.
 
 ## Future work
