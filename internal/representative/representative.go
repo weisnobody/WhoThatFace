@@ -135,21 +135,39 @@ func (s Store) bestCandidate(ctx context.Context, personID string) (candidate, e
 		SELECT f.id, COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
 		       f.box_left, f.box_top, f.box_right, f.box_bottom
 		FROM faces f
-		JOIN current_face_assignments ca ON ca.face_id = f.id AND ca.person_id = ?
-		LEFT JOIN current_face_references cr ON cr.face_id = f.id AND cr.person_id = ? AND cr.reference = 1
+		JOIN (
+			SELECT ca.face_id, CASE
+				WHEN cr.face_id IS NOT NULL THEN 1
+				WHEN ca.state = 'assigned-user' THEN 2
+				WHEN ca.state = 'assigned-system' THEN 3
+				WHEN ca.state = 'provisional' THEN 4
+				ELSE 5 END AS priority, 0 AS candidate_rank
+			FROM current_face_assignments ca
+			LEFT JOIN current_face_references cr ON cr.face_id = ca.face_id AND cr.person_id = ca.person_id AND cr.reference = 1
+			WHERE ca.person_id = ?
+			UNION ALL
+			SELECT cm.face_id, 5, 0
+			FROM cluster_memberships cm
+			JOIN clusters c ON c.id = cm.cluster_id AND c.proposed_person_id = ?
+			JOIN clustering_runs run ON run.id = c.clustering_run_id AND run.status = 'active'
+			UNION ALL
+			SELECT rc.face_id, 6, rc.rank
+			FROM recognition_candidates rc
+			WHERE rc.person_id = ?
+			UNION ALL
+			SELECT pc.face_id, 7, pc.rank
+			FROM possible_face_candidates pc
+			WHERE pc.person_id = ? AND pc.is_current = 1
+		) source ON source.face_id = f.id
 		WHERE NOT EXISTS (
 			SELECT 1 FROM current_face_dispositions cd
 			WHERE cd.face_id = f.id AND cd.disposition IN ('false-detection', 'incorrect-assignment')
 		)
-		ORDER BY CASE
-			WHEN cr.face_id IS NOT NULL THEN 1
-			WHEN ca.state = 'assigned-user' THEN 2
-			WHEN ca.state = 'assigned-system' THEN 3
-			WHEN ca.state = 'provisional' THEN 4
-			ELSE 5 END,
+		GROUP BY f.id, f.quality, f.detection_confidence, f.box_left, f.box_top, f.box_right, f.box_bottom
+		ORDER BY MIN(source.priority), MIN(source.candidate_rank),
 			COALESCE(f.quality, 0) DESC,
 			COALESCE(f.detection_confidence, 0) DESC,
-			f.id`, personID, personID)
+			f.id`, personID, personID, personID, personID)
 	if err != nil {
 		return candidate{}, err
 	}

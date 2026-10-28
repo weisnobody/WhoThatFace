@@ -749,6 +749,25 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 			t.Errorf("photo list is missing %q: %s", value, listResponse.Body.String())
 		}
 	}
+	if _, err := database.ExecContext(ctx, `UPDATE current_face_assignments SET state = 'unknown' WHERE face_id = 'face-1'`); err != nil {
+		t.Fatal(err)
+	}
+	unresolvedRequest := httptest.NewRequest(http.MethodGet, "/review/photos?path_id=path-1", nil)
+	unresolvedRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
+	unresolvedResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unresolvedResponse, unresolvedRequest)
+	if unresolvedResponse.Code != http.StatusOK {
+		t.Fatalf("unresolved photo review status = %d, body=%s", unresolvedResponse.Code, unresolvedResponse.Body.String())
+	}
+	unresolvedBody := unresolvedResponse.Body.String()
+	for _, value := range []string{"Candidates:", `class="photo-cluster"`, `data-disposition="incorrect-assignment"`, `data-assignment-person="face-1"`} {
+		if !strings.Contains(unresolvedBody, value) {
+			t.Fatalf("unresolved photo review missing %q: %s", value, unresolvedBody)
+		}
+	}
+	if strings.Index(unresolvedBody, "Candidates:") > strings.Index(unresolvedBody, `class="photo-cluster"`) || strings.Index(unresolvedBody, `class="photo-cluster"`) > strings.Index(unresolvedBody, `data-disposition="incorrect-assignment"`) || strings.Index(unresolvedBody, `data-disposition="incorrect-assignment"`) > strings.Index(unresolvedBody, `data-assignment-person="face-1"`) {
+		t.Fatalf("unresolved photo review controls are out of order: %s", unresolvedBody)
+	}
 	assignmentIndex := strings.Index(response.Body.String(), `class="person-assignment"`)
 	articleEnd := strings.Index(response.Body.String(), `</article>`)
 	if assignmentIndex < 0 || articleEnd < 0 || assignmentIndex > articleEnd {

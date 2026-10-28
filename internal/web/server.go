@@ -427,7 +427,9 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 		collectionID = ""
 	}
 	faceMode := query.Get("faces")
-	if faceMode != "with" && faceMode != "without" {
+	if faceMode == "" {
+		faceMode = "with"
+	} else if faceMode != "all" && faceMode != "with" && faceMode != "without" {
 		faceMode = "all"
 	}
 	assignmentStates := reviewPhotoAssignmentStates(query)
@@ -460,6 +462,7 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 		FaceMode:             faceMode,
 		AssignmentStates:     assignmentStates,
 		StatusFilters:        filteredStatuses,
+		ExcludeDontTrack:     !containsString(filteredStatuses, "dont-track"),
 		PersonQuery:          query.Get("person"),
 		Sort:                 sortKey,
 		Desc:                 desc,
@@ -659,7 +662,7 @@ func photoPeopleSummary(faces []search.ReviewPhotoFace) string {
 		return "Unassigned"
 	}
 	parts := make([]string, 0, len(faces))
-	for index, face := range faces {
+	for _, face := range faces {
 		name := "Unassigned"
 		if face.PersonName != "" {
 			name = template.HTMLEscapeString(face.PersonName)
@@ -667,7 +670,7 @@ func photoPeopleSummary(faces []search.ReviewPhotoFace) string {
 		if face.PersonID != "" && face.PersonName != "" {
 			name = `<a href="/review/people/` + template.HTMLEscapeString(face.PersonID) + `">` + name + `</a>`
 		}
-		parts = append(parts, fmt.Sprintf("%d. %s (%s)", index+1, name, template.HTMLEscapeString(shortAssignment(face.State))))
+		parts = append(parts, fmt.Sprintf("%d. %s (%s)", face.Index+1, name, template.HTMLEscapeString(shortAssignment(face.State))))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -916,7 +919,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 			}
 		}
 		if account.Role != auth.Viewer && !assigned {
-			body.WriteString(`<div class="photo-actions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Ambiguous</button><button type="button" data-action="disposition" data-disposition="false-detection" data-face-id="` + template.HTMLEscapeString(value.ID) + `">False detection</button><select data-assignment-person="` + template.HTMLEscapeString(value.ID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+			body.WriteString(`<div class="photo-actions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Ambiguous</button><button type="button" data-action="disposition" data-disposition="incorrect-assignment" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Incorrect assignment</button><button type="button" data-action="disposition" data-disposition="false-detection" data-face-id="` + template.HTMLEscapeString(value.ID) + `">False detection</button><select data-assignment-person="` + template.HTMLEscapeString(value.ID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
 			for _, person := range people {
 				body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selectedAttr(person.ID, value.PersonID) + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
 			}

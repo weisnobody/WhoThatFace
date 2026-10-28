@@ -47,7 +47,7 @@ func TestEnsureUsesReferencePriorityAndCreatesBoundedSquare(t *testing.T) {
 		INSERT INTO photo_paths (id, collection_id, asset_id, relative_path, first_seen_at, last_seen_at, file_size, media_kind) VALUES ('path', 'collection', 'asset', 'photo.png', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'still');
 		INSERT INTO pipelines (id, model_family, model_version, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension, embedding_dtype, normalization, execution_provider, dependency_versions_json, created_at) VALUES ('pipeline', 'test', '1', '{}', '{}', '{}', 1, 'float32', 'l2', 'CPU', '{}', CURRENT_TIMESTAMP);
 		INSERT INTO analyses (id, asset_id, pipeline_id, status, source_width, source_height, created_at) VALUES ('analysis', 'asset', 'pipeline', 'completed', 200, 100, CURRENT_TIMESTAMP);
-		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person', 'Person', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`, root)
+		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person', 'Person', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP), ('candidate', 'Candidate', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +76,9 @@ func TestEnsureUsesReferencePriorityAndCreatesBoundedSquare(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO reference_selection_events (id, face_id, person_id, reference, reason, created_at) VALUES ('ref-event', 'reference', 'person', 1, 'test', CURRENT_TIMESTAMP); INSERT INTO current_face_references (face_id, person_id, reference, event_id, updated_at) VALUES ('reference', 'person', 1, 'ref-event', CURRENT_TIMESTAMP)`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.Exec(`INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-event', 'user', 'candidate', 1, .9, .1, 1, .99, .8, 'test', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
 
 	result, err := NewStore(database).Ensure(context.Background(), "person")
 	if err != nil {
@@ -86,6 +89,13 @@ func TestEnsureUsesReferencePriorityAndCreatesBoundedSquare(t *testing.T) {
 	}
 	if result.Width != result.Height || result.Width > 96 || result.MIMEType != "image/png" || len(result.Data) == 0 {
 		t.Fatalf("invalid representative image metadata: %#v", result)
+	}
+	candidateImage, err := NewStore(database).Ensure(context.Background(), "candidate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidateImage.FaceID != "user" || candidateImage.SelectionMode != "automatic" || len(candidateImage.Data) == 0 {
+		t.Fatalf("candidate-only representative = %#v", candidateImage)
 	}
 
 	if _, err := NewStore(database).Select(context.Background(), "person", "user", review.Actor{Type: "user"}); err != nil {

@@ -141,4 +141,15 @@ func TestReviewPhotosSupportsFaceAndPersonFilters(t *testing.T) {
 	if len(page.Photos) != 1 || page.Photos[0].PathID != "p-without-face" {
 		t.Fatalf("clamped review photos = %+v", page)
 	}
+	if _, err := database.Exec(`INSERT INTO face_disposition_events (id, face_id, disposition, active, created_at) VALUES ('dont-track-event', 'face', 'dont-track', 1, CURRENT_TIMESTAMP); INSERT INTO current_face_dispositions (face_id, disposition, event_id, updated_at) VALUES ('face', 'dont-track', 'dont-track-event', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	result, err = store.ReviewPhotos(context.Background(), ReviewPhotoOptions{FaceMode: "with", ExcludeDontTrack: true})
+	if err != nil || len(result) != 0 {
+		t.Fatalf("default dont-track exclusion = %+v, error=%v", result, err)
+	}
+	result, err = store.ReviewPhotos(context.Background(), ReviewPhotoOptions{FaceMode: "with", StatusFilters: []string{"dont-track"}})
+	if err != nil || len(result) != 1 {
+		t.Fatalf("explicit dont-track filter = %+v, error=%v", result, err)
+	}
 }

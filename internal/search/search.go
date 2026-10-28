@@ -46,6 +46,7 @@ type ReviewPhotoOptions struct {
 	FaceMode             string // all, with, without
 	AssignmentStates     []string
 	StatusFilters        []string // dont-track, unknown, possibles
+	ExcludeDontTrack     bool
 	PersonQuery          string
 	Sort                 string
 	Desc                 bool
@@ -208,6 +209,9 @@ func reviewPhotoWhere(options ReviewPhotoOptions) (string, []any) {
 		if len(conditions) > 0 {
 			query.WriteString(" AND (" + strings.Join(conditions, " OR ") + ")")
 		}
+	}
+	if options.ExcludeDontTrack {
+		query.WriteString(` AND NOT EXISTS (SELECT 1 FROM analyses nda JOIN faces ndf ON ndf.analysis_id = nda.id JOIN current_face_dispositions ndd ON ndd.face_id = ndf.id WHERE nda.asset_id = pp.asset_id AND nda.status IN ('completed', 'completed_with_errors') AND ndd.disposition = 'dont-track')`)
 	}
 	if value := strings.TrimSpace(options.PersonQuery); value != "" {
 		like := "%" + value + "%"
