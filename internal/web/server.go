@@ -743,8 +743,20 @@ type photoDetailFace struct {
 
 type photoDetailCollection struct{ ID, Name string }
 
-func (s *Server) photoDetailCollections(ctx context.Context, assetID string) ([]photoDetailCollection, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT c.id, c.name FROM photo_paths pp JOIN collections c ON c.id = pp.collection_id WHERE pp.asset_id = ? AND pp.missing_at IS NULL ORDER BY lower(c.name), c.id`, assetID)
+func (s *Server) photoDetailCollections(ctx context.Context, assetID string, allowed []string) ([]photoDetailCollection, error) {
+	query := `SELECT DISTINCT c.id, c.name FROM photo_paths pp JOIN collections c ON c.id = pp.collection_id WHERE pp.asset_id = ? AND pp.missing_at IS NULL`
+	args := []any{assetID}
+	if allowed != nil {
+		if len(allowed) == 0 {
+			return nil, nil
+		}
+		query += ` AND pp.collection_id IN (` + placeholders(len(allowed)) + `)`
+		for _, collectionID := range allowed {
+			args = append(args, collectionID)
+		}
+	}
+	query += ` ORDER BY lower(c.name), c.id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -852,7 +864,12 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		http.Error(w, "face lookup failed", http.StatusInternalServerError)
 		return
 	}
-	collections, err := s.photoDetailCollections(r.Context(), assetID)
+	accessibleCollections, err := s.auth.AccessibleCollections(r.Context(), account.ID)
+	if err != nil {
+		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
+		return
+	}
+	collections, err := s.photoDetailCollections(r.Context(), assetID, accessibleCollections)
 	if err != nil {
 		http.Error(w, "collection lookup failed", http.StatusInternalServerError)
 		return
@@ -909,18 +926,21 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 			body.WriteString(template.HTMLEscapeString(personName))
 		}
 		body.WriteString(` [` + template.HTMLEscapeString(shortAssignment(value.State)) + `]</div>`)
-		if len(value.PossibleCandidates) > 0 {
-			body.WriteString(renderPossibleMatches(value.PossibleCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
+		assigned := value.State == string(review.AssignedUser) || value.State == string(review.AssignedSystem)
+		if !assigned {
+			if len(value.PossibleCandidates) > 0 {
+				body.WriteString(renderPossibleMatches(value.PossibleCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
+			}
+			if len(value.RecognitionCandidates) > 0 {
+				body.WriteString(renderRecognitionCandidates(value.RecognitionCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
+			}
+			if value.ClusterID != "" {
+				body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> <a href="/review/clusters/` + template.HTMLEscapeString(value.ClusterID) + `">` + template.HTMLEscapeString(value.ClusterKey) + `</a></p>`)
+			} else {
+				body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> No cluster</p>`)
+			}
 		}
-		if len(value.RecognitionCandidates) > 0 {
-			body.WriteString(renderRecognitionCandidates(value.RecognitionCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
-		}
-		if value.ClusterID != "" {
-			body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> <a href="/review/clusters/` + template.HTMLEscapeString(value.ClusterID) + `">` + template.HTMLEscapeString(value.ClusterKey) + `</a></p>`)
-		} else {
-			body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> No cluster</p>`)
-		}
-		if account.Role != auth.Viewer && value.State != string(review.AssignedUser) && value.State != string(review.AssignedSystem) {
+		if account.Role != auth.Viewer && !assigned {
 			body.WriteString(`<div class="photo-actions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Ambiguous</button><button type="button" data-action="disposition" data-disposition="false-detection" data-face-id="` + template.HTMLEscapeString(value.ID) + `">False detection</button><select data-assignment-person="` + template.HTMLEscapeString(value.ID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
 			for _, person := range people {
 				body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selectedAttr(person.ID, value.PersonID) + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
@@ -934,7 +954,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	if account.Role != auth.Viewer {
 		body.WriteString(`<script src="/static/photo.js" defer></script>`)
 	}
-	pageStyle := template.CSS(`#photo-page{max-width:100%}.photo-header{display:block;position:sticky;top:0;z-index:10;background:#fff;padding:4px 0}.photo-header h1{margin:.15rem 0;overflow-wrap:anywhere}.photo-summary-table{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0}.photo-summary-table>div{min-width:7rem}.photo-summary-table dt{font-size:.8em;color:#555}.photo-summary-table dd{margin:2px 0 0;font-weight:600}.photo-summary-table a{font-weight:600}.photo-path-summary{margin:.5rem 0}.photo-detail{position:relative;display:inline-block;max-width:100%}.photo-detail>img{display:block;max-width:90vw;max-height:70vh}.photo-boxes{position:absolute;inset:0}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15);pointer-events:none}.photo-box strong{position:absolute;right:0;top:0;background:#fff;color:#900;padding:1px 3px;font-size:.75rem}.photo-face-grid{display:flex;flex-wrap:wrap;gap:18px;margin-top:18px}.photo-face{width:min(420px,45vw);border:2px solid #c62828;padding:10px}.photo-face.assigned{border-color:#0a2}.photo-face.provisional{border-color:#d6a800}.photo-face.needs-attention{border-color:#c62828}.photo-face-heading{font-size:1rem;line-height:1.35}.photo-face .candidate-list,.photo-face .person-candidates{font-size:.9em;line-height:1.35;margin-top:6px}.photo-cluster{margin:.5rem 0}.photo-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}.photo-actions select{max-width:100%}.photo-size{border:0;padding:0;margin:.5rem 0;display:flex;gap:.35rem;align-items:center}@media(max-width:600px){.photo-face{width:100%}}`)
+	pageStyle := template.CSS(`#photo-page{max-width:100%}.photo-header{display:block;position:sticky;top:0;z-index:10;background:#fff;padding:4px 0}.photo-header h1{margin:.15rem 0;overflow-wrap:anywhere}.photo-summary-table{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0}.photo-summary-table>div{min-width:7rem}.photo-summary-table dt{font-size:.8em;color:#555}.photo-summary-table dd{margin:2px 0 0;font-weight:600}.photo-summary-table a{font-weight:600}.photo-path-summary{margin:.5rem 0}.photo-detail{position:relative;display:inline-block;max-width:100%}.photo-detail>img{display:block;max-width:90vw;max-height:70vh}.photo-detail.photo-size-0-25>img{max-width:22.5vw;max-height:17.5vh}.photo-detail.photo-size-0-5>img{max-width:45vw;max-height:35vh}.photo-detail.photo-size-1>img{max-width:90vw;max-height:70vh}.photo-detail.photo-size-1-5>img{max-width:100vw;max-height:90vh}.photo-detail.photo-size-2>img{max-width:100vw;max-height:100vh}.photo-boxes{position:absolute;inset:0}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15);pointer-events:none}.photo-box strong{position:absolute;right:0;top:0;background:#fff;color:#900;padding:1px 3px;font-size:.75rem}.photo-face-grid{display:flex;flex-wrap:wrap;gap:18px;margin-top:18px}.photo-face{width:min(420px,45vw);border:2px solid #c62828;padding:10px}.photo-face.assigned{border-color:#0a2}.photo-face.provisional{border-color:#d6a800}.photo-face.needs-attention{border-color:#c62828}.photo-face-heading{font-size:1rem;line-height:1.35}.photo-face .candidate-list,.photo-face .person-candidates{font-size:.9em;line-height:1.35;margin-top:6px}.photo-cluster{margin:.5rem 0}.photo-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}.photo-actions select{max-width:100%}.photo-size{border:0;padding:0;margin:.5rem 0;display:flex;gap:.35rem;align-items:center}@media(max-width:600px){.photo-face{width:100%}.photo-detail.photo-size-0-25>img,.photo-detail.photo-size-0-5>img{max-width:90vw;max-height:70vh}}`)
 	s.render(w, map[string]any{"Title": relative, "Account": account, "Breadcrumb": template.HTML(`<a href="/review/photos">Photos</a>`), "Body": template.HTML(body.String()), "PageStyle": pageStyle})
 }
 

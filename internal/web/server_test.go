@@ -697,7 +697,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if photoResponse.Code != http.StatusOK {
 		t.Fatalf("photo review status = %d, body = %s", photoResponse.Code, photoResponse.Body.String())
 	}
-	for _, value := range []string{`class="breadcrumb">› <a href="/review/photos">Photos</a>`, "person/photo.jpg", "Face 1", "photo-box", "Faces", "People", "Collections", "/review/people/person-1", "/review/clusters/cluster-active", "/static/photo.js"} {
+	for _, value := range []string{`class="breadcrumb">› <a href="/review/photos">Photos</a>`, "person/photo.jpg", "Face 1", "photo-box", "Faces", "People", "Collections", "/review/people/person-1", "/static/photo.js"} {
 		if !strings.Contains(photoResponse.Body.String(), value) {
 			t.Errorf("photo review is missing %q: %s", value, photoResponse.Body.String())
 		}
