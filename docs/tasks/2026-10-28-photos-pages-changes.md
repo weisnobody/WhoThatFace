@@ -2,6 +2,12 @@
 
 These tasks work to bring the functionality and look of the Photos review pages to align with the people and clusters pages.
 
+## Current status
+
+The photo-page alignment work is not yet complete. The checked items below
+are behaviors already present in the current implementation; the remaining
+unchecked items are still outstanding.
+
 
 ## `/review/photos` list page
 
@@ -72,12 +78,12 @@ Use the same table / card layout as used by the people details page, allowing mu
 
 ### Access and data scope
 
-- [ ] Keep collection-permission filtering consistent with the existing page.
+- [x] Keep collection-permission filtering consistent with the existing page.
 - [ ] Photos / Faces
-  * If user doesn't have access to any faces in a photo, the photo should not show up in the list
-  * Counts on the photo list page should not include photos that the user does not have access to
+  * [x] If user doesn't have access to any faces in a photo, the photo should not show up in the list
+  * [x] Counts on the photo list page should not include photos that the user does not have access to
  - [ ] representative-images are accessable by any user even if they don't have access to the photo the face comes from
-- [ ] Ensure counts and candidate totals use the same accessible face scope as
+- [x] Ensure counts and candidate totals use the same accessible face scope as
   the rows being displayed.
 
 
@@ -114,12 +120,12 @@ No filtering / sorted needed, but
   exists.
 - [ ] Remove the "Reference"  and "Don't track" buttons
 - [ ] After the file name add a count of faces in the photo that need review and the total count of faces " (3 / 4)"
-- [ ] Add the face number next ot the bounding box for the face, near the top right corner. 
+- [x] Add the face number next ot the bounding box for the face, near the top right corner.
 - [ ] If face is system or user assigned, just show `Face <#>: <Person Name> [<assignment type>]`
     * No buttons / forms should be shown
 - [ ] For other faces, content should match the content from the /review/clusters/<id> page for a face, 
     * Modify the first line so it is just: `Face <#>: <Person Name> [<assignment type>]"
-    * Next is the list of candidates
+    * [x] Next is the list of candidates
     * Then the cluster
     * Then the buttons
     * Last is form for person assignment
@@ -135,11 +141,11 @@ No filtering / sorted needed, but
 
 - [ ] Reuse existing helpers from the people and clusters details pages for page controls, pagination, selected options, and filter preservation.
 - [ ] Reuse CSS classes for review tables, controls, cards, alerts, metadata, and empty states.
-- [ ] Use existing functions for people and cluster specific actions
-- [ ] Keep cluster and people review mutations protected by the existing account and CSRF
+- [x] Use existing functions for people and cluster specific actions
+- [x] Keep cluster and people review mutations protected by the existing account and CSRF
   checks.
-- [ ] Preserve collection access checks for both list and detail pages.
-- [ ] Keep original photos and other private derived data out of generated fixtures and committed test assets.
+- [x] Preserve collection access checks for both list and detail pages.
+- [x] Keep original photos and other private derived data out of generated fixtures and committed test assets.
 
 ## Tests
 
