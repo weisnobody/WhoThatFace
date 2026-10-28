@@ -3284,13 +3284,17 @@ func (s *Server) photo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) personRepresentative(w http.ResponseWriter, r *http.Request) {
-	account, ok := s.requireAccount(w, r)
+	_, ok := s.requireAccount(w, r)
 	if !ok {
 		return
 	}
 	personID := r.PathValue("personID")
-	allowed, err := s.personPermission(r, account, personID, false)
-	if err != nil || !allowed {
+	var exists int
+	if err := s.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM people WHERE id = ?)`, personID).Scan(&exists); err != nil {
+		http.Error(w, "representative lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if exists == 0 {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}

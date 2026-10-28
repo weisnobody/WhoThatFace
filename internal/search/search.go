@@ -148,13 +148,14 @@ func (s Store) ReviewPhotos(ctx context.Context, options ReviewPhotoOptions) ([]
 	}
 	if value := strings.TrimSpace(options.PersonQuery); value != "" {
 		like := "%" + value + "%"
-		query.WriteString(` AND EXISTS (SELECT 1 FROM analyses qa JOIN faces qf ON qf.analysis_id = qa.id
+		query.WriteString(` AND (EXISTS (SELECT 1 FROM analyses qa JOIN faces qf ON qf.analysis_id = qa.id
 			LEFT JOIN current_face_assignments qca ON qca.face_id = qf.id
 			LEFT JOIN people qp ON qp.id = qca.person_id
-			WHERE qa.asset_id = pp.asset_id AND qa.status IN ('completed', 'completed_with_errors') AND
-			(lower(COALESCE(qp.id, '')) LIKE lower(?) OR lower(COALESCE(qp.name, '')) LIKE lower(?) OR
-			 EXISTS (SELECT 1 FROM recognition_candidates qrc JOIN people qrp ON qrp.id = qrc.person_id WHERE qrc.face_id = qf.id AND (lower(qrc.person_id) LIKE lower(?) OR lower(COALESCE(qrp.name, '')) LIKE lower(?))) OR
-			 EXISTS (SELECT 1 FROM possible_face_candidates qpc JOIN people qpp ON qpp.id = qpc.person_id WHERE qpc.face_id = qf.id AND qpc.is_current = 1 AND (lower(qpc.person_id) LIKE lower(?) OR lower(COALESCE(qpp.name, '')) LIKE lower(?))))`)
+			WHERE qa.asset_id = pp.asset_id AND qa.status IN ('completed', 'completed_with_errors') AND (lower(COALESCE(qp.id, '')) LIKE lower(?) OR lower(COALESCE(qp.name, '')) LIKE lower(?))) OR
+			EXISTS (SELECT 1 FROM analyses ra JOIN faces rf ON rf.analysis_id = ra.id JOIN recognition_candidates rc ON rc.face_id = rf.id JOIN people rp ON rp.id = rc.person_id
+			WHERE ra.asset_id = pp.asset_id AND ra.status IN ('completed', 'completed_with_errors') AND (lower(rc.person_id) LIKE lower(?) OR lower(COALESCE(rp.name, '')) LIKE lower(?))) OR
+			EXISTS (SELECT 1 FROM analyses pa JOIN faces pf ON pf.analysis_id = pa.id JOIN possible_face_candidates pc ON pc.face_id = pf.id AND pc.is_current = 1 JOIN people pp2 ON pp2.id = pc.person_id
+			WHERE pa.asset_id = pp.asset_id AND pa.status IN ('completed', 'completed_with_errors') AND (lower(pc.person_id) LIKE lower(?) OR lower(COALESCE(pp2.name, '')) LIKE lower(?))))`)
 		args = append(args, like, like, like, like, like, like)
 	}
 	query.WriteString(" GROUP BY pp.id, pp.collection_id, pp.relative_path, pp.asset_id, pa.capture_date ORDER BY pp.relative_path, pp.id")

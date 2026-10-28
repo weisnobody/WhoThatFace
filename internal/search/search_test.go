@@ -69,3 +69,48 @@ func TestOnlyConfirmedExcludesAssignedSystem(t *testing.T) {
 		t.Fatalf("assigned-user result = %+v, error=%v", result, err)
 	}
 }
+
+func TestReviewPhotosSupportsFaceAndPersonFilters(t *testing.T) {
+	database, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "review-photos.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	_, err = database.Exec(`
+		INSERT INTO collections (id, name, root_path, created_at, updated_at) VALUES ('c', 'Photos', '/photos', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO photo_assets (id, content_sha256, byte_size, media_kind, created_at, updated_at) VALUES
+			('a-with-face', 'hash-with-face', 1, 'still', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP),
+			('a-without-face', 'hash-without-face', 1, 'still', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO photo_paths (id, collection_id, asset_id, relative_path, first_seen_at, last_seen_at, file_size, media_kind) VALUES
+			('p-with-face', 'c', 'a-with-face', 'with-face.jpg', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'still'),
+			('p-without-face', 'c', 'a-without-face', 'without-face.jpg', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'still');
+		INSERT INTO pipelines (id, model_family, model_version, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension, embedding_dtype, normalization, execution_provider, dependency_versions_json, created_at) VALUES
+			('pipe', 'test', '1', '{}', '{}', '{}', 2, 'float32', 'l2', 'cpu', '{}', CURRENT_TIMESTAMP);
+		INSERT INTO analyses (id, asset_id, pipeline_id, status, source_width, source_height, created_at) VALUES
+			('analysis', 'a-with-face', 'pipe', 'completed', 10, 10, CURRENT_TIMESTAMP);
+		INSERT INTO faces (id, analysis_id, face_index, box_left, box_top, box_right, box_bottom, detection_confidence, quality, created_at) VALUES
+			('face', 'analysis', 0, 0, 0, 1, 1, .9, .9, CURRENT_TIMESTAMP);
+		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person', 'Alice Example', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO assignment_events (id, face_id, person_id, new_state, actor_type, action, created_at) VALUES ('assignment', 'face', 'person', 'assigned-user', 'user', 'test', CURRENT_TIMESTAMP);
+		INSERT INTO current_face_assignments (face_id, person_id, state, event_id, updated_at) VALUES ('face', 'person', 'assigned-user', 'assignment', CURRENT_TIMESTAMP)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(database)
+	result, err := store.ReviewPhotos(context.Background(), ReviewPhotoOptions{FaceMode: "with", AssignmentStates: []string{"assigned-user"}, PersonQuery: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 1 || result[0].PathID != "p-with-face" || len(result[0].Faces) != 1 || result[0].AssignedCount != 1 || result[0].NeedsReviewCount != 0 {
+		t.Fatalf("filtered review photos = %+v", result)
+	}
+
+	result, err = store.ReviewPhotos(context.Background(), ReviewPhotoOptions{FaceMode: "without"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result) != 1 || result[0].PathID != "p-without-face" {
+		t.Fatalf("no-face review photos = %+v", result)
+	}
+}
