@@ -697,9 +697,14 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if photoResponse.Code != http.StatusOK {
 		t.Fatalf("photo review status = %d, body = %s", photoResponse.Code, photoResponse.Body.String())
 	}
-	for _, value := range []string{`class="breadcrumb">› <a href="/review/photos">Photos</a>`, "Face 1", "photo-box", "data-action=\"unknown\"", "data-action=\"ambiguous\"", "data-action=\"assign\"", "data-action=\"role\"", "/static/photo.js"} {
+	for _, value := range []string{`class="breadcrumb">› <a href="/review/photos">Photos</a>`, "person/photo.jpg", "Face 1", "photo-box", "Faces", "People", "Collections", "/review/people/person-1", "/review/clusters/cluster-active", "/static/photo.js"} {
 		if !strings.Contains(photoResponse.Body.String(), value) {
 			t.Errorf("photo review is missing %q: %s", value, photoResponse.Body.String())
+		}
+	}
+	for _, value := range []string{`data-action="unknown"`, `data-action="ambiguous"`, `data-action="assign"`, `data-action="role"`, `data-disposition="dont-track"`} {
+		if strings.Contains(photoResponse.Body.String(), value) {
+			t.Errorf("assigned photo face should not render %q: %s", value, photoResponse.Body.String())
 		}
 	}
 	if !strings.Contains(photoResponse.Body.String(), `left:10.000%;top:10.000%;width:20.000%;height:30.000%`) {
