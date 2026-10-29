@@ -721,7 +721,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if photoResponse.Code != http.StatusOK {
 		t.Fatalf("photo review status = %d, body = %s", photoResponse.Code, photoResponse.Body.String())
 	}
-	for _, value := range []string{`class="breadcrumb">› <a href="/review/photos">Photos</a>`, "person/photo.jpg", "Face 1", "photo-box", "Faces", "People", "Collections", "/review/people/person-1", "/static/photo.js"} {
+	for _, value := range []string{`class="breadcrumb">› <a href="/review/photos">Photos</a>`, "person/photo.jpg", "Face 1", "photo-box", `class="photo-face-number"`, "Faces", "People", "Collections", "/review/people/person-1", "/static/photo.js", `class="photo-size-controls"`, `max-width:min(420px,90vw)`, `assigned-group`} {
 		if !strings.Contains(photoResponse.Body.String(), value) {
 			t.Errorf("photo review is missing %q: %s", value, photoResponse.Body.String())
 		}
@@ -733,6 +733,9 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	}
 	if strings.Contains(photoResponse.Body.String(), "Candidates:") || strings.Contains(photoResponse.Body.String(), `class="photo-cluster"`) {
 		t.Fatalf("assigned photo face should not render candidate or cluster metadata: %s", photoResponse.Body.String())
+	}
+	if strings.Contains(photoResponse.Body.String(), `data-action="assign"`) || strings.Contains(photoResponse.Body.String(), `data-person-filter="photo-assignment-options-`) {
+		t.Fatalf("assigned photo face should be represented only in the grouped card: %s", photoResponse.Body.String())
 	}
 	sizedPhotoRequest := httptest.NewRequest(http.MethodGet, "/review/photos?path_id=path-1&photo_size=0.5", nil)
 	sizedPhotoRequest.AddCookie(&http.Cookie{Name: "session", Value: token})
@@ -784,7 +787,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 		t.Fatalf("unresolved photo review status = %d, body=%s", unresolvedResponse.Code, unresolvedResponse.Body.String())
 	}
 	unresolvedBody := unresolvedResponse.Body.String()
-	for _, value := range []string{"Candidates:", `class="photo-cluster"`, `data-disposition="incorrect-assignment"`, `data-assignment-person="face-1"`} {
+	for _, value := range []string{"Candidates:", `class="photo-cluster"`, `data-disposition="incorrect-assignment"`, `data-assignment-person="face-1"`, `data-person-filter="photo-assignment-options-face-1"`, `class="photo-face-number"`, "Cs: — Cn: 100% Q: 90.0% D: 99.0%"} {
 		if !strings.Contains(unresolvedBody, value) {
 			t.Fatalf("unresolved photo review missing %q: %s", value, unresolvedBody)
 		}

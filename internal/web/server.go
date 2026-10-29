@@ -734,8 +734,11 @@ type photoDetailFace struct {
 	Left, Top, Right, Bottom float64
 	State, PersonID, Person  string
 	Similarity, Margin       float64
+	Quality, Detection       float64
 	Disposition              string
 	ClusterID, ClusterKey    string
+	ClusterConsistency       sql.NullFloat64
+	ClusterConnectivity      sql.NullFloat64
 	PossibleCandidates       []possibleCandidateView
 	RecognitionCandidates    []recognitionCandidateView
 }
@@ -783,6 +786,10 @@ func photoAssignedFaceCount(faces []photoDetailFace) int {
 
 func photoReviewFaceCount(faces []photoDetailFace) int {
 	return len(faces) - photoAssignedFaceCount(faces)
+}
+
+func photoFaceAssigned(face photoDetailFace) bool {
+	return face.State == string(review.AssignedUser) || face.State == string(review.AssignedSystem)
 }
 
 func photoDetailPeopleSummary(faces []photoDetailFace) string {
@@ -835,7 +842,24 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT f.id, f.face_index, f.box_left, f.box_top, f.box_right, f.box_bottom, COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''), COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ''), COALESCE(rc.similarity, 0), COALESCE(rc.margin, 0), COALESCE(cd.disposition, ''), COALESCE((SELECT c.id FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), ''), COALESCE((SELECT c.cluster_key FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), '') FROM faces f JOIN analyses a ON a.id = f.analysis_id LEFT JOIN current_face_assignments ca ON ca.face_id = f.id LEFT JOIN people p ON p.id = ca.person_id LEFT JOIN current_face_dispositions cd ON cd.face_id = f.id LEFT JOIN recognition_candidates rc ON rc.id = (SELECT id FROM recognition_candidates WHERE face_id = f.id ORDER BY created_at DESC, rank LIMIT 1) WHERE a.asset_id = ? AND a.status IN ('completed', 'completed_with_errors') ORDER BY f.face_index`, assetID)
+	rows, err := s.db.QueryContext(r.Context(), `
+		SELECT f.id, f.face_index, f.box_left, f.box_top, f.box_right, f.box_bottom,
+		       COALESCE(ca.state, 'unassigned'), COALESCE(ca.person_id, ''),
+		       COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ''),
+		       COALESCE(rc.similarity, 0), COALESCE(rc.margin, 0),
+		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
+		       COALESCE(cd.disposition, ''),
+		       COALESCE((SELECT c.id FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), ''),
+		       COALESCE((SELECT c.cluster_key FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), ''),
+		       (SELECT c.consistency FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1),
+		       (SELECT c.connectivity FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1)
+		FROM faces f JOIN analyses a ON a.id = f.analysis_id
+		LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
+		LEFT JOIN people p ON p.id = ca.person_id
+		LEFT JOIN current_face_dispositions cd ON cd.face_id = f.id
+		LEFT JOIN recognition_candidates rc ON rc.id = (SELECT id FROM recognition_candidates WHERE face_id = f.id ORDER BY created_at DESC, rank LIMIT 1)
+		WHERE a.asset_id = ? AND a.status IN ('completed', 'completed_with_errors')
+		ORDER BY f.face_index`, assetID)
 	if err != nil {
 		http.Error(w, "face lookup failed", http.StatusInternalServerError)
 		return
@@ -844,7 +868,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	var faces []photoDetailFace
 	for rows.Next() {
 		var value photoDetailFace
-		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.PersonID, &value.Person, &value.Similarity, &value.Margin, &value.Disposition, &value.ClusterID, &value.ClusterKey); err != nil {
+		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.PersonID, &value.Person, &value.Similarity, &value.Margin, &value.Quality, &value.Detection, &value.Disposition, &value.ClusterID, &value.ClusterKey, &value.ClusterConsistency, &value.ClusterConnectivity); err != nil {
 			return
 		}
 		value.PossibleCandidates, err = s.currentPossibleCandidates(r.Context(), value.ID)
@@ -863,6 +887,12 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		http.Error(w, "face lookup failed", http.StatusInternalServerError)
 		return
 	}
+	sort.SliceStable(faces, func(i, j int) bool {
+		if photoFaceAssigned(faces[i]) != photoFaceAssigned(faces[j]) {
+			return !photoFaceAssigned(faces[i])
+		}
+		return faces[i].Index < faces[j].Index
+	})
 	accessibleCollections, err := s.auth.AccessibleCollections(r.Context(), account.ID)
 	if err != nil {
 		http.Error(w, "permission lookup failed", http.StatusInternalServerError)
@@ -874,14 +904,14 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		return
 	}
 	body := strings.Builder{}
-	body.WriteString(`<div id="photo-page" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-photo-id="` + template.HTMLEscapeString(pathID) + `"><header class="photo-header"><h1>` + template.HTMLEscapeString(relative) + `</h1><dl class="photo-summary-table"><div><dt>Faces</dt><dd>` + fmt.Sprint(photoAssignedFaceCount(faces)) + ` / ` + fmt.Sprint(len(faces)) + `</dd></div><div><dt>People</dt><dd>` + photoDetailPeopleSummary(faces) + `</dd></div><div><dt>Collections</dt><dd>` + photoCollectionLinks(collections) + `</dd></div></dl></header><form id="photo-size-controls" method="get"><input type="hidden" name="path_id" value="` + template.HTMLEscapeString(pathID) + `"><fieldset class="photo-size"><legend>Photo size</legend>`)
+	body.WriteString(`<div id="photo-page" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `" data-photo-id="` + template.HTMLEscapeString(pathID) + `"><header class="photo-header"><h1>` + template.HTMLEscapeString(relative) + `</h1><dl class="photo-summary-table"><div><dt>Faces</dt><dd>` + fmt.Sprint(photoAssignedFaceCount(faces)) + ` / ` + fmt.Sprint(len(faces)) + `</dd></div><div><dt>People</dt><dd>` + photoDetailPeopleSummary(faces) + `</dd></div><div><dt>Collections</dt><dd>` + photoCollectionLinks(collections) + `</dd></div></dl></header><form id="photo-size-controls" method="get"><input type="hidden" name="path_id" value="` + template.HTMLEscapeString(pathID) + `"><div class="photo-size-controls"><fieldset class="photo-size"><legend>Photo size</legend>`)
 	pageSize := photoSize(r.URL.Query().Get("photo_size"))
 	for _, size := range []string{"0.25", "0.5", "1", "1.5", "2"} {
 		body.WriteString(`<label><input type="radio" name="photo_size" value="` + size + `"` + checkedAttr(size == pageSize) + `> ` + size + `</label>`)
 	}
-	body.WriteString(`</fieldset><button>Apply</button></form><p class="photo-path-summary">Faces needing review: ` + fmt.Sprint(photoReviewFaceCount(faces)) + ` / ` + fmt.Sprint(len(faces)) + `</p><div class="photo-detail photo-size-` + strings.ReplaceAll(pageSize, ".", "-") + `"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="` + template.HTMLEscapeString(relative) + `"><div class="photo-boxes">`)
+	body.WriteString(`</fieldset><button>Apply</button></div></form><p class="photo-path-summary">Faces needing review: ` + fmt.Sprint(photoReviewFaceCount(faces)) + ` / ` + fmt.Sprint(len(faces)) + `</p><div class="photo-detail photo-size-` + strings.ReplaceAll(pageSize, ".", "-") + `"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="` + template.HTMLEscapeString(relative) + `"><div class="photo-boxes">`)
 	for _, value := range faces {
-		body.WriteString(fmt.Sprintf(`<span class="photo-box" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"><strong>Face %d</strong></span>`, percent(value.Left, width), percent(value.Top, height), percent(value.Right-value.Left, width), percent(value.Bottom-value.Top, height), value.Index+1))
+		body.WriteString(fmt.Sprintf(`<span class="photo-box" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span><span class="photo-face-number" style="left:%s%%;top:%s%%">%d</span>`, percent(value.Left, width), percent(value.Top, height), percent(value.Right-value.Left, width), percent(value.Bottom-value.Top, height), percent(value.Right, width), percent(value.Top, height), value.Index+1))
 	}
 	body.WriteString(`</div></div><div class="photo-face-grid">`)
 	peopleQuery := `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people`
@@ -906,10 +936,11 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	}
 	peopleRows.Close()
 	for _, value := range faces {
+		if photoFaceAssigned(value) {
+			continue
+		}
 		cardClass := "card photo-face"
-		if value.State == string(review.AssignedUser) || value.State == string(review.AssignedSystem) {
-			cardClass += " assigned"
-		} else if value.State == string(review.Provisional) {
+		if value.State == string(review.Provisional) {
 			cardClass += " provisional"
 		} else {
 			cardClass += " needs-attention"
@@ -925,27 +956,47 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 			body.WriteString(template.HTMLEscapeString(personName))
 		}
 		body.WriteString(` [` + template.HTMLEscapeString(shortAssignment(value.State)) + `]</div>`)
-		assigned := value.State == string(review.AssignedUser) || value.State == string(review.AssignedSystem)
-		if !assigned {
-			if len(value.PossibleCandidates) > 0 {
-				body.WriteString(renderPossibleMatches(value.PossibleCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
-			}
-			if len(value.RecognitionCandidates) > 0 {
-				body.WriteString(renderRecognitionCandidates(value.RecognitionCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
-			}
-			if value.ClusterID != "" {
-				body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> <a href="/review/clusters/` + template.HTMLEscapeString(value.ClusterID) + `">` + template.HTMLEscapeString(value.ClusterKey) + `</a></p>`)
-			} else {
-				body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> No cluster</p>`)
-			}
+		if len(value.PossibleCandidates) > 0 {
+			body.WriteString(renderPossibleMatches(value.PossibleCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
 		}
-		if account.Role != auth.Viewer && !assigned {
-			body.WriteString(`<div class="photo-actions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Ambiguous</button><button type="button" data-action="disposition" data-disposition="incorrect-assignment" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Incorrect assignment</button><button type="button" data-action="disposition" data-disposition="false-detection" data-face-id="` + template.HTMLEscapeString(value.ID) + `">False detection</button><select data-assignment-person="` + template.HTMLEscapeString(value.ID) + `"><option value="">Unknown</option><option value="__ambiguous__">Ambiguous</option>`)
+		if len(value.RecognitionCandidates) > 0 {
+			body.WriteString(renderRecognitionCandidates(value.RecognitionCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
+		}
+		if value.ClusterID != "" {
+			clusterKey := value.ClusterKey
+			if clusterKey == "" {
+				clusterKey = idSuffix(value.ClusterID)
+			}
+			body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> <a href="/review/clusters/` + template.HTMLEscapeString(value.ClusterID) + `">` + template.HTMLEscapeString(clusterKey) + `</a>: ` + template.HTMLEscapeString(idSuffix(value.ClusterID)) + `: Cs: ` + formatScoreUnavailable(value.ClusterConsistency.Float64, value.ClusterConsistency.Valid) + ` Cn: ` + formatScoreUnavailable(value.ClusterConnectivity.Float64, value.ClusterConnectivity.Valid) + ` Q: ` + formatScore(value.Quality) + `% D: ` + formatScore(value.Detection) + `%</p>`)
+		} else {
+			body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> No cluster</p>`)
+		}
+		if account.Role != auth.Viewer {
+			body.WriteString(`<div class="photo-actions"><button type="button" data-action="unknown" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Unknown</button><button type="button" data-action="ambiguous" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Ambiguous</button><button type="button" data-action="disposition" data-disposition="incorrect-assignment" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Incorrect assignment</button><button type="button" data-action="disposition" data-disposition="false-detection" data-face-id="` + template.HTMLEscapeString(value.ID) + `">False detection</button><input class="person-select-filter" data-person-filter="photo-assignment-options-` + template.HTMLEscapeString(value.ID) + `" value="` + template.HTMLEscapeString(value.Person) + `" placeholder="Type to filter people"><select class="photo-person-select" id="photo-assignment-options-` + template.HTMLEscapeString(value.ID) + `" data-assignment-person="` + template.HTMLEscapeString(value.ID) + `"><option value="" data-person-name="unknown">Unknown</option><option value="__ambiguous__" data-person-name="ambiguous">Ambiguous</option>`)
 			for _, person := range people {
-				body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `"` + selectedAttr(person.ID, value.PersonID) + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
+				body.WriteString(`<option value="` + template.HTMLEscapeString(person.ID) + `" data-person-name="` + template.HTMLEscapeString(person.Name) + `"` + selectedAttr(person.ID, value.PersonID) + `>` + template.HTMLEscapeString(person.Name) + `</option>`)
 			}
 			body.WriteString(`</select><button type="button" data-action="assign" data-face-id="` + template.HTMLEscapeString(value.ID) + `">Save</button>`)
 			body.WriteString(`</div>`)
+		}
+		body.WriteString(`</article>`)
+	}
+	assignedFaces := make([]photoDetailFace, 0, photoAssignedFaceCount(faces))
+	for _, value := range faces {
+		if photoFaceAssigned(value) {
+			assignedFaces = append(assignedFaces, value)
+		}
+	}
+	if len(assignedFaces) > 0 {
+		body.WriteString(`<article class="card photo-face assigned-group"><div class="photo-face-heading"><strong>Assigned faces</strong></div>`)
+		for _, value := range assignedFaces {
+			body.WriteString(`<div class="assigned-face-line"><strong>Face ` + fmt.Sprint(value.Index+1) + `:</strong> `)
+			if value.PersonID != "" && value.Person != "" {
+				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(value.PersonID) + `">` + template.HTMLEscapeString(value.Person) + `</a>`)
+			} else {
+				body.WriteString(template.HTMLEscapeString(value.Person))
+			}
+			body.WriteString(` [` + template.HTMLEscapeString(shortAssignment(value.State)) + `]</div>`)
 		}
 		body.WriteString(`</article>`)
 	}
@@ -953,7 +1004,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	if account.Role != auth.Viewer {
 		body.WriteString(`<script src="/static/photo.js" defer></script>`)
 	}
-	pageStyle := template.CSS(`#photo-page{max-width:100%}.photo-header{display:block;position:sticky;top:0;z-index:10;background:#fff;padding:4px 0}.photo-header h1{margin:.15rem 0;overflow-wrap:anywhere}.photo-summary-table{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0}.photo-summary-table>div{min-width:7rem}.photo-summary-table dt{font-size:.8em;color:#555}.photo-summary-table dd{margin:2px 0 0;font-weight:600}.photo-summary-table a{font-weight:600}.photo-path-summary{margin:.5rem 0}.photo-detail{position:relative;display:inline-block;max-width:100%}.photo-detail>img{display:block;max-width:90vw;max-height:70vh}.photo-detail.photo-size-0-25>img{max-width:22.5vw;max-height:17.5vh}.photo-detail.photo-size-0-5>img{max-width:45vw;max-height:35vh}.photo-detail.photo-size-1>img{max-width:90vw;max-height:70vh}.photo-detail.photo-size-1-5>img{max-width:100vw;max-height:90vh}.photo-detail.photo-size-2>img{max-width:100vw;max-height:100vh}.photo-boxes{position:absolute;inset:0}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15);pointer-events:none}.photo-box strong{position:absolute;right:0;top:0;background:#fff;color:#900;padding:1px 3px;font-size:.75rem}.photo-face-grid{display:flex;flex-wrap:wrap;gap:18px;margin-top:18px}.photo-face{width:min(420px,45vw);border:2px solid #c62828;padding:10px}.photo-face.assigned{border-color:#0a2}.photo-face.provisional{border-color:#d6a800}.photo-face.needs-attention{border-color:#c62828}.photo-face-heading{font-size:1rem;line-height:1.35}.photo-face .candidate-list,.photo-face .person-candidates{font-size:.9em;line-height:1.35;margin-top:6px}.photo-cluster{margin:.5rem 0}.photo-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}.photo-actions select{max-width:100%}.photo-size{border:0;padding:0;margin:.5rem 0;display:flex;gap:.35rem;align-items:center}@media(max-width:600px){.photo-face{width:100%}.photo-detail.photo-size-0-25>img,.photo-detail.photo-size-0-5>img{max-width:90vw;max-height:70vh}}`)
+	pageStyle := template.CSS(`#photo-page{max-width:100%}.photo-header{display:block;position:sticky;top:0;z-index:10;background:#fff;padding:4px 0}.photo-header h1{margin:.15rem 0;overflow-wrap:anywhere}.photo-summary-table{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0}.photo-summary-table>div{min-width:7rem}.photo-summary-table dt{font-size:.8em;color:#555}.photo-summary-table dd{margin:2px 0 0;font-weight:600}.photo-summary-table a{font-weight:600}.photo-path-summary{margin:.5rem 0}.photo-size-controls{display:flex;align-items:center;gap:.75rem;max-width:840px}.photo-size-controls button{margin-left:auto}.photo-detail{position:relative;display:inline-block;max-width:100%}.photo-detail>img{display:block;width:auto;max-width:min(420px,90vw);max-height:70vh}.photo-detail.photo-size-0-25>img{max-width:min(105px,90vw);max-height:17.5vh}.photo-detail.photo-size-0-5>img{max-width:min(210px,90vw);max-height:35vh}.photo-detail.photo-size-1>img{max-width:min(420px,90vw);max-height:70vh}.photo-detail.photo-size-1-5>img{max-width:min(630px,90vw);max-height:90vh}.photo-detail.photo-size-2>img{max-width:min(840px,100vw);max-height:100vh}.photo-boxes{position:absolute;inset:0}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15);pointer-events:none}.photo-face-number{position:absolute;transform:translateX:.15rem);color:#900;font-size:.8rem;line-height:1;pointer-events:none}.photo-face-grid{display:flex;flex-wrap:wrap;gap:18px;margin-top:18px}.photo-face{width:min(420px,45vw);border:2px solid #c62828;padding:10px}.photo-face.provisional{border-color:#d6a800}.photo-face.needs-attention{border-color:#c62828}.photo-face-heading{font-size:1rem;line-height:1.35}.photo-face .candidate-list,.photo-face .person-candidates{font-size:.9em;line-height:1.35;margin-top:6px}.photo-cluster{margin:.5rem 0}.photo-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}.photo-actions select{max-width:100%}.photo-actions .person-select-filter{min-width:10rem}.photo-size{border:0;padding:0;margin:.5rem 0;display:flex;gap:.35rem;align-items:center}.assigned-group{border-color:#0a2}.assigned-face-line{padding:.35rem 0;border-top:1px solid #ddd}.assigned-face-line:first-of-type{border-top:0}@media(max-width:600px){.photo-face{width:100%}}`)
 	s.render(w, map[string]any{"Title": relative, "Account": account, "Breadcrumb": template.HTML(`<a href="/review/photos">Photos</a>`), "Body": template.HTML(body.String()), "PageStyle": pageStyle})
 }
 
@@ -2506,6 +2557,17 @@ func (s *Server) photoScript(w http.ResponseWriter, _ *http.Request) {
       const state = person === '__ambiguous__' ? 'ambiguous' : (person ? 'assigned-user' : 'unknown');
       send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment', {person_id:person === '__ambiguous__' ? '' : person, state:state});
     };
+  });
+  document.querySelectorAll('[data-person-filter]').forEach((input) => {
+    const select = document.getElementById(input.dataset.personFilter); if (!select) return;
+    const filter = () => {
+      const query = input.value.trim().toLowerCase();
+      Array.from(select.options).forEach((option) => {
+        const name = (option.dataset.personName || option.textContent || '').toLowerCase();
+        option.hidden = Boolean(query) && !name.includes(query);
+      });
+    };
+    input.addEventListener('input', filter); filter();
   });
   document.querySelectorAll('[data-action="assign-candidate"]').forEach((button) => {
     button.onclick = () => send(button.dataset.faceId, '/api/faces/' + encodeURIComponent(button.dataset.faceId) + '/assignment', {person_id:button.dataset.personId, state:'assigned-user', candidate_id:button.dataset.candidateId});
