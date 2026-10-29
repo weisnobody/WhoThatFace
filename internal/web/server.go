@@ -1339,12 +1339,12 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		if person.Possibles > 0 {
 			possible = `<a href="/review/photos?candidate_person=` + template.HTMLEscapeString(person.ID) + `">` + fmt.Sprint(person.Possibles) + `</a>`
 		}
-		body.WriteString(`<tr><td><img loading="lazy" style="max-height:32px;width:auto;border-radius:4px;vertical-align:middle" alt="" src="/api/people/` + template.HTMLEscapeString(person.ID) + `/representative"> <a href="/review/people/` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</a></td><td>` + fmt.Sprint(person.Faces) + `</td><td>` + fmt.Sprint(person.User) + `</td><td>` + fmt.Sprint(person.System) + `</td><td>` + fmt.Sprint(person.Provisional) + `</td><td>` + fmt.Sprint(person.Clusters) + `</td><td>` + fmt.Sprint(person.References) + `</td><td>` + fmt.Sprint(person.Recommended) + `</td><td>` + dontTrack + `</td><td>` + possible + `</td></tr>`)
+		body.WriteString(`<tr><td><img loading="lazy" class="assigned-face-person-image" alt="" src="/api/people/` + template.HTMLEscapeString(person.ID) + `/representative"> <a href="/review/people/` + template.HTMLEscapeString(person.ID) + `">` + template.HTMLEscapeString(person.Name) + `</a></td><td>` + fmt.Sprint(person.Faces) + `</td><td>` + fmt.Sprint(person.User) + `</td><td>` + fmt.Sprint(person.System) + `</td><td>` + fmt.Sprint(person.Provisional) + `</td><td>` + fmt.Sprint(person.Clusters) + `</td><td>` + fmt.Sprint(person.References) + `</td><td>` + fmt.Sprint(person.Recommended) + `</td><td>` + dontTrack + `</td><td>` + possible + `</td></tr>`)
 	}
 	body.WriteString(`</table>`)
 	renderPager()
 	body.WriteString(`<hr><form id="create-person" data-csrf="` + template.HTMLEscapeString(csrfCookie(r)) + `"><input name="name" placeholder="New person name" required><button>Create person</button></form><script src="/static/people.js" defer></script>`)
-	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`#create-person{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0}#people-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#people-controls .people-controls-break{flex-basis:100%;height:0}#people-controls>button{margin-left:4rem}.people-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.people-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.people-table{width:max-content}`)})
+	s.render(w, map[string]any{"Title": "People", "Account": account, "Body": template.HTML(body.String()), "PageStyle": template.CSS(`#create-person{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0}#people-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#people-controls .people-controls-break{flex-basis:100%;height:0}#people-controls>button{margin-left:4rem}.people-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.people-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.people-table{width:max-content}.assigned-face-person-image{max-height:32px;width:auto;border-radius:4px;vertical-align:middle}`)})
 }
 
 func (s *Server) reviewCandidateRun(w http.ResponseWriter, r *http.Request) {
@@ -3059,7 +3059,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 				if state == string(review.AssignedUser) {
 					return "assigned assigned-user"
 				}
-				return "assigned"
+				return "assigned assigned-system"
 			}
 			if state == string(review.Provisional) {
 				return "provisional"
@@ -3096,8 +3096,8 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 	if renderedFaces == 0 && membershipCount == 0 {
 		body.WriteString(`<p class="cluster-alert">This cluster has no faces.</p>`)
 	}
-	body.WriteString(`</div><p>Green means user-assigned, yellow means the selected/default person is provisional or system-assigned, and red means the face needs attention. Save may be used before every face is assigned.</p></div><script src="/static/cluster.js" defer></script>`)
-	pageStyle = template.CSS(string(pageStyle) + `.card.provisional{border:2px solid #F8E71C}.card.assigned{border:2px solid #7ED321}.card.needs-attention{border:2px solid #D0021B}.box{border:2px solid #D0021B;background:rgba(208,2,27,.15)}.cluster-face.assigned .box{border-color:#7ED321;background:rgba(126,211,33,.15)}.cluster-face.provisional .box{border-color:#F8E71C;background:rgba(248,231,28,.15)}.cluster-face.reference .box{border-color:#50E3C2;background:rgba(80,227,194,.15)}`)
+	body.WriteString(`</div><p>Green means user or system-assigned, yellow means provisional, and red means the face needs attention. Save may be used before every face is assigned.</p></div><script src="/static/cluster.js" defer></script>`)
+	pageStyle = template.CSS(string(pageStyle) + `.card.provisional{border:2px solid #F8E71C}.card.assigned,.card.assigned-system{border:2px solid #7ED321}.card.needs-attention{border:2px solid #D0021B}.box{border:2px solid #D0021B;background:rgba(208,2,27,.15)}.cluster-face.assigned .box,.cluster-face.assigned-system .box{border-color:#7ED321;background:rgba(126,211,33,.15)}.cluster-face.provisional .box{border-color:#F8E71C;background:rgba(248,231,28,.15)}.cluster-face.reference .box{border-color:#50E3C2;background:rgba(80,227,194,.15)}`)
 	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Breadcrumb": template.HTML(`<a href="/review/clusters">Clusters</a>`), "Body": template.HTML(body.String()), "PageStyle": pageStyle})
 }
 
@@ -3113,7 +3113,7 @@ func (s *Server) clusterScript(w http.ResponseWriter, _ *http.Request) {
     location.reload();
   }
   function stateFor(card) { const person = card.querySelector('.face-person').value; const pendingState = card.dataset.pendingState; if (person === '__ambiguous__') return 'ambiguous'; if (person) return person === card.dataset.originalPerson && (pendingState === 'assigned-system' || pendingState === 'provisional') ? pendingState : 'assigned-user'; return 'unknown'; }
-  function refresh(card) { const state = stateFor(card); card.dataset.pendingState = state; card.style.borderColor = state === 'assigned-user' ? '#2a9d50' : (state === 'unknown' || state === 'ambiguous' ? '#c62828' : '#d6a800'); }
+  function refresh(card) { const state = stateFor(card); card.dataset.pendingState = state; card.classList.remove('assigned', 'assigned-user', 'assigned-system', 'provisional', 'needs-attention'); if (state === 'assigned-user' || state === 'assigned-system') { card.classList.add('assigned', state); } else if (state === 'provisional') { card.classList.add('provisional'); } else { card.classList.add('needs-attention'); } }
   function refreshDispositionButtons(card) { const current = card.dataset.dispositionActive === 'true' ? card.querySelector('.face-disposition').value : ''; card.querySelectorAll('[data-action="disposition"]').forEach((button) => { const labels = dispositionLabels[button.dataset.disposition]; button.textContent = current === button.dataset.disposition ? labels[1] : labels[0]; }); }
   document.querySelectorAll('[data-person-filter]').forEach((input) => { const select = document.getElementById(input.dataset.personFilter); if (!select) return; const filter = () => { const text = input.value.toLowerCase(); Array.from(select.options).forEach((option) => { const label = (option.dataset.personName || option.textContent || '').toLowerCase(); option.hidden = text !== '' && !label.includes(text); }); const selected = select.options[select.selectedIndex]; if (selected && selected.hidden) { const first = Array.from(select.options).find((option) => !option.hidden); if (first) select.value = first.value; } }; input.addEventListener('input', filter); filter(); });
   document.querySelectorAll('.cluster-face').forEach((card) => { const select = card.querySelector('.face-person'); select.addEventListener('change', () => { card.dataset.pendingState = select.value ? (select.value === '__ambiguous__' ? 'ambiguous' : 'assigned-user') : 'unknown'; refresh(card); }); refreshDispositionButtons(card); refresh(card); });
