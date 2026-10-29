@@ -538,7 +538,7 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 	}
 	body.WriteString(`</div>`)
 	renderPager()
-	style := template.CSS(`#photos-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#photos-controls .photos-controls-break{flex-basis:100%;height:0}#photos-controls>button{margin-left:4rem}.photos-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.photos-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.photo-size{border:0;padding:0;margin:0;display:flex;gap:.35rem;align-items:center}.photo-list{display:flex;flex-wrap:wrap;gap:18px}.photo-card{width:min(calc(420px * var(--photo-scale)),calc(45vw * var(--photo-scale)));border:2px solid #c62828;padding:10px}.photo-card.assigned{border-color:#0a2}.photo-card.provisional{border-color:#d6a800}.photo-card .photo-preview{display:block}.photo-card img{display:block;width:100%;height:auto;max-height:55vh;object-fit:contain}.photo-card .path{margin-top:8px;overflow-wrap:anywhere}.photo-meta{margin-top:6px;line-height:1.35}.photo-people-table{width:100%;margin-top:6px;border-collapse:collapse;table-layout:fixed}.photo-people-table td{padding:2px 4px;border:1px solid #ddd;vertical-align:top;overflow-wrap:anywhere}.photo-size-0-25{--photo-scale:.25}.photo-size-0-5{--photo-scale:.5}.photo-size-1{--photo-scale:1}.photo-size-1-5{--photo-scale:1.5}.photo-size-2{--photo-scale:2}.photo-size-0-25 .photo-people-table td,.photo-size-0-5 .photo-people-table td{width:100%}.photo-size-1 .photo-people-table td{width:50%}.photo-size-1-5 .photo-people-table td{width:33.333%}.photo-size-2 .photo-people-table td{width:25%}.photo-empty{width:100%;padding:.75rem;border:1px solid #c62828;background:#fff1f1}@media(max-width:600px){.photo-card{width:100%}}`)
+	style := template.CSS(`#photos-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#photos-controls .photos-controls-break{flex-basis:100%;height:0}#photos-controls>button{margin-left:4rem}.photos-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.photos-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.photo-size{border:0;padding:0;margin:0;display:flex;gap:.35rem;align-items:center}.photo-list{display:flex;flex-wrap:wrap;gap:18px}.photo-card{width:min(calc(420px * var(--photo-scale)),calc(45vw * var(--photo-scale)));border:2px solid #D0021B;padding:10px}.photo-card.assigned{border-color:#7ED321}.photo-card.provisional{border-color:#F8E71C}.photo-card .photo-preview{display:block}.photo-card img{display:block;width:100%;height:auto;max-height:55vh;object-fit:contain}.photo-card .path{margin-top:8px;overflow-wrap:anywhere}.photo-meta{margin-top:6px;line-height:1.35}.photo-people-table{width:100%;margin-top:6px;border-collapse:collapse;table-layout:fixed}.photo-people-table td{padding:2px 4px;border:1px solid #ddd;vertical-align:top;overflow-wrap:anywhere}.photo-size-0-25{--photo-scale:.25}.photo-size-0-5{--photo-scale:.5}.photo-size-1{--photo-scale:1}.photo-size-1-5{--photo-scale:1.5}.photo-size-2{--photo-scale:2}.photo-size-0-25 .photo-people-table td,.photo-size-0-5 .photo-people-table td{width:100%}.photo-size-1 .photo-people-table td{width:50%}.photo-size-1-5 .photo-people-table td{width:33.333%}.photo-size-2 .photo-people-table td{width:25%}.photo-empty{width:100%;padding:.75rem;border:1px solid #D0021B;background:#fff1f1}@media(max-width:600px){.photo-card{width:100%}}`)
 	s.render(w, map[string]any{"Title": "Photos", "Account": account, "Body": template.HTML(body.String()), "PageStyle": style})
 }
 
@@ -657,6 +657,20 @@ func photoCardClass(faces []search.ReviewPhotoFace) string {
 	return "needs-attention"
 }
 
+func faceStatusColorClass(state string, reference bool) string {
+	if reference {
+		return "reference"
+	}
+	switch state {
+	case "assigned-user", "assigned-system":
+		return "assigned"
+	case "provisional":
+		return "provisional"
+	default:
+		return "needs-attention"
+	}
+}
+
 func photoPeopleTable(faces []search.ReviewPhotoFace, size string) string {
 	columns := 1
 	switch size {
@@ -733,6 +747,7 @@ type photoDetailFace struct {
 	Index                    int
 	Left, Top, Right, Bottom float64
 	State, PersonID, Person  string
+	Reference                bool
 	Similarity, Margin       float64
 	Quality, Detection       float64
 	Disposition              string
@@ -850,6 +865,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		       COALESCE(NULLIF(p.name, ''), substr(ca.person_id, -8), ''),
 		       COALESCE(rc.similarity, 0), COALESCE(rc.margin, 0),
 		       COALESCE(f.quality, 0), COALESCE(f.detection_confidence, 0),
+		       COALESCE((SELECT MAX(cfr.reference) FROM current_face_references cfr WHERE cfr.face_id = f.id), 0),
 		       COALESCE(cd.disposition, ''),
 		       COALESCE((SELECT c.id FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), ''),
 		       COALESCE((SELECT c.cluster_key FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), ''),
@@ -872,7 +888,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	var faces []photoDetailFace
 	for rows.Next() {
 		var value photoDetailFace
-		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.PersonID, &value.Person, &value.Similarity, &value.Margin, &value.Quality, &value.Detection, &value.Disposition, &value.ClusterID, &value.ClusterKey, &value.ClusterConsistency, &value.ClusterConnectivity, &value.ClusterPersonID, &value.ClusterPerson); err != nil {
+		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.PersonID, &value.Person, &value.Similarity, &value.Margin, &value.Quality, &value.Detection, &value.Reference, &value.Disposition, &value.ClusterID, &value.ClusterKey, &value.ClusterConsistency, &value.ClusterConnectivity, &value.ClusterPersonID, &value.ClusterPerson); err != nil {
 			return
 		}
 		value.PossibleCandidates, err = s.currentPossibleCandidates(r.Context(), value.ID)
@@ -915,7 +931,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	}
 	body.WriteString(`</fieldset><button>Apply</button></div></form><p class="photo-path-summary">Faces needing review: ` + fmt.Sprint(photoReviewFaceCount(faces)) + ` / ` + fmt.Sprint(len(faces)) + `</p><div class="photo-detail photo-size-` + strings.ReplaceAll(pageSize, ".", "-") + `"><img src="/api/photos/` + template.HTMLEscapeString(pathID) + `" alt="` + template.HTMLEscapeString(relative) + `"><div class="photo-boxes">`)
 	for _, value := range faces {
-		body.WriteString(fmt.Sprintf(`<span class="photo-box" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span><span class="photo-face-number" style="left:%s%%;top:%s%%">%d</span>`, percent(value.Left, width), percent(value.Top, height), percent(value.Right-value.Left, width), percent(value.Bottom-value.Top, height), percent(value.Right, width), percent(value.Top, height), value.Index+1))
+		body.WriteString(fmt.Sprintf(`<span class="photo-box %s" style="left:%s%%;top:%s%%;width:%s%%;height:%s%%"></span><span class="photo-face-number" style="left:%s%%;top:%s%%">%d</span>`, faceStatusColorClass(value.State, value.Reference), percent(value.Left, width), percent(value.Top, height), percent(value.Right-value.Left, width), percent(value.Bottom-value.Top, height), percent(value.Right, width), percent(value.Top, height), value.Index+1))
 	}
 	body.WriteString(`</div></div><div class="photo-face-grid">`)
 	peopleQuery := `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people`
@@ -1012,6 +1028,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	}
 	pageStyle := template.CSS(`#photo-page{max-width:100%}.photo-header{display:block;position:sticky;top:0;z-index:10;background:#fff;padding:4px 0}.photo-header h1{margin:.15rem 0;overflow-wrap:anywhere}.photo-summary-table{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0}.photo-summary-table>div{min-width:7rem}.photo-summary-table dt{font-size:.8em;color:#555}.photo-summary-table dd{margin:2px 0 0;font-weight:600}.photo-summary-table a{font-weight:600}.photo-path-summary{margin:.5rem 0}.photo-size-controls{display:flex;align-items:center;gap:.75rem;max-width:840px}.photo-size-controls button{margin-left:auto}.photo-detail{position:relative;display:inline-block;max-width:100%}.photo-detail>img{display:block;width:auto;max-width:min(420px,90vw);max-height:70vh}.photo-detail.photo-size-0-25>img{max-width:min(105px,90vw);max-height:17.5vh}.photo-detail.photo-size-0-5>img{max-width:min(210px,90vw);max-height:35vh}.photo-detail.photo-size-1>img{max-width:min(420px,90vw);max-height:70vh}.photo-detail.photo-size-1-5>img{max-width:min(630px,90vw);max-height:90vh}.photo-detail.photo-size-2>img{max-width:min(840px,100vw);max-height:100vh}.photo-boxes{position:absolute;inset:0}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15);pointer-events:none}.photo-face-number{position:absolute;transform:translateX:.15rem);color:#900;font-size:.8rem;line-height:1;pointer-events:none}.photo-face-grid{display:flex;flex-wrap:wrap;gap:18px;margin-top:18px}.photo-face{width:min(420px,45vw);border:2px solid #c62828;padding:10px}.photo-face.provisional{border-color:#d6a800}.photo-face.needs-attention{border-color:#c62828}.photo-face-heading{font-size:1rem;line-height:1.35}.photo-face .candidate-list,.photo-face .person-candidates{font-size:.9em;line-height:1.35;margin-top:6px}.photo-cluster{margin:.5rem 0}.photo-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}.photo-actions select{max-width:100%}.photo-actions .person-select-filter{min-width:10rem}.photo-size{border:0;padding:0;margin:.5rem 0;display:flex;gap:.35rem;align-items:center}.assigned-group{border-color:#0a2}.assigned-face-line{padding:.35rem 0;border-top:1px solid #ddd}.assigned-face-line:first-of-type{border-top:0}@media(max-width:600px){.photo-face{width:100%}}`)
 	pageStyle = template.CSS(string(pageStyle) + `.photo-size-controls{gap:.35rem}.photo-size-controls button{margin-left:.25rem}.photo-face-number{transform:translateX(.35rem);color:#f00;font-weight:700}.assigned-face-line{display:flex;align-items:center;gap:.35rem}.assigned-face-person-image{max-height:32px;width:auto;border-radius:4px;vertical-align:middle}`)
+	pageStyle = template.CSS(string(pageStyle) + `.photo-box{border-color:#D0021B;background:rgba(208,2,27,.15)}.photo-box.reference{border-color:#50E3C2;background:rgba(80,227,194,.15)}.photo-box.assigned{border-color:#7ED321;background:rgba(126,211,33,.15)}.photo-box.provisional{border-color:#F8E71C;background:rgba(248,231,28,.15)}.photo-face{border-color:#D0021B}.photo-face.provisional{border-color:#F8E71C}.photo-face.needs-attention{border-color:#D0021B}.assigned-group{border-color:#7ED321}`)
 	s.render(w, map[string]any{"Title": relative, "Account": account, "Breadcrumb": template.HTML(`<a href="/review/photos">Photos</a>`), "Body": template.HTML(body.String()), "PageStyle": pageStyle})
 }
 
@@ -1860,9 +1877,9 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
   width:min(420px,45vw);
   border:1px solid #ccc;
   padding:10px}
-.card.provisional{border:2px solid #d6a800}
-.card.assigned{border:2px solid #0a2}
-.card.needs-attention{border:2px solid #c62828}
+.card.provisional{border:2px solid #F8E71C}
+.card.assigned{border:2px solid #7ED321}
+.card.needs-attention{border:2px solid #D0021B}
 .viewer{
   position:relative;
   display:inline-block;
@@ -1872,12 +1889,14 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
   max-height:55vh}
 .box{
   position:absolute;
-  border:2px solid #f00;
-  background:rgba(204,0,0,.15);
+  border:2px solid #D0021B;
+  background:rgba(208,2,27,.15);
   pointer-events:none}
 .box.reference{
-  border-color:#0a2;
-  background:rgba(0,170,34,.15)}
+  border-color:#50E3C2;
+  background:rgba(80,227,194,.15)}
+.box.assigned{border-color:#7ED321;background:rgba(126,211,33,.15)}
+.box.provisional{border-color:#F8E71C;background:rgba(248,231,28,.15)}
 .path{
   margin-top:8px;
   overflow-wrap:anywhere}
@@ -2028,10 +2047,7 @@ func (s *Server) reviewPerson(w http.ResponseWriter, r *http.Request) {
 	body.WriteString(`</div>`)
 	body.WriteString(`<div id="photos" class="grid">`)
 	for _, face := range faces {
-		boxClass := "box"
-		if face.Reference {
-			boxClass += " reference"
-		}
+		boxClass := "box " + faceStatusColorClass(face.State, face.Reference)
 		cardClass := "card"
 		if face.State == string(review.AssignedUser) || face.State == string(review.AssignedSystem) {
 			cardClass += " assigned"
@@ -3081,6 +3097,7 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		body.WriteString(`<p class="cluster-alert">This cluster has no faces.</p>`)
 	}
 	body.WriteString(`</div><p>Green means user-assigned, yellow means the selected/default person is provisional or system-assigned, and red means the face needs attention. Save may be used before every face is assigned.</p></div><script src="/static/cluster.js" defer></script>`)
+	pageStyle = template.CSS(string(pageStyle) + `.card.provisional{border:2px solid #F8E71C}.card.assigned{border:2px solid #7ED321}.card.needs-attention{border:2px solid #D0021B}.box{border:2px solid #D0021B;background:rgba(208,2,27,.15)}.cluster-face.assigned .box{border-color:#7ED321;background:rgba(126,211,33,.15)}.cluster-face.provisional .box{border-color:#F8E71C;background:rgba(248,231,28,.15)}.cluster-face.reference .box{border-color:#50E3C2;background:rgba(80,227,194,.15)}`)
 	s.render(w, map[string]any{"Title": "Cluster review", "Account": account, "Breadcrumb": template.HTML(`<a href="/review/clusters">Clusters</a>`), "Body": template.HTML(body.String()), "PageStyle": pageStyle})
 }
 
