@@ -787,7 +787,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 		t.Fatalf("unresolved photo review status = %d, body=%s", unresolvedResponse.Code, unresolvedResponse.Body.String())
 	}
 	unresolvedBody := unresolvedResponse.Body.String()
-	for _, value := range []string{"Candidates:", `class="photo-cluster"`, `data-disposition="incorrect-assignment"`, `data-assignment-person="face-1"`, `data-person-filter="photo-assignment-options-face-1"`, `class="photo-face-number"`, "Cs: — Cn: 100% Q: 90.0% D: 99.0%"} {
+	for _, value := range []string{"Candidates:", `class="photo-cluster"`, `data-disposition="incorrect-assignment"`, `data-assignment-person="face-1"`, `data-person-filter="photo-assignment-options-face-1"`, `class="photo-face-number"`, `href="/review/clusters/cluster-active">r-active</a>`, `href="/review/people/person-1">Renamed Person</a>:`, `<strong>Cs:</strong> —`, `<strong>Cn:</strong> 100%`, `<strong>Q:</strong> 90.0%`, `<strong>D:</strong> 99.0%`} {
 		if !strings.Contains(unresolvedBody, value) {
 			t.Fatalf("unresolved photo review missing %q: %s", value, unresolvedBody)
 		}

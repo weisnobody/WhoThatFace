@@ -737,6 +737,8 @@ type photoDetailFace struct {
 	Quality, Detection       float64
 	Disposition              string
 	ClusterID, ClusterKey    string
+	ClusterPersonID          string
+	ClusterPerson            string
 	ClusterConsistency       sql.NullFloat64
 	ClusterConnectivity      sql.NullFloat64
 	PossibleCandidates       []possibleCandidateView
@@ -852,7 +854,9 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		       COALESCE((SELECT c.id FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), ''),
 		       COALESCE((SELECT c.cluster_key FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), ''),
 		       (SELECT c.consistency FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1),
-		       (SELECT c.connectivity FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1)
+		       (SELECT c.connectivity FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1),
+		       COALESCE((SELECT c.proposed_person_id FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cm.face_id = f.id AND cr.status = 'active' ORDER BY c.id LIMIT 1), ''),
+		       COALESCE((SELECT COALESCE(NULLIF(p2.name, ''), substr(c2.proposed_person_id, -8), '') FROM cluster_memberships cm2 JOIN clusters c2 ON c2.id = cm2.cluster_id JOIN clustering_runs cr2 ON cr2.id = c2.clustering_run_id LEFT JOIN people p2 ON p2.id = c2.proposed_person_id WHERE cm2.face_id = f.id AND cr2.status = 'active' ORDER BY c2.id LIMIT 1), '')
 		FROM faces f JOIN analyses a ON a.id = f.analysis_id
 		LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
 		LEFT JOIN people p ON p.id = ca.person_id
@@ -868,7 +872,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	var faces []photoDetailFace
 	for rows.Next() {
 		var value photoDetailFace
-		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.PersonID, &value.Person, &value.Similarity, &value.Margin, &value.Quality, &value.Detection, &value.Disposition, &value.ClusterID, &value.ClusterKey, &value.ClusterConsistency, &value.ClusterConnectivity); err != nil {
+		if err := rows.Scan(&value.ID, &value.Index, &value.Left, &value.Top, &value.Right, &value.Bottom, &value.State, &value.PersonID, &value.Person, &value.Similarity, &value.Margin, &value.Quality, &value.Detection, &value.Disposition, &value.ClusterID, &value.ClusterKey, &value.ClusterConsistency, &value.ClusterConnectivity, &value.ClusterPersonID, &value.ClusterPerson); err != nil {
 			return
 		}
 		value.PossibleCandidates, err = s.currentPossibleCandidates(r.Context(), value.ID)
@@ -963,11 +967,11 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 			body.WriteString(renderRecognitionCandidates(value.RecognitionCandidates, value.ID, value.PersonID, account.Role != auth.Viewer))
 		}
 		if value.ClusterID != "" {
-			clusterKey := value.ClusterKey
-			if clusterKey == "" {
-				clusterKey = idSuffix(value.ClusterID)
+			clusterPerson := ""
+			if value.ClusterPersonID != "" {
+				clusterPerson = `<a href="/review/people/` + template.HTMLEscapeString(value.ClusterPersonID) + `">` + template.HTMLEscapeString(value.ClusterPerson) + `</a>:`
 			}
-			body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> <a href="/review/clusters/` + template.HTMLEscapeString(value.ClusterID) + `">` + template.HTMLEscapeString(clusterKey) + `</a>: ` + template.HTMLEscapeString(idSuffix(value.ClusterID)) + `: Cs: ` + formatScoreUnavailable(value.ClusterConsistency.Float64, value.ClusterConsistency.Valid) + ` Cn: ` + formatScoreUnavailable(value.ClusterConnectivity.Float64, value.ClusterConnectivity.Valid) + ` Q: ` + formatScore(value.Quality) + `% D: ` + formatScore(value.Detection) + `%</p>`)
+			body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> <a href="/review/clusters/` + template.HTMLEscapeString(value.ClusterID) + `">` + template.HTMLEscapeString(idSuffix(value.ClusterID)) + `</a>: ` + clusterPerson + ` <strong>Cs:</strong> ` + formatScoreUnavailable(value.ClusterConsistency.Float64, value.ClusterConsistency.Valid) + ` <strong>Cn:</strong> ` + formatScoreUnavailable(value.ClusterConnectivity.Float64, value.ClusterConnectivity.Valid) + ` <strong>Q:</strong> ` + formatScore(value.Quality) + `% <strong>D:</strong> ` + formatScore(value.Detection) + `%</p>`)
 		} else {
 			body.WriteString(`<p class="photo-cluster"><strong>Cluster:</strong> No cluster</p>`)
 		}
@@ -992,6 +996,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		for _, value := range assignedFaces {
 			body.WriteString(`<div class="assigned-face-line"><strong>Face ` + fmt.Sprint(value.Index+1) + `:</strong> `)
 			if value.PersonID != "" && value.Person != "" {
+				body.WriteString(`<img loading="lazy" class="assigned-face-person-image" alt="" src="/api/people/` + template.HTMLEscapeString(value.PersonID) + `/representative"> `)
 				body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(value.PersonID) + `">` + template.HTMLEscapeString(value.Person) + `</a>`)
 			} else {
 				body.WriteString(template.HTMLEscapeString(value.Person))
@@ -1005,6 +1010,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		body.WriteString(`<script src="/static/photo.js" defer></script>`)
 	}
 	pageStyle := template.CSS(`#photo-page{max-width:100%}.photo-header{display:block;position:sticky;top:0;z-index:10;background:#fff;padding:4px 0}.photo-header h1{margin:.15rem 0;overflow-wrap:anywhere}.photo-summary-table{display:flex;flex-wrap:wrap;gap:12px;margin:10px 0 0}.photo-summary-table>div{min-width:7rem}.photo-summary-table dt{font-size:.8em;color:#555}.photo-summary-table dd{margin:2px 0 0;font-weight:600}.photo-summary-table a{font-weight:600}.photo-path-summary{margin:.5rem 0}.photo-size-controls{display:flex;align-items:center;gap:.75rem;max-width:840px}.photo-size-controls button{margin-left:auto}.photo-detail{position:relative;display:inline-block;max-width:100%}.photo-detail>img{display:block;width:auto;max-width:min(420px,90vw);max-height:70vh}.photo-detail.photo-size-0-25>img{max-width:min(105px,90vw);max-height:17.5vh}.photo-detail.photo-size-0-5>img{max-width:min(210px,90vw);max-height:35vh}.photo-detail.photo-size-1>img{max-width:min(420px,90vw);max-height:70vh}.photo-detail.photo-size-1-5>img{max-width:min(630px,90vw);max-height:90vh}.photo-detail.photo-size-2>img{max-width:min(840px,100vw);max-height:100vh}.photo-boxes{position:absolute;inset:0}.photo-box{position:absolute;border:2px solid #f00;background:rgba(204,0,0,.15);pointer-events:none}.photo-face-number{position:absolute;transform:translateX:.15rem);color:#900;font-size:.8rem;line-height:1;pointer-events:none}.photo-face-grid{display:flex;flex-wrap:wrap;gap:18px;margin-top:18px}.photo-face{width:min(420px,45vw);border:2px solid #c62828;padding:10px}.photo-face.provisional{border-color:#d6a800}.photo-face.needs-attention{border-color:#c62828}.photo-face-heading{font-size:1rem;line-height:1.35}.photo-face .candidate-list,.photo-face .person-candidates{font-size:.9em;line-height:1.35;margin-top:6px}.photo-cluster{margin:.5rem 0}.photo-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}.photo-actions select{max-width:100%}.photo-actions .person-select-filter{min-width:10rem}.photo-size{border:0;padding:0;margin:.5rem 0;display:flex;gap:.35rem;align-items:center}.assigned-group{border-color:#0a2}.assigned-face-line{padding:.35rem 0;border-top:1px solid #ddd}.assigned-face-line:first-of-type{border-top:0}@media(max-width:600px){.photo-face{width:100%}}`)
+	pageStyle = template.CSS(string(pageStyle) + `.photo-size-controls{gap:.35rem}.photo-size-controls button{margin-left:.25rem}.photo-face-number{transform:translateX(.35rem);color:#f00;font-weight:700}.assigned-face-line{display:flex;align-items:center;gap:.35rem}.assigned-face-person-image{max-height:32px;width:auto;border-radius:4px;vertical-align:middle}`)
 	s.render(w, map[string]any{"Title": relative, "Account": account, "Breadcrumb": template.HTML(`<a href="/review/photos">Photos</a>`), "Body": template.HTML(body.String()), "PageStyle": pageStyle})
 }
 
@@ -2560,12 +2566,16 @@ func (s *Server) photoScript(w http.ResponseWriter, _ *http.Request) {
   });
   document.querySelectorAll('[data-person-filter]').forEach((input) => {
     const select = document.getElementById(input.dataset.personFilter); if (!select) return;
+    const options = Array.from(select.options).map((option) => option.cloneNode(true));
     const filter = () => {
       const query = input.value.trim().toLowerCase();
-      Array.from(select.options).forEach((option) => {
+      const selected = select.value;
+      const matches = options.filter((option) => {
         const name = (option.dataset.personName || option.textContent || '').toLowerCase();
-        option.hidden = Boolean(query) && !name.includes(query);
+        return !query || name.includes(query);
       });
+      select.replaceChildren(...matches.map((option) => option.cloneNode(true)));
+      if (matches.some((option) => option.value === selected)) select.value = selected;
     };
     input.addEventListener('input', filter); filter();
   });
