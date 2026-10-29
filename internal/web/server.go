@@ -531,14 +531,14 @@ func (s *Server) reviewPhotos(w http.ResponseWriter, r *http.Request) {
 	body.WriteString(`<div class="photo-list photo-size-` + strings.ReplaceAll(pageSize, ".", "-") + `">`)
 	for _, photo := range pagePhotos {
 		cardClass := photoCardClass(photo.Faces)
-		body.WriteString(`<article class="card photo-card ` + cardClass + `"><a class="photo-preview" href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `" alt="` + template.HTMLEscapeString(photo.RelativePath) + `"></a><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `">` + template.HTMLEscapeString(photo.RelativePath) + `</a></div><div class="photo-meta">Faces: ` + fmt.Sprint(photo.NeedsReviewCount) + ` / ` + fmt.Sprint(photo.FaceCount) + `; ` + photoPeopleSummary(photo.Faces) + `</div></article>`)
+		body.WriteString(`<article class="card photo-card ` + cardClass + `"><a class="photo-preview" href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `"><img loading="lazy" src="/api/photos/` + template.HTMLEscapeString(photo.PathID) + `" alt="` + template.HTMLEscapeString(photo.RelativePath) + `"></a><div class="path"><a href="/review/photos?path_id=` + template.HTMLEscapeString(photo.PathID) + `">` + template.HTMLEscapeString(photo.RelativePath) + `</a></div><div class="photo-meta">Faces: ` + fmt.Sprint(photo.NeedsReviewCount) + ` / ` + fmt.Sprint(photo.FaceCount) + `</div>` + photoPeopleTable(photo.Faces, pageSize) + `</article>`)
 	}
 	if len(pagePhotos) == 0 {
 		body.WriteString(`<p class="photo-empty">No photos match the active filters.</p>`)
 	}
 	body.WriteString(`</div>`)
 	renderPager()
-	style := template.CSS(`#photos-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#photos-controls .photos-controls-break{flex-basis:100%;height:0}#photos-controls>button{margin-left:4rem}.photos-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.photos-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.photo-size{border:0;padding:0;margin:0;display:flex;gap:.35rem;align-items:center}.photo-list{display:flex;flex-wrap:wrap;gap:18px}.photo-card{width:min(calc(420px * var(--photo-scale)),calc(45vw * var(--photo-scale)));border:2px solid #c62828;padding:10px}.photo-card.assigned{border-color:#0a2}.photo-card.provisional{border-color:#d6a800}.photo-card .photo-preview{display:block}.photo-card img{display:block;width:100%;height:auto;max-height:55vh;object-fit:contain}.photo-card .path{margin-top:8px;overflow-wrap:anywhere}.photo-meta{margin-top:6px;line-height:1.35}.photo-size-0-25{--photo-scale:.25}.photo-size-0-5{--photo-scale:.5}.photo-size-1{--photo-scale:1}.photo-size-1-5{--photo-scale:1.5}.photo-size-2{--photo-scale:2}.photo-empty{width:100%;padding:.75rem;border:1px solid #c62828;background:#fff1f1}@media(max-width:600px){.photo-card{width:100%}}`)
+	style := template.CSS(`#photos-controls{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin:.5rem 0;width:max-content;max-width:100%;overflow-x:auto}#photos-controls .photos-controls-break{flex-basis:100%;height:0}#photos-controls>button{margin-left:4rem}.photos-page-pager{width:max-content;display:flex;align-items:center;gap:.4rem;margin:.5rem 0}.photos-page-pager .page-jump{display:flex;align-items:center;gap:.4rem}.photo-size{border:0;padding:0;margin:0;display:flex;gap:.35rem;align-items:center}.photo-list{display:flex;flex-wrap:wrap;gap:18px}.photo-card{width:min(calc(420px * var(--photo-scale)),calc(45vw * var(--photo-scale)));border:2px solid #c62828;padding:10px}.photo-card.assigned{border-color:#0a2}.photo-card.provisional{border-color:#d6a800}.photo-card .photo-preview{display:block}.photo-card img{display:block;width:100%;height:auto;max-height:55vh;object-fit:contain}.photo-card .path{margin-top:8px;overflow-wrap:anywhere}.photo-meta{margin-top:6px;line-height:1.35}.photo-people-table{width:100%;margin-top:6px;border-collapse:collapse;table-layout:fixed}.photo-people-table td{padding:2px 4px;border:1px solid #ddd;vertical-align:top;overflow-wrap:anywhere}.photo-size-0-25{--photo-scale:.25}.photo-size-0-5{--photo-scale:.5}.photo-size-1{--photo-scale:1}.photo-size-1-5{--photo-scale:1.5}.photo-size-2{--photo-scale:2}.photo-size-0-25 .photo-people-table td,.photo-size-0-5 .photo-people-table td{width:100%}.photo-size-1 .photo-people-table td{width:50%}.photo-size-1-5 .photo-people-table td{width:33.333%}.photo-size-2 .photo-people-table td{width:25%}.photo-empty{width:100%;padding:.75rem;border:1px solid #c62828;background:#fff1f1}@media(max-width:600px){.photo-card{width:100%}}`)
 	s.render(w, map[string]any{"Title": "Photos", "Account": account, "Body": template.HTML(body.String()), "PageStyle": style})
 }
 
@@ -657,22 +657,43 @@ func photoCardClass(faces []search.ReviewPhotoFace) string {
 	return "needs-attention"
 }
 
-func photoPeopleSummary(faces []search.ReviewPhotoFace) string {
+func photoPeopleTable(faces []search.ReviewPhotoFace, size string) string {
+	columns := 1
+	switch size {
+	case "1":
+		columns = 2
+	case "1.5":
+		columns = 3
+	case "2":
+		columns = 4
+	}
 	if len(faces) == 0 {
-		return "Unassigned"
+		return `<table class="photo-people-table"><tbody><tr><td>Unassigned</td></tr></tbody></table>`
 	}
-	parts := make([]string, 0, len(faces))
-	for _, face := range faces {
-		name := "Unassigned"
-		if face.PersonName != "" {
-			name = template.HTMLEscapeString(face.PersonName)
+	var body strings.Builder
+	body.WriteString(`<table class="photo-people-table"><tbody>`)
+	for start := 0; start < len(faces); start += columns {
+		body.WriteString(`<tr>`)
+		for offset := 0; offset < columns; offset++ {
+			index := start + offset
+			if index >= len(faces) {
+				body.WriteString(`<td></td>`)
+				continue
+			}
+			face := faces[index]
+			name := "Unassigned"
+			if face.PersonName != "" {
+				name = template.HTMLEscapeString(face.PersonName)
+			}
+			if face.PersonID != "" {
+				name = `<a href="/review/people/` + template.HTMLEscapeString(face.PersonID) + `">` + name + `</a>`
+			}
+			body.WriteString(`<td>` + fmt.Sprintf("%d. %s (%s)", face.Index+1, name, template.HTMLEscapeString(shortAssignment(face.State))) + `</td>`)
 		}
-		if face.PersonID != "" && face.PersonName != "" {
-			name = `<a href="/review/people/` + template.HTMLEscapeString(face.PersonID) + `">` + name + `</a>`
-		}
-		parts = append(parts, fmt.Sprintf("%d. %s (%s)", face.Index+1, name, template.HTMLEscapeString(shortAssignment(face.State))))
+		body.WriteString(`</tr>`)
 	}
-	return strings.Join(parts, ", ")
+	body.WriteString(`</tbody></table>`)
+	return body.String()
 }
 
 func shortAssignment(state string) string {

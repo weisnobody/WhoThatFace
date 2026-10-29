@@ -14,6 +14,7 @@ import (
 	"github.com/pjg/face_me_bro/internal/db"
 	"github.com/pjg/face_me_bro/internal/jobs"
 	"github.com/pjg/face_me_bro/internal/review"
+	"github.com/pjg/face_me_bro/internal/search"
 )
 
 func TestPossibleFaceForPersonOnlyIncludesActionableAssignments(t *testing.T) {
@@ -54,6 +55,29 @@ func TestCandidateRenderersFormatAssignedPerson(t *testing.T) {
 	possible := renderPossibleMatches([]possibleCandidateView{{PersonID: "person-1", PersonName: "One"}}, "face-1", "person-1", false)
 	if !strings.Contains(possible, `<strong><a href="/review/people/person-1">One</a></strong>`) {
 		t.Fatalf("possible-match rendering did not emphasize the assigned person: %s", possible)
+	}
+}
+
+func TestPhotoPeopleTableUsesPhotoSizeColumns(t *testing.T) {
+	faces := []search.ReviewPhotoFace{
+		{Index: 0, PersonID: "person-1", PersonName: "One", State: "assigned-user"},
+		{Index: 1, PersonID: "person-2", PersonName: "Two", State: "assigned-user"},
+		{Index: 2, PersonID: "person-3", PersonName: "Three", State: "assigned-user"},
+		{Index: 3, PersonID: "person-4", PersonName: "Four", State: "assigned-user"},
+	}
+	for _, testCase := range []struct {
+		size, want string
+	}{
+		{size: "0.25", want: `<tr><td>1. <a href="/review/people/person-1">`},
+		{size: "0.5", want: `<tr><td>1. <a href="/review/people/person-1">`},
+		{size: "1", want: `<tr><td>1. <a href="/review/people/person-1">`},
+		{size: "1.5", want: `<tr><td>1. <a href="/review/people/person-1">`},
+		{size: "2", want: `<tr><td>1. <a href="/review/people/person-1">`},
+	} {
+		body := photoPeopleTable(faces, testCase.size)
+		if !strings.Contains(body, testCase.want) || strings.Count(body, `<tr>`) != map[string]int{"0.25": 4, "0.5": 4, "1": 2, "1.5": 2, "2": 1}[testCase.size] {
+			t.Fatalf("size %s table = %s", testCase.size, body)
+		}
 	}
 }
 
