@@ -955,6 +955,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 		}
 		body.WriteString(`<article class="` + cardClass + `" data-face-id="` + template.HTMLEscapeString(value.ID) + `"><div class="photo-face-heading"><strong>Face ` + fmt.Sprint(value.Index+1) + `:</strong> `)
 		if value.PersonID != "" && value.Person != "" {
+			body.WriteString(`<img loading="lazy" class="assigned-face-person-image" alt="" src="/api/people/` + template.HTMLEscapeString(value.PersonID) + `/representative"> `)
 			body.WriteString(`<a href="/review/people/` + template.HTMLEscapeString(value.PersonID) + `">` + template.HTMLEscapeString(personName) + `</a>`)
 		} else {
 			body.WriteString(template.HTMLEscapeString(personName))
