@@ -9,7 +9,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/pjg/face_me_bro/internal/app"
+	"github.com/weisnobody/whothatface/internal/app"
 )
 
 type stringListFlag []string

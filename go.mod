@@ -1,4 +1,4 @@
-module github.com/pjg/face_me_bro
+module github.com/weisnobody/whothatface
 
 go 1.26
 

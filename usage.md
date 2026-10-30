@@ -13,14 +13,14 @@ Use Python 3.11. Put the virtual environment and model files where the
 application configuration will find them:
 
 ```sh
-export FACE_ME_BRO_VENV="$PWD/runtime/venv"
-export FACE_ME_BRO_MODEL_ROOT="$PWD/runtime/models"
-export FACE_ME_BRO_MODEL=buffalo_l
+export WTFACE_VENV="$PWD/runtime/venv"
+export WTFACE_MODEL_ROOT="$PWD/runtime/models"
+export WTFACE_MODEL=buffalo_l
 
 ./scripts/setup_worker.sh
 go mod download
 mkdir -p bin
-go build -o bin/face-me-bro ./cmd/face-me-bro
+go build -o bin/whothatface ./cmd/whothatface
 ```
 
 Create a strict JSON configuration file. Relative paths are resolved below
@@ -38,7 +38,7 @@ cat > config.json <<EOF
 }
 EOF
 
-APP="$PWD/bin/face-me-bro"
+APP="$PWD/bin/whothatface"
 CONFIG="$PWD/config.json"
 
 "$APP" --config "$CONFIG" status
@@ -52,7 +52,7 @@ script downloads `buffalo_l` to
 the model directory, database, exports, backups, and photos private.
 
 The CLI accepts `--config PATH` on every command. It also accepts
-`FACE_ME_PRO_CONFIG`; do not provide conflicting values.
+`WTFACE_CONFIG`; do not provide conflicting values.
 
 Inspect the resolved configuration and change the application-wide
 neighbor-search default when needed:

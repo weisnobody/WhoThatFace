@@ -10,15 +10,15 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/pjg/face_me_bro/internal/candidates"
-	"github.com/pjg/face_me_bro/internal/clustering"
-	"github.com/pjg/face_me_bro/internal/recognition"
+	"github.com/weisnobody/whothatface/internal/candidates"
+	"github.com/weisnobody/whothatface/internal/clustering"
+	"github.com/weisnobody/whothatface/internal/recognition"
 )
 
 const (
 	defaultConfigFile   = "config.json"
-	configEnvironment   = "FACE_ME_PRO_CONFIG"
-	defaultDatabase     = "face_me_bro.sqlite3"
+	configEnvironment   = "WTFACE_CONFIG"
+	defaultDatabase     = "whothatface.sqlite3"
 	defaultSearchMethod = "exact"
 	defaultServeAddress = "127.0.0.1:8080"
 	defaultProvider     = "CPUExecutionProvider"
@@ -431,17 +431,17 @@ func defaultRuntimeDataRoot() (string, error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "face_me_bro"), nil
+		return filepath.Join(home, "Library", "Application Support", "whothatface"), nil
 	case "windows":
 		if appData := os.Getenv("AppData"); appData != "" {
-			return filepath.Join(appData, "face_me_bro"), nil
+			return filepath.Join(appData, "whothatface"), nil
 		}
-		return filepath.Join(home, "AppData", "Roaming", "face_me_bro"), nil
+		return filepath.Join(home, "AppData", "Roaming", "whothatface"), nil
 	default:
 		if dataHome := os.Getenv("XDG_DATA_HOME"); dataHome != "" {
-			return filepath.Join(dataHome, "face_me_bro"), nil
+			return filepath.Join(dataHome, "whothatface"), nil
 		}
-		return filepath.Join(home, ".local", "share", "face_me_bro"), nil
+		return filepath.Join(home, ".local", "share", "whothatface"), nil
 	}
 }
 

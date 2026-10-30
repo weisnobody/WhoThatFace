@@ -276,7 +276,7 @@ def load_model():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Face-Me-Bro InsightFace NDJSON worker")
+    parser = argparse.ArgumentParser(description="Who That Face InsightFace NDJSON worker")
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-root", default="")
     parser.add_argument("--providers", required=True)

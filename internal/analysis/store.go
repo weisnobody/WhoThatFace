@@ -12,8 +12,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/id"
-	"github.com/pjg/face_me_bro/internal/worker"
+	"github.com/weisnobody/whothatface/internal/id"
+	"github.com/weisnobody/whothatface/internal/worker"
 )
 
 type Pipeline struct {

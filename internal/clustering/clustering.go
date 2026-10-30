@@ -8,7 +8,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/pjg/face_me_bro/internal/recognition"
+	"github.com/weisnobody/whothatface/internal/recognition"
 )
 
 type Face struct {

@@ -20,8 +20,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/audit"
-	"github.com/pjg/face_me_bro/internal/review"
+	"github.com/weisnobody/whothatface/internal/audit"
+	"github.com/weisnobody/whothatface/internal/review"
 )
 
 const CropVersion = "square-face-v1"

@@ -8,8 +8,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/id"
-	"github.com/pjg/face_me_bro/internal/review"
+	"github.com/weisnobody/whothatface/internal/id"
+	"github.com/weisnobody/whothatface/internal/review"
 )
 
 type Processor struct {

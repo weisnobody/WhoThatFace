@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/pjg/face_me_bro/internal/db"
+	"github.com/weisnobody/whothatface/internal/db"
 )
 
 func TestProcessorRunsAndActivatesClustering(t *testing.T) {

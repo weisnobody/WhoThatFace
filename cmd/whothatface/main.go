@@ -17,24 +17,24 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/analysis"
-	"github.com/pjg/face_me_bro/internal/app"
-	"github.com/pjg/face_me_bro/internal/audit"
-	"github.com/pjg/face_me_bro/internal/auth"
-	"github.com/pjg/face_me_bro/internal/candidates"
-	"github.com/pjg/face_me_bro/internal/clustering"
-	"github.com/pjg/face_me_bro/internal/config"
-	"github.com/pjg/face_me_bro/internal/db"
-	"github.com/pjg/face_me_bro/internal/id"
-	"github.com/pjg/face_me_bro/internal/jobs"
-	"github.com/pjg/face_me_bro/internal/media"
-	"github.com/pjg/face_me_bro/internal/recognition"
-	"github.com/pjg/face_me_bro/internal/representative"
-	"github.com/pjg/face_me_bro/internal/review"
-	"github.com/pjg/face_me_bro/internal/search"
-	"github.com/pjg/face_me_bro/internal/setup"
-	"github.com/pjg/face_me_bro/internal/web"
-	"github.com/pjg/face_me_bro/internal/worker"
+	"github.com/weisnobody/whothatface/internal/analysis"
+	"github.com/weisnobody/whothatface/internal/app"
+	"github.com/weisnobody/whothatface/internal/audit"
+	"github.com/weisnobody/whothatface/internal/auth"
+	"github.com/weisnobody/whothatface/internal/candidates"
+	"github.com/weisnobody/whothatface/internal/clustering"
+	"github.com/weisnobody/whothatface/internal/config"
+	"github.com/weisnobody/whothatface/internal/db"
+	"github.com/weisnobody/whothatface/internal/id"
+	"github.com/weisnobody/whothatface/internal/jobs"
+	"github.com/weisnobody/whothatface/internal/media"
+	"github.com/weisnobody/whothatface/internal/recognition"
+	"github.com/weisnobody/whothatface/internal/representative"
+	"github.com/weisnobody/whothatface/internal/review"
+	"github.com/weisnobody/whothatface/internal/search"
+	"github.com/weisnobody/whothatface/internal/setup"
+	"github.com/weisnobody/whothatface/internal/web"
+	"github.com/weisnobody/whothatface/internal/worker"
 )
 
 const outputSchemaVersion = "1"
@@ -85,13 +85,13 @@ func lastReferenceDiscovery(ctx context.Context, database *sql.DB) (*time.Time, 
 
 func main() {
 	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintf(os.Stderr, "face-me-bro: %v\n", err)
+		fmt.Fprintf(os.Stderr, "whothatface: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("face-me-bro", flag.ContinueOnError)
+	flags := flag.NewFlagSet("whothatface", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "configuration file or directory")
 	noMigrate := flags.Bool("no-migrate", false, "refuse to create or upgrade the database schema")
@@ -248,7 +248,7 @@ func dispatch(ctx context.Context, application *app.App, command string, args []
 	case "purge":
 		return purgeCommand(ctx, application, args, jsonOutput, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command %q (run 'face-me-bro help' for available commands)", command)
+		return fmt.Errorf("unknown command %q (run 'whothatface help' for available commands)", command)
 	}
 }
 
@@ -259,27 +259,27 @@ type helpTopic struct {
 }
 
 var commandHelp = map[string]helpTopic{
-	"status":     {Usage: "face-me-bro [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
-	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
-	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; optional CLI-admin limit overrides: --max-pixels N --max-width N --max-height N; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
-	"job":        {Usage: "face-me-bro job <list|get|status|reference-reprocess|reference-discovery|possible-candidates|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; possible-candidates: --person-id ID or --collection-id ID or --all; controls use JOB_ID"},
-	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
-	"setup":      {Usage: "face-me-bro setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
-	"serve":      {Usage: "face-me-bro serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
-	"pipeline":   {Usage: "face-me-bro pipeline <get|register|list> [options]", Description: "Register or inspect model and preprocessing pipeline identities.", Options: "get: --pipeline-id; list: --limit N --page N; register: --model-family --model-version --provider --model-checksums-json --detector-config-json --preprocessing-config-json"},
-	"config":     {Usage: "face-me-bro config <show|set-search> [options]", Description: "Show or change global application configuration.", Options: "set-search: --method exact|ann"},
-	"worker":     {Usage: "face-me-bro worker", Description: "Run the background worker loop for queued analysis and recognition jobs."},
-	"people":     {Usage: "face-me-bro people <get|list|create|representative> [options]", Description: "Inspect, list, or create people records and representative images.", Options: "get: --person-id; list: --limit N --page N; create: --name NAME [--provisional]; representative: --person-id ID [--face-id ID|--clear] --yes"},
-	"face":       {Usage: "face-me-bro face <get|list|candidates|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, possible candidates, dispositions, and reference status.", Options: "get: --face-id; list: --limit N --page N; candidates: --face-id ID; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
-	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
-	"candidate":  {Usage: "face-me-bro candidate run <get|list|status> [options]", Description: "Inspect possible face-candidate discovery runs.", Options: "list: --limit N --page N; get/status: --run-id ID"},
-	"search":     {Usage: "face-me-bro search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
-	"chart":      {Usage: "face-me-bro chart [options]", Description: "Create score histograms for faces and clusters in active clustering runs.", Options: "--all; --collection-id ID (repeatable or comma-separated); --format text|markdown|json"},
-	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
-	"backup":     {Usage: "face-me-bro backup create", Description: "Create a database backup in the configured backup directory."},
-	"restore":    {Usage: "face-me-bro restore --input FILE --yes", Description: "Replace the configured database from a backup after explicit confirmation."},
-	"export":     {Usage: "face-me-bro export <metadata|assignments|embeddings> [--output FILE]", Description: "Export versioned metadata, identity assignments, or sensitive embeddings as JSON."},
-	"purge":      {Usage: "face-me-bro purge derived --yes", Description: "Delete derived face, assignment, clustering, and job data after confirmation."},
+	"status":     {Usage: "whothatface [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
+	"collection": {Usage: "whothatface collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
+	"scan":       {Usage: "whothatface scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; optional CLI-admin limit overrides: --max-pixels N --max-width N --max-height N; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
+	"job":        {Usage: "whothatface job <list|get|status|reference-reprocess|reference-discovery|possible-candidates|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; possible-candidates: --person-id ID or --collection-id ID or --all; controls use JOB_ID"},
+	"account":    {Usage: "whothatface account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
+	"setup":      {Usage: "whothatface setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
+	"serve":      {Usage: "whothatface serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
+	"pipeline":   {Usage: "whothatface pipeline <get|register|list> [options]", Description: "Register or inspect model and preprocessing pipeline identities.", Options: "get: --pipeline-id; list: --limit N --page N; register: --model-family --model-version --provider --model-checksums-json --detector-config-json --preprocessing-config-json"},
+	"config":     {Usage: "whothatface config <show|set-search> [options]", Description: "Show or change global application configuration.", Options: "set-search: --method exact|ann"},
+	"worker":     {Usage: "whothatface worker", Description: "Run the background worker loop for queued analysis and recognition jobs."},
+	"people":     {Usage: "whothatface people <get|list|create|representative> [options]", Description: "Inspect, list, or create people records and representative images.", Options: "get: --person-id; list: --limit N --page N; create: --name NAME [--provisional]; representative: --person-id ID [--face-id ID|--clear] --yes"},
+	"face":       {Usage: "whothatface face <get|list|candidates|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, possible candidates, dispositions, and reference status.", Options: "get: --face-id; list: --limit N --page N; candidates: --face-id ID; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
+	"cluster":    {Usage: "whothatface cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
+	"candidate":  {Usage: "whothatface candidate run <get|list|status> [options]", Description: "Inspect possible face-candidate discovery runs.", Options: "list: --limit N --page N; get/status: --run-id ID"},
+	"search":     {Usage: "whothatface search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
+	"chart":      {Usage: "whothatface chart [options]", Description: "Create score histograms for faces and clusters in active clustering runs.", Options: "--all; --collection-id ID (repeatable or comma-separated); --format text|markdown|json"},
+	"audit":      {Usage: "whothatface audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
+	"backup":     {Usage: "whothatface backup create", Description: "Create a database backup in the configured backup directory."},
+	"restore":    {Usage: "whothatface restore --input FILE --yes", Description: "Replace the configured database from a backup after explicit confirmation."},
+	"export":     {Usage: "whothatface export <metadata|assignments|embeddings> [--output FILE]", Description: "Export versioned metadata, identity assignments, or sensitive embeddings as JSON."},
+	"purge":      {Usage: "whothatface purge derived --yes", Description: "Delete derived face, assignment, clustering, and job data after confirmation."},
 }
 
 func helpCommand(stdout io.Writer, jsonOutput bool, args []string) error {
@@ -304,7 +304,7 @@ func helpCommand(stdout io.Writer, jsonOutput bool, args []string) error {
 	if jsonOutput {
 		return writeJSON(stdout, envelope("help", map[string]any{"commands": commandHelp, "global_options": "--config PATH, --no-migrate, --json, --help"}))
 	}
-	fmt.Fprintln(stdout, "Usage: face-me-bro [global options] <command> [options]")
+	fmt.Fprintln(stdout, "Usage: whothatface [global options] <command> [options]")
 	fmt.Fprintln(stdout, "\nCommands:")
 	keys := make([]string, 0, len(commandHelp))
 	for key := range commandHelp {
@@ -319,7 +319,7 @@ func helpCommand(stdout io.Writer, jsonOutput bool, args []string) error {
 	fmt.Fprintln(stdout, "  --no-migrate        Refuse to create or upgrade the database schema.")
 	fmt.Fprintln(stdout, "  --json              Emit versioned JSON output where supported.")
 	fmt.Fprintln(stdout, "  --help, -h          Show this help or help for the selected command.")
-	fmt.Fprintln(stdout, "\nUse 'face-me-bro help <command>' for command-specific usage and parameters.")
+	fmt.Fprintln(stdout, "\nUse 'whothatface help <command>' for command-specific usage and parameters.")
 	return nil
 }
 
@@ -391,7 +391,7 @@ func exportCommand(ctx context.Context, application *app.App, args []string, jso
 		Application   string   `json:"application"`
 		PipelineIDs   []string `json:"pipeline_ids"`
 		Records       []record `json:"records"`
-	}{FormatVersion: "1", SchemaVersion: "010_person_representatives", ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Application: "face-me-bro"}
+	}{FormatVersion: "1", SchemaVersion: "010_person_representatives", ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Application: "whothatface"}
 	rows, err := application.DB.QueryContext(ctx, `SELECT id FROM pipelines ORDER BY created_at, id`)
 	if err != nil {
 		return err

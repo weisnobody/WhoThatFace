@@ -27,7 +27,7 @@ workflow.
 
 ## Validation
 
-- Cross-check every new command and option against `cmd/face-me-bro/main.go`.
+- Cross-check every new command and option against `cmd/whothatface/main.go`.
 - Check Markdown formatting, links, numbering, and stale terminology.
 - Review the final diff for private data, generated files, or commands that
   could be mistaken for non-destructive operations.

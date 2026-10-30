@@ -10,7 +10,7 @@ import (
 )
 
 func TestOpenAppliesMigrationsAndIsIdempotent(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "face_me_bro.sqlite3")
+	databasePath := filepath.Join(t.TempDir(), "whothatface.sqlite3")
 	ctx := context.Background()
 
 	database, err := Open(ctx, databasePath)

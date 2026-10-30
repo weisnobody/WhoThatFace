@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pjg/face_me_bro/internal/auth"
-	"github.com/pjg/face_me_bro/internal/db"
-	"github.com/pjg/face_me_bro/internal/jobs"
-	"github.com/pjg/face_me_bro/internal/review"
-	"github.com/pjg/face_me_bro/internal/search"
+	"github.com/weisnobody/whothatface/internal/auth"
+	"github.com/weisnobody/whothatface/internal/db"
+	"github.com/weisnobody/whothatface/internal/jobs"
+	"github.com/weisnobody/whothatface/internal/review"
+	"github.com/weisnobody/whothatface/internal/search"
 )
 
 func TestPossibleFaceForPersonOnlyIncludesActionableAssignments(t *testing.T) {
@@ -607,7 +607,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	if !strings.Contains(clusterResponse.Body.String(), `value="person-2"`) {
 		t.Fatalf("cluster detail omitted named person with no assigned faces: %s", clusterResponse.Body.String())
 	}
-	for _, value := range []string{"Face-Me-Bro", `class="breadcrumb">› <a href="/review/clusters">Clusters</a>`, "cluster-detail-controls", `value="to-assign">To Assign</option>`, "Proposed person", "Consistency", "Review version", "Candidate confidence", "class=\"grid cluster-grid\"", "class=\"card cluster-face assigned assigned-user\"", `value="person-1" selected`, "User:</strong> Cs:", `data-action="unknown"`, `data-action="ambiguous"`, `data-disposition="incorrect-assignment"`, `data-disposition="false-detection">No Face`, `data-disposition="dont-track">Don't Track`, "person-select-filter", "data-action=\"assign\"", "/review/photos?path_id=path-1", "/review/people/person-1"} {
+	for _, value := range []string{"Who That Face", `class="breadcrumb">› <a href="/review/clusters">Clusters</a>`, "cluster-detail-controls", `value="to-assign">To Assign</option>`, "Proposed person", "Consistency", "Review version", "Candidate confidence", "class=\"grid cluster-grid\"", "class=\"card cluster-face assigned assigned-user\"", `value="person-1" selected`, "User:</strong> Cs:", `data-action="unknown"`, `data-action="ambiguous"`, `data-disposition="incorrect-assignment"`, `data-disposition="false-detection">No Face`, `data-disposition="dont-track">Don't Track`, "person-select-filter", "data-action=\"assign\"", "/review/photos?path_id=path-1", "/review/people/person-1"} {
 		if !strings.Contains(clusterResponse.Body.String(), value) {
 			t.Errorf("cluster detail missing %q: %s", value, clusterResponse.Body.String())
 		}

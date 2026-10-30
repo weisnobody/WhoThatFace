@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/pjg/face_me_bro/schemas"
+	"github.com/weisnobody/whothatface/schemas"
 )
 
 type migration struct {

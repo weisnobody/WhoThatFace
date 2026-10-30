@@ -107,14 +107,14 @@ This checklist records the implementation pass against `docs/SPEC.md` and
 The implementation pass was verified with:
 
 ```text
-GOCACHE=/private/tmp/face-me-bro-go-cache go test ./...
-GOCACHE=/private/tmp/face-me-bro-go-cache go vet ./...
+GOCACHE=/private/tmp/whothatface-go-cache go test ./...
+GOCACHE=/private/tmp/whothatface-go-cache go vet ./...
 python3 -m unittest worker.test_insightface_worker
 python3 -m unittest scripts.test_setup_models
 python3 -m unittest scripts.test_setup_worker
 python3 -m unittest discover -s prototypes/model_settings_review/tests
 python3 -m py_compile worker/insightface_worker.py scripts/setup_models.py scripts/test_setup_models.py
-FACE_ME_BRO_MODEL_ROOT=/private/tmp/face-me-bro-model-test /private/tmp/face-me-bro-clean-venv-20261011/bin/python -m unittest worker.test_insightface_worker scripts.test_setup_models scripts.test_setup_worker prototypes.model_settings_review.tests.test_review_tool
+WTFACE_MODEL_ROOT=/private/tmp/whothatface-model-test /private/tmp/whothatface-clean-venv-20261011/bin/python -m unittest worker.test_insightface_worker scripts.test_setup_models scripts.test_setup_worker prototypes.model_settings_review.tests.test_review_tool
 bash -n scripts/setup_worker.sh
 git diff --check
 ```

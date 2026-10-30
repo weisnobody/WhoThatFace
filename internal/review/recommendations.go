@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/weisnobody/whothatface/internal/id"
 )
 
 const MaxReferenceRecommendations = 20

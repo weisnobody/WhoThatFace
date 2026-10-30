@@ -10,8 +10,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/audit"
-	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/weisnobody/whothatface/internal/audit"
+	"github.com/weisnobody/whothatface/internal/id"
 )
 
 const sessionDuration = 7 * 24 * time.Hour

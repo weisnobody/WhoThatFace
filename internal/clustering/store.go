@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/weisnobody/whothatface/internal/id"
 )
 
 type RunStore struct{ db *sql.DB }

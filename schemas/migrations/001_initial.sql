@@ -1,4 +1,4 @@
--- Initial face_me_bro schema.
+-- Initial whothatface schema.
 -- Migration files are immutable after application.
 
 PRAGMA foreign_keys = ON;

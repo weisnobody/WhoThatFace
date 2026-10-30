@@ -102,7 +102,7 @@ func validateBackup(filename string) error {
 	defer database.Close()
 	var count int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
-		return fmt.Errorf("restore is not a face-me-bro database: %w", err)
+		return fmt.Errorf("restore is not a whothatface database: %w", err)
 	}
 	if count == 0 {
 		return fmt.Errorf("restore database has no applied schema migrations")
