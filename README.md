@@ -19,7 +19,6 @@ From the repository root:
 
 ```sh
 ./scripts/setup_worker.sh
-source .venv/bin/activate
 ```
 
 This installs the pinned worker dependencies, downloads and verifies the
@@ -29,6 +28,8 @@ offline validation, and the optional Docker worker.
 
 The default environment includes Pillow and `pillow-heif`, so the supported
 HEIF/HEIC path works for worker analysis and representative-image generation.
+
+The Python "stuff" is not called directly, but the work is run as process via the Go CLI app.
 
 ### Additional Pillow plugins
 
@@ -114,13 +115,19 @@ configuration file or directory and runtime data root.
 
 ## Documentation
 
-- [`docs/SPEC.md`](docs/SPEC.md) — requirements and acceptance criteria.
-- [`docs/DESIGN.md`](docs/DESIGN.md) — architecture and boundaries.
 - [`docs/installation.md`](docs/installation.md) — worker setup and
   configuration selection.
 - [`docs/usage.md`](docs/usage.md) — end-to-end collection and review workflow.
+- [`docs/production_operations.md`](docs/production_operations.md) — high level steps to get running and process your first collection of photos
 - [`config.example.jsonc`](config.example.jsonc) — documented configuration
   settings and defaults.
+
+
+## Development Documentation
+
+- [`docs/SPEC.md`](docs/SPEC.md) — requirements and acceptance criteria.
+- [`docs/DESIGN.md`](docs/DESIGN.md) — architecture and boundaries.
 - [`docs/plans/`](docs/plans/) — implementation and feature plans.
-- [`docs/protocols/performance_evaluation.md`](docs/protocols/performance_evaluation.md)
-  — benchmark procedure.
+- [`docs/protocols/`](docs/protocols/) — testing and benchmark procedures and notes
+- [`docs/discussions/`](docs/discussions/) — discussions with LLM re features
+- [`docs/tasks/`](docs/tasks/) — lists of tasks that were fed to the LLM
