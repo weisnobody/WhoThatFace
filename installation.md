@@ -50,12 +50,12 @@ PIPELINE_ID="<pipeline-id printed by pipeline register>"
 ```
 
 Create `config.json` before running these commands; the complete example,
-including database and runtime paths, is in [`docs/usage.md`](usage.md).
+including database and runtime paths, is in [`usage.md`](usage.md).
 Keep the worker running in its own terminal while scans and review-triggered
 jobs are processed.
 
 For the full first-run workflow, including collection setup, review, backups,
-and maintenance, see [`docs/usage.md`](usage.md).
+and maintenance, see [`usage.md`](usage.md).
 
 An optional Docker worker configuration is documented in `docker/README.md`.
 

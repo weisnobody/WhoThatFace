@@ -790,7 +790,7 @@ ONNX/CoreML execution if packaging or performance requires it.
 | `docs/DESIGN.md` | Architecture, implementation boundaries, repository layout, and tradeoffs |
 | `docs/PLAN.md` | Larger implementation milestones |
 | `docs/plans/` | Plans for smaller tasks, features, and bug fixes |
-| `docs/installation.md` | Installation, model setup, and worker startup |
+| `installation.md` | Installation, model setup, and worker startup |
 | `worker/README.md` | Worker-specific setup and development details |
 
 When these documents conflict, the approved specification defines required

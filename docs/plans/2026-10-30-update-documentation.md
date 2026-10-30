@@ -2,7 +2,7 @@
 
 ## Objective
 
-Bring `README.md`, `docs/installation.md`, and `docs/usage.md` into alignment
+Bring `README.md`, `installation.md`, and `usage.md` into alignment
 with the current CLI and provide a complete, safe first-run and maintenance
 workflow.
 

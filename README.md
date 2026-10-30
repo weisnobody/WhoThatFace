@@ -23,7 +23,7 @@ From the repository root:
 
 This installs the pinned worker dependencies, downloads and verifies the
 `buffalo_l` model, and records the complete environment freeze. See
-[`docs/installation.md`](docs/installation.md) for configuration overrides,
+[`installation.md`](installation.md) for configuration overrides,
 offline validation, and the optional Docker worker.
 
 The default environment includes Pillow and `pillow-heif`, so the supported
@@ -77,8 +77,8 @@ performance benchmark executable. The binaries can be run directly, for
 example `./bin/face-me-bro help`.
 
 For a complete first-run workflow, continue with
-[`docs/usage.md`](docs/usage.md). The shorter installation notes are in
-[`docs/installation.md`](docs/installation.md), and
+[`usage.md`](usage.md). The shorter installation notes are in
+[`installation.md`](installation.md), and
 [`config.example.jsonc`](config.example.jsonc) documents every configuration
 setting.
 
@@ -115,10 +115,10 @@ configuration file or directory and runtime data root.
 
 ## Documentation
 
-- [`docs/installation.md`](docs/installation.md) — worker setup and
+- [`installation.md`](installation.md) — worker setup and
   configuration selection.
-- [`docs/usage.md`](docs/usage.md) — end-to-end collection and review workflow.
-- [`docs/production_operations.md`](docs/production_operations.md) — high level steps to get running and process your first collection of photos
+- [`usage.md`](usage.md) — end-to-end collection and review workflow.
+- [`production_operations.md`](production_operations.md) — high level steps to get running and process your first collection of photos
 - [`config.example.jsonc`](config.example.jsonc) — documented configuration
   settings and defaults.
 
