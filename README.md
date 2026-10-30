@@ -3,6 +3,8 @@
 Local facial recognition and identification with a Go application and an
 InsightFace Python worker.
 
+Created / Coded using AI (mostly Codex, some Claude).
+
 ## Requirements
 
 - Go toolchain supported by the repository's `go.mod`.
