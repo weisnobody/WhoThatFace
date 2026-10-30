@@ -38,9 +38,24 @@ to `127.0.0.1:8080`, and `provider` defaults to `CPUExecutionProvider`.
 Register a pipeline, then start the worker:
 
 ```sh
-face-me-bro pipeline register --model-family buffalo_l
-face-me-bro worker --pipeline-id <pipeline-id>
+APP="$PWD/bin/face-me-bro"
+CONFIG="$PWD/config.json"
+
+"$APP" --config "$CONFIG" setup check
+"$APP" --config "$CONFIG" pipeline register --model-family buffalo_l
+PIPELINE_ID="<pipeline-id printed by pipeline register>"
+"$APP" --config "$CONFIG" worker \
+  --pipeline-id "$PIPELINE_ID" \
+  --script "$PWD/worker/insightface_worker.py"
 ```
+
+Create `config.json` before running these commands; the complete example,
+including database and runtime paths, is in [`docs/usage.md`](usage.md).
+Keep the worker running in its own terminal while scans and review-triggered
+jobs are processed.
+
+For the full first-run workflow, including collection setup, review, backups,
+and maintenance, see [`docs/usage.md`](usage.md).
 
 An optional Docker worker configuration is documented in `docker/README.md`.
 

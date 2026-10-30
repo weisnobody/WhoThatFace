@@ -75,6 +75,12 @@ The first build produces the main CLI. The second produces the optional
 performance benchmark executable. The binaries can be run directly, for
 example `./bin/face-me-bro help`.
 
+For a complete first-run workflow, continue with
+[`docs/usage.md`](docs/usage.md). The shorter installation notes are in
+[`docs/installation.md`](docs/installation.md), and
+[`config.example.jsonc`](config.example.jsonc) documents every configuration
+setting.
+
 ## Run and test
 
 Check the configured runtime:
@@ -110,7 +116,11 @@ configuration file or directory and runtime data root.
 
 - [`docs/SPEC.md`](docs/SPEC.md) — requirements and acceptance criteria.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — architecture and boundaries.
+- [`docs/installation.md`](docs/installation.md) — worker setup and
+  configuration selection.
 - [`docs/usage.md`](docs/usage.md) — end-to-end collection and review workflow.
+- [`config.example.jsonc`](config.example.jsonc) — documented configuration
+  settings and defaults.
 - [`docs/plans/`](docs/plans/) — implementation and feature plans.
 - [`docs/protocols/performance_evaluation.md`](docs/protocols/performance_evaluation.md)
   — benchmark procedure.

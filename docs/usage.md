@@ -54,6 +54,18 @@ the model directory, database, exports, backups, and photos private.
 The CLI accepts `--config PATH` on every command. It also accepts
 `FACE_ME_PRO_CONFIG`; do not provide conflicting values.
 
+Inspect the resolved configuration and change the application-wide
+neighbor-search default when needed:
+
+```sh
+"$APP" --config "$CONFIG" config show
+"$APP" --config "$CONFIG" config set-search --method exact
+```
+
+Use `status` to see the selected database, model root, Python executable,
+provider, pipeline, and search method. A collection can override this default
+with `collection set-search` below.
+
 ## 2. Register the model pipeline
 
 Register the exact model and execution provider that the worker will use. The
@@ -88,11 +100,26 @@ COLLECTION_ID=$("$APP" --config "$CONFIG" collection add \
 "$APP" --config "$CONFIG" collection get --collection-id "$COLLECTION_ID"
 "$APP" --config "$CONFIG" collection set-search \
   --collection-id "$COLLECTION_ID" --method exact
+"$APP" --config "$CONFIG" collection set-enabled \
+  --collection-id "$COLLECTION_ID" --enabled=true
 ```
 
 `exact` is the correctness/reference search path. `ann` selects the
 approximate-search prototype. The method can be changed later with the same
 `collection set-search` command.
+
+Disable a collection without deleting it, or remove it after confirming the
+destructive operation:
+
+```sh
+"$APP" --config "$CONFIG" collection set-enabled \
+  --collection-id "$COLLECTION_ID" --enabled=false
+"$APP" --config "$CONFIG" collection remove \
+  --collection-id "$COLLECTION_ID" --yes
+```
+
+Removing a collection removes its stored collection data and associated
+derived records. Back up first if the collection may be needed later.
 
 Scan the collection recursively:
 
@@ -146,20 +173,38 @@ Monitor or control jobs from another terminal:
 "$APP" --config "$CONFIG" job pause JOB_ID
 "$APP" --config "$CONFIG" job resume JOB_ID
 "$APP" --config "$CONFIG" job retry JOB_ID
+"$APP" --config "$CONFIG" job get JOB_ID
+"$APP" --config "$CONFIG" job cancel JOB_ID
+"$APP" --config "$CONFIG" job throttle --mode reduced
 "$APP" --config "$CONFIG" worker status
 ```
 
 The worker can be stopped with `worker stop`. Failed item details are
-available through `job get JOB_ID` and the review service.
+available through `job get JOB_ID`, `job status --job-id JOB_ID`, and the
+review service. Use `job retry JOB_ID` only after checking the failure; use
+`job cancel JOB_ID` when the work should not be retried. Throttle modes are
+`automatic`, `full-speed`, `reduced`, and `paused`.
+
+Reference changes can be processed explicitly when a person gains or loses
+approved reference faces:
+
+```sh
+"$APP" --config "$CONFIG" job reference-reprocess --person-id PERSON_ID
+"$APP" --config "$CONFIG" job reference-discovery --since-last
+"$APP" --config "$CONFIG" job reference-discovery --person-id PERSON_ID \
+  --since 2026-01-01T00:00:00Z
+```
 
 To look for possible matches for unresolved faces, run the separate candidate
 discovery job. It compares eligible faces with approved reference faces and
 never changes assignments or cluster membership:
 
 ```sh
-JOB_JSON=$($APP --config "$CONFIG" job possible-candidates --all)
+JOB_JSON=$("$APP" --config "$CONFIG" job possible-candidates --all)
 "$APP" --config "$CONFIG" job list
 "$APP" --config "$CONFIG" candidate run list
+"$APP" --config "$CONFIG" candidate run get --run-id RUN_ID
+"$APP" --config "$CONFIG" candidate run status --run-id RUN_ID
 "$APP" --config "$CONFIG" face candidates --face-id FACE_ID
 ```
 
@@ -202,9 +247,22 @@ web UI or with the CLI:
   --username reviewer --password 'replace-with-a-strong-password' \
   --role reviewer
 "$APP" --config "$CONFIG" account list
+"$APP" --config "$CONFIG" account get --account-id ACCOUNT_ID
 "$APP" --config "$CONFIG" account grant \
   --account-id ACCOUNT_ID --collection-id "$COLLECTION_ID" \
   --view --modify --undo
+```
+
+Administrators can disable or re-enable an account and force a password
+change. Collection permissions are independent of the account role: `view`
+allows review access, `modify` allows review changes, and `undo` allows
+reverting changes.
+
+```sh
+"$APP" --config "$CONFIG" account disable --account-id ACCOUNT_ID
+"$APP" --config "$CONFIG" account enable --account-id ACCOUNT_ID
+"$APP" --config "$CONFIG" account reset-password \
+  --account-id ACCOUNT_ID --password 'replace-with-a-strong-password'
 ```
 
 ## 6. Review people, faces, and clusters
@@ -275,6 +333,14 @@ are independent:
   --face-id FACE_ID --disposition dont-track --yes
 ```
 
+To exclude a person from candidate discovery, set the person-level
+don't-track flag. This is separate from a face disposition:
+
+```sh
+"$APP" --config "$CONFIG" people dont-track \
+  --person-id "$PERSON_ID" --value=true
+```
+
 Cluster review supports a default person plus explicit per-face exceptions:
 
 ```sh
@@ -288,7 +354,7 @@ previous state with `POST /api/faces/FACE_ID/assignment` and
 `{"reject":true}`. Use the authenticated review pages or APIs when a
 multi-face review needs optimistic version checking.
 
-## 7. Select reference faces and search
+## 8. Select reference faces and search
 
 Select only clear, representative faces as references. Reference selection
 causes targeted recognition and clustering reprocessing, so keep the worker
@@ -330,13 +396,28 @@ review-state filters:
 "$APP" --config "$CONFIG" search --person-id "$PERSON_ID" \
   --directory vacations --from 2020-01-01 --until 2024-12-31
 "$APP" --config "$CONFIG" search --review-mode
+"$APP" --config "$CONFIG" search --review-mode \
+  --include-provisional --include-assigned-system --include-assigned-user
+"$APP" --config "$CONFIG" search --states unassigned,ambiguous
 ```
 
-Use `--json` for versioned machine-readable output from CLI commands, and
-the authenticated `/api/photos` endpoints for browser or application
+In review mode, assigned faces are excluded by default. Add the relevant
+`--include-*` flags to include provisional, system-assigned, or user-assigned
+faces. `--states` accepts a comma-separated assignment-state filter. Use
+`--json` for versioned machine-readable output from CLI commands, and the
+authenticated `/api/photos` endpoints for browser or application
 integrations.
 
-## 8. Incremental processing and maintenance
+Generate score-distribution reports for active clusters, either globally or
+for selected collections:
+
+```sh
+"$APP" --config "$CONFIG" chart --all --format markdown
+"$APP" --config "$CONFIG" chart --collection-id "$COLLECTION_ID" \
+  --format json
+```
+
+## 9. Incremental processing and maintenance
 
 After adding or removing files, run the same scan again. Inspect the new scan
 and queued jobs before reviewing new clusters:
@@ -348,12 +429,20 @@ and queued jobs before reviewing new clusters:
 ```
 
 Create a database backup before large review or configuration changes. Stop
-the worker and service before restoring one:
+the worker and service before restoring one. Stop the worker with `worker
+stop`; stop the review service with `Ctrl-C` in its terminal or through the
+process supervisor that launched it:
 
 ```sh
 BACKUP=$("$APP" --config "$CONFIG" backup create)
 "$APP" --config "$CONFIG" restore --input "$BACKUP" --yes
+"$APP" --config "$CONFIG" status
+"$APP" --config "$CONFIG" setup check
 ```
+
+After restoring, verify the configured paths and setup report before starting
+the worker and review service again. A restore replaces the configured
+database; it does not restore model files or photos.
 
 Exports are JSON and can contain sensitive data, especially embeddings:
 
@@ -371,9 +460,22 @@ the deployment policy:
 "$APP" --config "$CONFIG" audit purge --age-days 365
 ```
 
+To rebuild all derived face, assignment, clustering, and job data while
+retaining source collection and account records, stop the worker and service,
+create a backup, and explicitly confirm:
+
+```sh
+"$APP" --config "$CONFIG" purge derived --yes
+```
+
+This operation is destructive and cannot recover the deleted derived data by
+itself. Rescan and reprocess collections afterward.
+
 For a complete command list, run:
 
 ```sh
 "$APP" help
 "$APP" help worker
+"$APP" help search
+"$APP" help purge
 ```
