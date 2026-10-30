@@ -1,0 +1,7 @@
+# Authoritative direct lock for the supported Python 3.11 worker runtime.
+# setup_worker.sh installs this file and records the complete transitive
+# freeze at .venv/requirements.lock.txt for the host/provider combination.
+insightface==2.0.0
+onnxruntime==1.30.0
+Pillow==11.3.0
+pillow-heif==1.8.1

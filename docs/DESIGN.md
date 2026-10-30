@@ -12,6 +12,17 @@ the `docs/plans/` directory.
 face_me_bro/
 ├── AGENTS.md
 ├── README.md
+├── cmd/
+│   ├── face-me-bro/
+│   └── face-me-bro-benchmark/
+├── internal/
+│   ├── analysis/
+│   ├── clustering/
+│   ├── jobs/
+│   ├── media/
+│   ├── recognition/
+│   ├── review/
+│   └── web/
 ├── docs/
 │   ├── DESIGN.md
 │   ├── SPEC.md
@@ -21,23 +32,27 @@ face_me_bro/
 ├── schemas/
 │   ├── schema/
 │   └── migrations/
-├── cli/
-│   ├── README.md
-│   ├── cmd/
-│   └── internal/
 ├── worker/
-│   ├── README.md
-│   ├── requirements.txt
-│   ├── src/
-│   ├── tests/
-│   └── docs/
+│   ├── insightface_worker.py
+│   ├── requirements.in
+│   ├── requirements.lock
+│   └── platforms.json
+├── scripts/
+│   ├── setup_worker.sh
+│   └── setup_models.py
+├── docker/
+│   └── Dockerfile
 └── ...
 ```
 
 ### Top-level directory responsibilities
 
-- `cli/` contains the Go application and command-line interface.
-- `worker/` contains the Python ML adapter and its tests.
+- `cmd/` contains Go entry points for the application and benchmark command.
+- `internal/` contains the Go application services and package boundaries.
+- `worker/` contains the Python ML adapter, dependency locks, and provider
+  metadata.
+- `scripts/` contains environment and model setup automation.
+- `docker/` contains the optional worker-container configuration.
 - `schemas/schema/` contains the canonical database schema definitions or
   schema artifacts.
 - `schemas/migrations/` contains ordered, immutable database migrations.
@@ -94,6 +109,8 @@ The Go application owns:
 - People and identity-event management.
 - Embedding persistence and compatible-pipeline checks.
 - Similarity matching and recognition decisions.
+- Face-to-face similarity search and clustering, with the initial grouping
+  implementation preferred in Go.
 - Search.
 - Worker lifecycle, protocol handling, timeout, restart, and retry logic.
 - Adaptive resource control.
@@ -112,7 +129,6 @@ The Python worker owns:
 - Face detection and alignment.
 - Embedding generation.
 - Face-quality metrics.
-- Experimental clustering support.
 
 The worker communicates through the versioned NDJSON protocol described in
 `SPEC.md`. stdout is reserved for protocol messages; diagnostics use stderr.
@@ -134,6 +150,15 @@ SQLite is the durable system of record for application state, including:
 The database contains logical collections rather than one database per photo
 collection. This enables shared people, cross-collection search, and
 cross-collection content deduplication.
+
+SQLite connections use WAL mode, foreign-key enforcement, and a busy timeout
+configured in the connection string so the settings apply to every pooled
+connection. The application limits the pool to four open and four idle
+connections. Read-only CLI operations open SQLite in read-only mode. Schema
+migration checks and execution are owned by `status` and `serve`; other CLI
+commands skip migration checks and can safely read while a worker writes.
+Migration acquisition uses an immediate transaction with bounded exponential
+retry for transient `SQLITE_BUSY` errors.
 
 ## Core data flow
 
@@ -164,11 +189,207 @@ The asset owns deduplicated content and embedded metadata. Each path owns its
 collection membership, directory, current/missing state, and filesystem
 observation data.
 
+## User-facing processing workflow
+
+The normal workflow is discovery-first and incremental. A user may add photos
+without having reference faces for every person in the collection.
+
+### 1. Add photos
+
+The user adds one or more directories or paths to the system. The scanner
+creates or updates path and asset records, deduplicates content by hash, and
+queues new or changed photos for analysis.
+
+### 2. Process new photos
+
+For each new photo, the system:
+
+1. Detects faces and records bounding boxes, detection confidence, quality
+   metrics, and embeddings.
+2. If reference faces exist, compares eligible faces with the reference gallery.
+3. Records recognition results for tracked people as `assigned-system`,
+   `provisional`, or `unknown` according to the assignment policy.
+4. Groups all eligible newly detected faces using the configured clustering
+   workflow. A later configuration may restrict grouping to faces without a
+   high-confidence recognition result.
+5. Generates reference-face recommendations for faces with a person
+   assignment, including system-assigned and user-assigned faces.
+
+Recognition and grouping are separate evidence paths. Recognition compares a
+face with person reference examples. Grouping compares faces with other faces.
+Both results are retained so the user can understand disagreement between the
+two processes.
+
+### 2.1 Cluster disposition
+
+When cluster consistency, face quality, detection confidence, and recognition
+evidence agree that the faces likely belong to one person, the system may take
+one of these dispositions:
+
+- If the recognized person is in the `don't track` pool, retain the person
+  assignment and the independent don't-track state; don't-track does not alter
+  recognition or grouping eligibility.
+- If the cluster joins an existing cluster that has already been manually
+  assigned to a person, provisionally assign new faces to that person.
+- Otherwise, provisionally associate the cluster's faces with the suggested
+  person so they can appear in that person's photo collection while the cluster
+  remains marked for review.
+
+If the evidence disagrees, the cluster is flagged as requiring review. A mixed
+cluster must remain explicitly reviewable and must not be bulk-confirmed as one
+person.
+
+Provisional association is a review state, not a final identity confirmation.
+It must be visibly distinguishable from a user-confirmed assignment and must
+not automatically promote every face to the reference gallery.
+
+### 2.2 Reference recommendations
+
+After processing and assignment, the system may recommend faces with a person
+assignment as reference candidates, including system-assigned or
+user-assigned faces. A don't-track disposition does not exclude a face that
+has a person assignment. Recommendations consider face quality, detection
+confidence, similarity to the person's embedding center, cluster consistency,
+diversity, and duplicate risk. Recommendations are advisory; the user approves
+which faces become references.
+
+### 3. Review clusters
+
+The user can open a cluster-review workspace containing clusters requiring
+attention. The cluster list supports:
+
+- Sorting by face count, candidate count, or associated person.
+- Filtering by person, face-count range, mixed-cluster status, and review
+  rating.
+- Filtering by `don't track`, which is excluded by default.
+- Selecting a cluster for detailed review.
+
+Review rating is derived from configurable ranges of signal, quality,
+detection, and recognition-confidence values. Ratings are prioritization aids,
+not identity decisions.
+
+Singleton clusters are displayed separately or grouped into a virtual review
+group by primary person. Assigning a virtual singleton group requires an
+additional confirmation that the user reviewed the individual faces and is not
+assuming that the group is a true visual cluster.
+
+Within a cluster, the user can:
+
+- Sort faces by confidence, quality, or detection confidence.
+- Filter faces by person or reference recommendation status.
+- Set or change the proposed person for all faces in the cluster.
+- Reject the proposed person for individual faces.
+- Assign individual faces through a person selector with search/autocomplete.
+- Create a new person and assign selected faces to it.
+- Confirm the selected faces for the proposed person.
+- Assign selected faces to the `don't track` pool.
+
+Confirmation controls should be available at both the beginning and end of a
+cluster view when the view is long enough to require scrolling.
+
+### 4. Review people
+
+The people workspace provides a person-centered view of review work. It
+supports sorting by:
+
+- Name.
+- Number of photos.
+- Number of clusters containing more than one face.
+- Number of singleton clusters.
+- Number of reviewed clusters.
+
+It supports filtering by:
+
+- Name.
+- Whether the person has enough approved reference faces.
+- Whether the person has clusters requiring review.
+- Favorites, when that future feature exists.
+- Groups, when that future feature exists.
+- Unknown people who have no name and are not in `don't track`.
+- `Don't track`, excluded by default.
+
+Person actions include:
+
+- Open clusters requiring review for that person.
+- View approved references and recommended reference candidates.
+- View low-confidence or conflicting assignments.
+
+Each person may have a representative image for people lists, selectors,
+search results, and other user-interface surfaces. This is presentation-only
+derived data: it is never sent to the recognition worker, added to the
+matching gallery, used for clustering, or treated as a new analysis.
+
+Unless the user explicitly selects a face, the representative is chosen from
+the highest-scored eligible face in this order:
+
+1. current reference faces;
+2. current `assigned-user` faces;
+3. current `assigned-system` faces;
+4. current `provisional` faces;
+5. all remaining faces associated with the person.
+
+The candidate score is the existing face-quality score, with detection
+confidence and a stable face ID as deterministic tie-breakers. The selection
+is recomputed when relevant face state or scores change. An explicit user
+selection takes precedence until cleared or replaced; if its source face is
+deleted, the normal fallback order is used.
+
+The saved representative is a crop of the selected face's oriented source
+image. The crop starts with the face bounding box expanded by 20% on all four
+sides, expands the shorter dimension as needed to make the captured region
+square, clamps the square to the source-image bounds, and resizes it to at
+most 96 by 96 pixels. The crop algorithm and version are recorded so the
+representative can be regenerated consistently. Original photographs are
+never modified.
+
+The low-confidence view includes faces that are currently unassigned to the
+person but for which one evidence path indicates that the person remains a
+candidate. The default action is to confirm that the face is not that person;
+the user can instead assign it to the person.
+
+### 5. Review questionable assignments (future feature)
+
+The system may later provide a queue for assignments that conflict strongly
+with recognition evidence. The user can confirm the assignment, assign another
+person, or place the face in `don't track`.
+
+### 6. Tag non-face people (future feature)
+
+The system may later allow users to identify a person who is present but has no
+usable face, such as a person facing away from the camera. The initial version
+may identify bodies and allow a user to mark a body or other region, but these
+marks are search metadata rather than face-recognition training examples.
+
+The data model and review experience for body-only identification require a
+separate design decision.
+
+### 7. Reprocess after reference changes
+
+When the user approves new reference faces, the system identifies affected
+people and queues only the work that can be improved by the changed reference
+set. Existing embeddings remain unchanged. Stored predictions and provisional
+assignments are versioned or marked stale so the user can distinguish results
+produced before and after the reference change.
+
+The initial priority order is:
+
+| Priority | Work |
+| --- | --- |
+| 1 | Recognition predictions |
+| 2 | Cluster dispositions |
+| 3 | Provisional person assignments |
+| 4 | Reference recommendations |
+| 9 | Search indexes |
+
+The queue may coalesce duplicate work for the same person, face, or collection.
+Search-index updates are intentionally lowest priority because they do not
+change recognition or review correctness.
+
 ### Recognition
 
 ```text
 query face
-  → compatible confirmed examples
+  → compatible approved reference faces
   → cosine similarity
   → person-level evidence aggregation
   → threshold, margin, support-count, and quality checks
@@ -179,6 +400,180 @@ query face
 
 Identity events are retained as history. The current confirmed identity is a
 derived state, not the only stored record.
+
+## Production grouping
+
+The MVP runs face grouping over all eligible faces in the collection, including
+faces that already have recognition results. This preserves a second evidence
+path and makes mixed-cluster disagreements visible during review. The candidate
+scope is configurable so a later deployment can group only faces without a
+high-confidence recognition result; the default remains `all`.
+
+Recognition and grouping use separate thresholds. The initial recognition
+defaults are:
+
+| Recognition context | Similarity | Margin | Grouping `k` | Face-to-face edge threshold |
+| --- | ---: | ---: | ---: | ---: |
+| Person has approved references | 0.25 | 0.05 | 40 | 0.45 |
+| Person has no approved references | 0.40 | 0.05 | 40 | 0.45 |
+
+All values are configurable. Similarity and margin apply to person recognition;
+the face-to-face threshold applies when constructing grouping graph edges.
+Grouping uses a k-nearest-neighbor graph with mutual-nearest-neighbor edges in
+the initial implementation. Connected components form the provisional groups.
+
+### Subset clustering and active-run invalidation
+
+The MVP currently permits only complete clustering runs over the full eligible
+face set. The CLI, worker, and reference-reprocessing paths must use
+`candidate_scope = all`; subset and unresolved-only runs are rejected until
+the partial-run design is implemented.
+
+Full runs include user-confirmed and reference faces as fixed identity anchors.
+Their assignments are never changed by clustering, but their person IDs are
+available when proposing identities for neighboring unconfirmed faces.
+
+This restriction is intentional. The earlier implementation allowed a
+reference change to run clustering on only the affected faces and then mark
+that subset run as active. Activating a subset run superseded the previous
+full run, making clusters for unrelated people appear to disappear from the
+active review pages. It also excluded user-confirmed faces from the subset,
+so the remaining faces lost the confirmed faces that should have served as
+identity anchors. Recognition could still suggest the original person while
+the subset clustering run created a new provisional person, producing a
+false recognition/grouping disagreement.
+
+A future subset implementation must:
+
+- include the affected faces, their prior cluster neighbors, and fixed
+  `assigned-user`/reference anchors in the graph;
+- include `assigned-system` faces as labeled evidence while preserving their
+  assignment rules;
+- leave user-confirmed assignments immutable while allowing them to influence
+  proposed cluster identity;
+- invalidate or replace only clusters whose input neighborhood changed;
+- retain unaffected clusters from the active run;
+- record the replaced cluster/run relationships and review-version changes;
+- activate the resulting combined view atomically only after all affected
+  clusters are complete.
+
+Until those rules exist, a reference change queues a full clustering run.
+
+## Assignment and membership states
+
+The system records the evidence and user disposition separately, while
+exposing the following operational states. Stored assignment states are shown
+in parentheses where the display label differs:
+
+- **Recognized/high-confidence (`assigned-system`):** clustering and recognition evidence are high
+  quality and agree on the person.
+- **Provisional person association (`provisional`):** clustering and recognition evidence are at
+  least medium quality and agree on the person, but the user has not confirmed
+  the assignment.
+- **User-confirmed assignment (`assigned-user`):** the user explicitly assigned the face to the
+  person.
+- **Unassigned or unknown (`unassigned`/`unknown`):** no effective person
+  assignment exists.
+- **Ambiguous (`ambiguous`):** the user reviewed the face but could not identify
+  the person.
+- **Incorrect assignment (`incorrect-assignment`):** the detected face is real,
+  but the system's proposed person is wrong.
+- **False detection (`false-detection`):** the detected region is not a usable
+  face.
+- **Mixed-cluster membership (derived):** the face belongs to a cluster containing faces
+  assigned to different people.
+- **Don't-track membership (independent disposition):** the user indicated that the person is not
+  important to track. A face may have a person assignment and also be marked
+  don't-track, or may be marked don't-track without a person assignment.
+
+These states must not be collapsed into a single nullable person field. In
+particular, a provisional association is not equivalent to user confirmation,
+and `don't track` exists both as a person state and a face-level disposition.
+
+## Possible candidate discovery
+
+Possible candidate discovery is deliberately separate from both assignment
+and clustering. The generator selects unknown, ambiguous, unassigned, and
+small provisional groups, then compares their embeddings with approved
+reference galleries. It stores immutable run history and current candidate
+projections; it never promotes a candidate or changes cluster membership.
+
+The worker runs it as a coalesced, retry-safe job with person, collection,
+and all-data scopes. Reference-set, pipeline, and policy provenance are stored
+with every run. Reference reprocessing may enqueue candidate discovery after
+the debounce interval, but candidate discovery must not enqueue clustering.
+The review service shows scores, evidence, retention reason, run provenance,
+and stale/current state. Assigning a candidate is an explicit user action and
+is audited with the candidate row and run IDs.
+
+## Clustering run data
+
+Each clustering execution is an immutable, inspectable run. It records:
+
+- algorithm name and implementation/version;
+- `k` and face-to-face similarity threshold;
+- neighbor-search method and its configuration;
+- the input face-set definition and membership snapshot;
+- cluster memberships and component identifiers;
+- review status and mixed-cluster state;
+- run date/time;
+- superseded or replaced run identifiers.
+
+New runs do not overwrite prior results. A current-run relationship allows the
+application to use the latest accepted run while retaining reproducibility and
+review history.
+
+Run supersession is a run-level operation (`clustering_runs.status` and
+`superseded_by`), not a cluster-level flag. This is sufficient for complete
+runs, but is not sufficient for a partial run. Partial clustering must not
+mark the entire previous run superseded until the unaffected clusters have
+been carried forward into a combined active view.
+
+Low-signal thresholds for quality, detection, signal, and related metrics are
+used for report filters and review-priority flags. They do not silently change
+cluster membership or identity decisions.
+
+## Similarity-search scale and rebuild strategy
+
+The exact-versus-ANN boundary is a configuration choice that may be set
+globally or per collection. The following planning table is a starting point,
+not a hard product limit:
+
+| Face count | Initial search strategy | Reason |
+| ---: | --- | --- |
+| < 10,000 | Exact, batched search | Simplest and easy to validate |
+| 10,000–50,000 | Exact, batched search | Still practical on target hardware |
+| 50,000–100,000 | Benchmark exact versus ANN | Transition depends on latency and memory |
+| 100,000–250,000 | ANN recommended; exact validation samples | Better interactive and incremental performance |
+| > 250,000 | ANN default with periodic exact validation | Exact all-pairs work becomes increasingly costly |
+
+Supported rebuild/update strategies have different tradeoffs:
+
+| Strategy | Advantages | Costs/risks |
+| --- | --- | --- |
+| Full rebuild | Simple, deterministic, easiest to validate | Recomputes all neighbors and clusters |
+| Incremental update | Fast for small additions | Can become stale or inconsistent at component boundaries |
+| Append plus periodic rebuild | Good operational balance | Results can change at rebuild time |
+| Affected-subgraph rebuild | Limits work to impacted regions | More complex invalidation and correctness rules |
+| ANN with periodic exact validation | Scales to large libraries | Requires index lifecycle, tuning, and validation |
+
+## Review-service architecture
+
+The review interface is a web service placed behind a reverse proxy that
+terminates TLS and provides certificates. Authentication and authorization are
+application concerns even when the proxy handles transport security.
+
+The service must support:
+
+- accounts and authenticated sessions;
+- granting accounts access to specific collections;
+- recording which account confirmed an assignment or selected a reference;
+- audit history for review actions;
+- an explicit permission to undo another user's action.
+
+Review writes go through application services and transactions rather than
+direct browser access to SQLite. The CLI and future API clients should use the
+same authorization and audit rules.
 
 ## Process and job model
 
@@ -206,6 +601,11 @@ Jobs support, where meaningful:
 - completed with errors
 - failed
 
+Every job stores operational progress and a versioned completion summary. The
+summary includes the job kind, item counts, catalog counts before and after
+the job, count deltas, and any handler-specific progress. Job status output
+must expose both the live progress and the completed summary.
+
 The application must be able to resume work after process interruption. A
 worker failure affects the current item/job attempt, not the integrity of the
 database or unrelated jobs.
@@ -230,8 +630,20 @@ MVP. A future protocol may support cooperative cancellation if needed.
 
 ## Runtime data layout
 
-The exact platform paths are an implementation detail to finalize during the
-packaging prototype. The design separates runtime data into these categories:
+The default macOS runtime data root is
+`~/Library/Application Support/face_me_bro/`. The database is
+`face_me_bro.sqlite3` under that root. Configuration, models, logs, temporary
+files, exports, and backups use separate subdirectories.
+
+The CLI supports an alternate configuration file or configuration location.
+That configuration may set an alternate runtime data root, including a root on
+an external drive. Status and diagnostic commands report the resolved
+configuration file, runtime data root, database path, model path, and active
+pipeline.
+
+Platform-specific default paths are provided through a path-resolution
+adapter; configured paths and application behavior remain platform independent.
+The design separates runtime data into these categories:
 
 - SQLite database.
 - Configuration.
@@ -297,9 +709,9 @@ service, with exact matching retained as a correctness/reference path.
 
 ### Presentation layers
 
-The CLI is the first presentation layer. Future GUI or API layers should call
-the same application services and job model rather than access SQLite or the
-Python worker directly.
+The CLI and authenticated web review service are the MVP presentation layers.
+Future native GUI or additional API layers should call the same application
+services and job model rather than access SQLite or the Python worker directly.
 
 ## Key design tradeoffs
 
@@ -320,6 +732,22 @@ collection membership.
 Embeddings are stored as complete binary float32 vectors for compactness and
 efficient processing. JSON remains an export/debug representation.
 
+### Person representative images
+
+Representative images are small, derived UI assets and should be stored as a
+JPEG or PNG BLOB in SQLite in a separate person-representative table. The
+database record stores the person ID, selected face ID, whether the choice is
+automatic or explicit, crop algorithm version, dimensions, media type, and
+the generated bytes. Keeping the bytes with the database makes backup,
+restore, access control, and deletion atomic and avoids a second sidecar-file
+lifecycle. The image is not part of ML input or embedding data and must not
+be exported as an embedding.
+
+The application should regenerate an automatic representative when its source
+face or crop inputs change. A missing or corrupt cached image is recoverable
+from the source asset while that asset remains available; otherwise the UI
+shows that no representative is currently available.
+
 ### Historical identity events versus mutable assignments
 
 Historical events preserve suggestions, confirmations, rejections, manual
@@ -328,9 +756,12 @@ keeps normal queries simple without losing audit history.
 
 ### Confirmation versus automatic assignment
 
-Recognition produces suggestions. User confirmation is required for identity
-assignment in the MVP. This prevents false positives from silently becoming
-future training/matching examples.
+Recognition produces suggestions and may record provisional or
+system-assigned states. User confirmation is required before an identity is
+treated as user-confirmed in the MVP. Faces with a person assignment are
+eligible for reference recommendations, but only faces explicitly approved and
+marked as references become future matching examples. This prevents false
+positives or poor-quality faces from silently entering the recognition gallery.
 
 ### Python worker versus direct model execution
 
@@ -359,7 +790,7 @@ ONNX/CoreML execution if packaging or performance requires it.
 | `docs/DESIGN.md` | Architecture, implementation boundaries, repository layout, and tradeoffs |
 | `docs/PLAN.md` | Larger implementation milestones |
 | `docs/plans/` | Plans for smaller tasks, features, and bug fixes |
-| `cli/README.md` | CLI-specific development and usage details |
+| `installation.md` | Installation, model setup, and worker startup |
 | `worker/README.md` | Worker-specific setup and development details |
 
 When these documents conflict, the approved specification defines required

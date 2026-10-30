@@ -1,0 +1,2744 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/pjg/face_me_bro/internal/analysis"
+	"github.com/pjg/face_me_bro/internal/app"
+	"github.com/pjg/face_me_bro/internal/audit"
+	"github.com/pjg/face_me_bro/internal/auth"
+	"github.com/pjg/face_me_bro/internal/candidates"
+	"github.com/pjg/face_me_bro/internal/clustering"
+	"github.com/pjg/face_me_bro/internal/config"
+	"github.com/pjg/face_me_bro/internal/db"
+	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/pjg/face_me_bro/internal/jobs"
+	"github.com/pjg/face_me_bro/internal/media"
+	"github.com/pjg/face_me_bro/internal/recognition"
+	"github.com/pjg/face_me_bro/internal/representative"
+	"github.com/pjg/face_me_bro/internal/review"
+	"github.com/pjg/face_me_bro/internal/search"
+	"github.com/pjg/face_me_bro/internal/setup"
+	"github.com/pjg/face_me_bro/internal/web"
+	"github.com/pjg/face_me_bro/internal/worker"
+)
+
+const outputSchemaVersion = "1"
+
+func hasApprovedReferences(ctx context.Context, database *sql.DB, personID string) (bool, error) {
+	var count int
+	if err := database.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM current_face_references
+		WHERE person_id = ? AND reference = 1`, personID).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func lastReferenceDiscovery(ctx context.Context, database *sql.DB) (*time.Time, error) {
+	rows, err := database.QueryContext(ctx, `
+		SELECT created_at, COALESCE(new_json, '')
+		FROM audit_events
+		WHERE action = 'reference-discovery' AND entity_type = 'job'
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var createdAt, newJSON string
+		if err := rows.Scan(&createdAt, &newJSON); err != nil {
+			return nil, err
+		}
+		var details struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(newJSON), &details); err != nil || details.Status != "completed" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("parse reference discovery audit time: %w", err)
+		}
+		return &parsed, nil
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func main() {
+	if err := run(context.Background(), os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintf(os.Stderr, "face-me-bro: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("face-me-bro", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configPath := flags.String("config", "", "configuration file or directory")
+	noMigrate := flags.Bool("no-migrate", false, "refuse to create or upgrade the database schema")
+	jsonOutput := flags.Bool("json", false, "emit versioned JSON output")
+	help := flags.Bool("help", false, "show command help")
+	flags.BoolVar(help, "h", false, "show command help")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	command := "status"
+	if flags.NArg() > 0 {
+		command = flags.Arg(0)
+	}
+	if *help || command == "help" || command == "?" {
+		var helpArgs []string
+		if command == "help" || command == "?" {
+			helpArgs = flags.Args()[1:]
+		}
+		if *help && flags.NArg() > 0 {
+			helpArgs = []string{command}
+		}
+		return helpCommand(stdout, *jsonOutput, helpArgs)
+	}
+	if command == "restore" {
+		restoreFlags := flag.NewFlagSet("restore", flag.ContinueOnError)
+		restoreFlags.SetOutput(stderr)
+		input := restoreFlags.String("input", "", "backup file")
+		confirmed := restoreFlags.Bool("yes", false, "confirm database replacement")
+		if err := restoreFlags.Parse(flags.Args()[1:]); err != nil {
+			return err
+		}
+		if *input == "" || !*confirmed {
+			return fmt.Errorf("restore requires --input and --yes")
+		}
+		settings, err := config.Load(*configPath)
+		if err != nil {
+			return err
+		}
+		if err := db.Restore(settings.DatabasePath, *input); err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return writeJSON(stdout, envelope("restore", map[string]string{"database": settings.DatabasePath}))
+		}
+		fmt.Fprintln(stdout, settings.DatabasePath)
+		return nil
+	}
+	application, err := app.OpenWithOptions(ctx, *configPath, *noMigrate, db.OpenOptions{
+		SkipMigrations: command != "status" && command != "serve",
+		ReadOnly:       commandIsReadOnly(command, flags.Args()[1:]),
+	})
+	if err != nil {
+		return err
+	}
+	defer application.Close()
+	return dispatch(ctx, application, command, flags.Args()[1:], *jsonOutput, stdout, stderr)
+}
+
+func commandIsReadOnly(command string, args []string) bool {
+	subcommand := ""
+	if len(args) > 0 {
+		subcommand = args[0]
+	}
+	switch command {
+	case "collection":
+		return subcommand == "list" || subcommand == "get"
+	case "scan":
+		return subcommand == "status"
+	case "job":
+		return subcommand == "list" || subcommand == "get" || subcommand == "status"
+	case "account":
+		return subcommand == "list" || subcommand == "get"
+	case "setup":
+		return subcommand == "check"
+	case "pipeline":
+		return subcommand == "list" || subcommand == "get"
+	case "config":
+		return subcommand == "show"
+	case "people":
+		return subcommand == "list" || subcommand == "get"
+	case "face":
+		return subcommand == "get" || subcommand == "list" || subcommand == "candidates"
+	case "cluster":
+		return subcommand == "get" || subcommand == "list" || (subcommand == "run" && len(args) > 1 && (args[1] == "get" || args[1] == "list" || args[1] == "status"))
+	case "candidate":
+		return true
+	case "audit":
+		return subcommand == "list"
+	case "search":
+		return true
+	case "chart":
+		return true
+	case "backup", "export":
+		return true
+	default:
+		return false
+	}
+}
+
+func dispatch(ctx context.Context, application *app.App, command string, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	switch command {
+	case "status":
+		status, err := application.Status(ctx)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope(command, status))
+		}
+		fmt.Fprintf(stdout, "Config file:      %s\nRuntime root:     %s\nDatabase:         %s\nModel root:       %s\nPython:           %s\nDefault provider: %s\nServe address:    %s\nLog root:         %s\nTemp root:        %s\nExport root:      %s\nBackup root:      %s\nMax pixels:       %d\nMax width:        %d\nMax height:       %d\nMax pixels override: %d\nMax width override:  %d\nMax height override: %d\nSearch method:    %s\n", status.ConfigFile, status.RuntimeDataRoot, status.DatabasePath, status.ModelRoot, status.PythonPath, status.DefaultProvider, status.ServeAddress, status.LogRoot, status.TempRoot, status.ExportRoot, status.BackupRoot, status.AnalysisMaxPixels, status.AnalysisMaxWidth, status.AnalysisMaxHeight, status.AnalysisMaxPixelsOverride, status.AnalysisMaxWidthOverride, status.AnalysisMaxHeightOverride, status.NeighborSearchMethod)
+		if status.PipelineID == nil {
+			fmt.Fprintln(stdout, "Pipeline:         not configured")
+		} else {
+			fmt.Fprintf(stdout, "Pipeline:         %s\n", *status.PipelineID)
+		}
+		fmt.Fprintf(stdout, "Provider:         %s\n", status.Provider)
+		return nil
+	case "collection":
+		return collectionCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "scan":
+		return scanCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "job":
+		return jobCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "account":
+		return accountCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "setup":
+		return setupCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "serve":
+		return serveCommand(ctx, application, args, stdout, stderr)
+	case "pipeline":
+		return pipelineCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "config":
+		return configCommand(application, args, jsonOutput, stdout, stderr)
+	case "worker":
+		return workerCommand(ctx, application, args, stdout, stderr)
+	case "people":
+		return peopleCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "face":
+		return faceCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "cluster":
+		return clusterCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "candidate":
+		return candidateCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "search":
+		return searchCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "chart":
+		return chartCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "audit":
+		return auditCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "backup":
+		return backupCommand(application, args, jsonOutput, stdout)
+	case "export":
+		return exportCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	case "purge":
+		return purgeCommand(ctx, application, args, jsonOutput, stdout, stderr)
+	default:
+		return fmt.Errorf("unknown command %q (run 'face-me-bro help' for available commands)", command)
+	}
+}
+
+type helpTopic struct {
+	Usage       string `json:"usage"`
+	Description string `json:"description"`
+	Options     string `json:"options,omitempty"`
+}
+
+var commandHelp = map[string]helpTopic{
+	"status":     {Usage: "face-me-bro [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
+	"collection": {Usage: "face-me-bro collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
+	"scan":       {Usage: "face-me-bro scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; optional CLI-admin limit overrides: --max-pixels N --max-width N --max-height N; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
+	"job":        {Usage: "face-me-bro job <list|get|status|reference-reprocess|reference-discovery|possible-candidates|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; possible-candidates: --person-id ID or --collection-id ID or --all; controls use JOB_ID"},
+	"account":    {Usage: "face-me-bro account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
+	"setup":      {Usage: "face-me-bro setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
+	"serve":      {Usage: "face-me-bro serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
+	"pipeline":   {Usage: "face-me-bro pipeline <get|register|list> [options]", Description: "Register or inspect model and preprocessing pipeline identities.", Options: "get: --pipeline-id; list: --limit N --page N; register: --model-family --model-version --provider --model-checksums-json --detector-config-json --preprocessing-config-json"},
+	"config":     {Usage: "face-me-bro config <show|set-search> [options]", Description: "Show or change global application configuration.", Options: "set-search: --method exact|ann"},
+	"worker":     {Usage: "face-me-bro worker", Description: "Run the background worker loop for queued analysis and recognition jobs."},
+	"people":     {Usage: "face-me-bro people <get|list|create|representative> [options]", Description: "Inspect, list, or create people records and representative images.", Options: "get: --person-id; list: --limit N --page N; create: --name NAME [--provisional]; representative: --person-id ID [--face-id ID|--clear] --yes"},
+	"face":       {Usage: "face-me-bro face <get|list|candidates|assign|disposition|reference> [options]", Description: "Inspect or change faces, including assignments, possible candidates, dispositions, and reference status.", Options: "get: --face-id; list: --limit N --page N; candidates: --face-id ID; assign: --face-id ID --person-id ID --state STATE; disposition: --face-id ID --disposition VALUE; reference: --face-id ID --person-id ID --reference; changes require --yes"},
+	"cluster":    {Usage: "face-me-bro cluster <run|get|list|review> [options]", Description: "Run grouping, list or inspect clusters, and review clusters.", Options: "run: [--collection-id ID]; get/review: --cluster-id ID; list: [--run-id ID] --limit N --page N; review changes require --yes"},
+	"candidate":  {Usage: "face-me-bro candidate run <get|list|status> [options]", Description: "Inspect possible face-candidate discovery runs.", Options: "list: --limit N --page N; get/status: --run-id ID"},
+	"search":     {Usage: "face-me-bro search [options]", Description: "Search photos by person, directory, capture date, and assignment state.", Options: "--person-id ID --directory PATH --from DATE --until DATE [--include-provisional]"},
+	"chart":      {Usage: "face-me-bro chart [options]", Description: "Create score histograms for faces and clusters in active clustering runs.", Options: "--all; --collection-id ID (repeatable or comma-separated); --format text|markdown|json"},
+	"audit":      {Usage: "face-me-bro audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
+	"backup":     {Usage: "face-me-bro backup create", Description: "Create a database backup in the configured backup directory."},
+	"restore":    {Usage: "face-me-bro restore --input FILE --yes", Description: "Replace the configured database from a backup after explicit confirmation."},
+	"export":     {Usage: "face-me-bro export <metadata|assignments|embeddings> [--output FILE]", Description: "Export versioned metadata, identity assignments, or sensitive embeddings as JSON."},
+	"purge":      {Usage: "face-me-bro purge derived --yes", Description: "Delete derived face, assignment, clustering, and job data after confirmation."},
+}
+
+func helpCommand(stdout io.Writer, jsonOutput bool, args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("help accepts at most one command")
+	}
+	if len(args) == 1 {
+		topic, ok := commandHelp[args[0]]
+		if !ok {
+			return fmt.Errorf("unknown help topic %q", args[0])
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("help", map[string]any{"command": args[0], "help": topic}))
+		}
+		fmt.Fprintf(stdout, "Usage: %s\n\n%s\n", topic.Usage, topic.Description)
+		if topic.Options != "" {
+			fmt.Fprintf(stdout, "\nOptions and parameters: %s\n", topic.Options)
+		}
+		fmt.Fprintln(stdout, "\nGlobal options: --config PATH, --no-migrate, --json, --help")
+		return nil
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("help", map[string]any{"commands": commandHelp, "global_options": "--config PATH, --no-migrate, --json, --help"}))
+	}
+	fmt.Fprintln(stdout, "Usage: face-me-bro [global options] <command> [options]")
+	fmt.Fprintln(stdout, "\nCommands:")
+	keys := make([]string, 0, len(commandHelp))
+	for key := range commandHelp {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintf(stdout, "  %-12s %s\n", key, commandHelp[key].Description)
+	}
+	fmt.Fprintln(stdout, "\nGlobal options:")
+	fmt.Fprintln(stdout, "  --config PATH       Use an alternate configuration file or directory.")
+	fmt.Fprintln(stdout, "  --no-migrate        Refuse to create or upgrade the database schema.")
+	fmt.Fprintln(stdout, "  --json              Emit versioned JSON output where supported.")
+	fmt.Fprintln(stdout, "  --help, -h          Show this help or help for the selected command.")
+	fmt.Fprintln(stdout, "\nUse 'face-me-bro help <command>' for command-specific usage and parameters.")
+	return nil
+}
+
+func purgeCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 || args[0] != "derived" {
+		return fmt.Errorf("purge requires derived")
+	}
+	flags := flag.NewFlagSet("purge derived", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	confirmed := flags.Bool("yes", false, "confirm deletion of derived face and analysis data")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if !*confirmed {
+		return fmt.Errorf("purge derived requires --yes")
+	}
+	tx, err := application.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		`DELETE FROM current_face_references`, `DELETE FROM reference_selection_events`,
+		`DELETE FROM possible_candidate_targets`, `DELETE FROM possible_face_candidates`, `DELETE FROM possible_candidate_runs`,
+		`DELETE FROM person_representatives`,
+		`DELETE FROM reference_recommendation_decisions`, `DELETE FROM reference_recommendations`, `DELETE FROM current_face_dispositions`, `DELETE FROM face_disposition_events`,
+		`DELETE FROM current_face_assignments`, `DELETE FROM assignment_events`, `DELETE FROM cluster_memberships`,
+		`DELETE FROM cluster_review_events`, `DELETE FROM clusters`, `DELETE FROM clustering_runs`,
+		`DELETE FROM face_correspondences`, `DELETE FROM faces`, `DELETE FROM analyses`, `DELETE FROM job_items`, `DELETE FROM jobs`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "derived-purge", EntityType: "database", EntityID: application.Config.DatabasePath, New: map[string]any{"confirmed": true}})
+	if jsonOutput {
+		return writeJSON(stdout, envelope("purge derived", map[string]bool{"purged": true}))
+	}
+	fmt.Fprintln(stdout, "ok")
+	return nil
+}
+
+func exportCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 || (args[0] != "metadata" && args[0] != "assignments" && args[0] != "embeddings") {
+		return fmt.Errorf("export requires metadata, assignments, or embeddings")
+	}
+	kind := args[0]
+	flags := flag.NewFlagSet("export "+kind, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	output := flags.String("output", "", "output JSON file")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	path := *output
+	if path == "" {
+		path = filepath.Join(application.Config.ExportRoot, "metadata-"+time.Now().UTC().Format("20060102T150405.000000000Z")+".json")
+	}
+	type record struct {
+		Table string           `json:"table"`
+		Rows  []map[string]any `json:"rows"`
+	}
+	result := struct {
+		FormatVersion string   `json:"format_version"`
+		SchemaVersion string   `json:"schema_version"`
+		ExportedAt    string   `json:"exported_at"`
+		Application   string   `json:"application"`
+		PipelineIDs   []string `json:"pipeline_ids"`
+		Records       []record `json:"records"`
+	}{FormatVersion: "1", SchemaVersion: "010_person_representatives", ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Application: "face-me-bro"}
+	rows, err := application.DB.QueryContext(ctx, `SELECT id FROM pipelines ORDER BY created_at, id`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var pipelineID string
+		if err := rows.Scan(&pipelineID); err != nil {
+			rows.Close()
+			return err
+		}
+		result.PipelineIDs = append(result.PipelineIDs, pipelineID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	metadataTables := []string{"collections", "photo_assets", "photo_paths", "pipelines", "analyses", "clustering_runs", "clusters", "cluster_memberships", "scan_runs", "scan_items"}
+	assignmentTables := []string{"people", "person_state_events", "assignment_events", "current_face_assignments", "face_disposition_events", "current_face_dispositions", "reference_recommendations", "reference_recommendation_decisions", "reference_selection_events", "current_face_references", "person_representatives", "cluster_review_events", "audit_events"}
+	embeddingTables := []string{"faces", "face_correspondences"}
+	tables := metadataTables
+	if kind == "assignments" {
+		tables = assignmentTables
+	} else if kind == "embeddings" {
+		tables = embeddingTables
+	}
+	for _, table := range tables {
+		rows, err := application.DB.QueryContext(ctx, "SELECT * FROM "+table)
+		if err != nil {
+			return err
+		}
+		columns, err := rows.Columns()
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		var values []map[string]any
+		for rows.Next() {
+			cells := make([]any, len(columns))
+			pointers := make([]any, len(columns))
+			for i := range cells {
+				pointers[i] = &cells[i]
+			}
+			if err := rows.Scan(pointers...); err != nil {
+				rows.Close()
+				return err
+			}
+			item := map[string]any{}
+			for i, column := range columns {
+				value := cells[i]
+				if bytes, ok := value.([]byte); ok {
+					value = fmt.Sprintf("%x", bytes)
+				}
+				item[column] = value
+			}
+			values = append(values, item)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		result.Records = append(result.Records, record{Table: table, Rows: values})
+	}
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("export "+kind, map[string]string{"path": path, "format_version": "1", "kind": kind}))
+	}
+	fmt.Fprintln(stdout, path)
+	return nil
+}
+
+func backupCommand(application *app.App, args []string, jsonOutput bool, stdout io.Writer) error {
+	if len(args) != 1 || args[0] != "create" {
+		return fmt.Errorf("backup requires create")
+	}
+	path, err := db.Backup(application.Config.DatabasePath, application.Config.BackupRoot)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("backup create", map[string]string{"path": path}))
+	}
+	fmt.Fprintln(stdout, path)
+	return nil
+}
+
+func collectionCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("collection requires add, get, list, remove, or set-search")
+	}
+	switch args[0] {
+	case "set-enabled":
+		flags := flag.NewFlagSet("collection set-enabled", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID")
+		enabled := flags.Bool("enabled", true, "enable or disable collection")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *collectionID == "" {
+			return fmt.Errorf("collection set-enabled requires --collection-id")
+		}
+		result, err := application.DB.ExecContext(ctx, `UPDATE collections SET enabled = ?, updated_at = ? WHERE id = ?`, boolInt(*enabled), time.Now().UTC().Format(time.RFC3339Nano), *collectionID)
+		if err != nil {
+			return err
+		}
+		if count, _ := result.RowsAffected(); count != 1 {
+			return fmt.Errorf("collection %q does not exist", *collectionID)
+		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "collection-state", EntityType: "collection", EntityID: *collectionID, New: map[string]any{"enabled": *enabled, "actor": "cli"}})
+		return writeCommandResult(stdout, jsonOutput, "collection set-enabled", map[string]any{"collection_id": *collectionID, "enabled": *enabled})
+	case "get":
+		flags := flag.NewFlagSet("collection get", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *collectionID == "" {
+			return fmt.Errorf("collection get requires --collection-id")
+		}
+		var id, name, root, created, updated, method string
+		var enabled int
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, name, root_path, enabled, created_at, updated_at, neighbor_search_method FROM collections WHERE id = ?`, *collectionID).Scan(&id, &name, &root, &enabled, &created, &updated, &method); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "collection get", map[string]any{"id": id, "name": name, "root": root, "enabled": enabled == 1, "created_at": created, "updated_at": updated, "neighbor_search_method": method})
+	case "set-search":
+		flags := flag.NewFlagSet("collection set-search", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID")
+		method := flags.String("method", "exact", "neighbor search method: exact or ann")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *collectionID == "" {
+			return fmt.Errorf("collection set-search requires --collection-id")
+		}
+		if *method != "exact" && *method != "ann" {
+			return fmt.Errorf("search method must be exact or ann")
+		}
+		result, err := application.DB.ExecContext(ctx, "UPDATE collections SET neighbor_search_method = ?, updated_at = ? WHERE id = ?", *method, time.Now().UTC().Format(time.RFC3339Nano), *collectionID)
+		if err != nil {
+			return err
+		}
+		if count, _ := result.RowsAffected(); count != 1 {
+			return fmt.Errorf("collection %q does not exist", *collectionID)
+		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "collection-search-method", EntityType: "collection", EntityID: *collectionID, New: map[string]any{"method": *method, "actor": "cli"}})
+		return writeCommandResult(stdout, jsonOutput, "collection set-search", map[string]any{"collection_id": *collectionID, "method": *method})
+	case "remove":
+		flags := flag.NewFlagSet("collection remove", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID")
+		confirmed := flags.Bool("yes", false, "confirm removal")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *collectionID == "" || !*confirmed {
+			return fmt.Errorf("collection remove requires --collection-id and --yes")
+		}
+		if err := media.NewStore(application.DB).DeleteCollection(ctx, *collectionID); err != nil {
+			return err
+		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "collection-remove", EntityType: "collection", EntityID: *collectionID, New: map[string]any{"actor": "cli", "confirmed": true}})
+		if jsonOutput {
+			return writeJSON(stdout, envelope("collection remove", map[string]string{"id": *collectionID}))
+		}
+		fmt.Fprintln(stdout, "ok")
+		return nil
+	case "add":
+		flags := flag.NewFlagSet("collection add", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		name := flags.String("name", "", "collection name")
+		root := flags.String("root", "", "collection root directory")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *name == "" || *root == "" {
+			return fmt.Errorf("collection add requires --name and --root")
+		}
+		resolved, err := filepath.Abs(*root)
+		if err != nil {
+			return err
+		}
+		id, err := media.NewStore(application.DB).CreateCollection(ctx, *name, resolved)
+		if err != nil {
+			return err
+		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "collection-create", EntityType: "collection", EntityID: id, New: map[string]any{"name": *name, "root": resolved, "actor": "cli"}})
+		if jsonOutput {
+			return writeJSON(stdout, envelope("collection add", map[string]string{"id": id, "name": *name, "root": resolved}))
+		}
+		fmt.Fprintln(stdout, id)
+		return nil
+	case "list":
+		flags := flag.NewFlagSet("collection list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination("SELECT id, name, root_path, enabled, neighbor_search_method FROM collections ORDER BY name", nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type collection struct {
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			Root         string `json:"root"`
+			Enabled      bool   `json:"enabled"`
+			SearchMethod string `json:"neighbor_search_method"`
+		}
+		var result []collection
+		for rows.Next() {
+			var item collection
+			var enabled int
+			if err := rows.Scan(&item.ID, &item.Name, &item.Root, &enabled, &item.SearchMethod); err != nil {
+				return err
+			}
+			item.Enabled = enabled == 1
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("collection list", result))
+		}
+		fmt.Fprintln(stdout, "id\tname\troot\tneighbor_search_method")
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item.ID, item.Name, item.Root, item.SearchMethod)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown collection command %q", args[0])
+	}
+}
+
+func scanCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) > 0 && (args[0] == "status" || args[0] == "pause" || args[0] == "resume" || args[0] == "cancel" || args[0] == "retry") {
+		store := media.NewStore(application.DB)
+		if args[0] != "status" {
+			if len(args) != 2 {
+				return fmt.Errorf("scan %s requires a scan run ID", args[0])
+			}
+			if args[0] == "resume" || args[0] == "retry" {
+				var collectionID, root string
+				if err := application.DB.QueryRowContext(ctx, `SELECT sr.collection_id, c.root_path FROM scan_runs sr JOIN collections c ON c.id = sr.collection_id WHERE sr.id = ?`, args[1]).Scan(&collectionID, &root); err != nil {
+					return err
+				}
+				if err := store.SetScanControl(ctx, args[1], args[0]); err != nil {
+					return err
+				}
+				scanner := media.Scanner{OnRecord: func(record media.FileRecord) error {
+					return store.PersistScanRecord(ctx, collectionID, args[1], record)
+				}}
+				records, err := scanner.Scan(root)
+				if err != nil {
+					_ = store.FinishScan(ctx, args[1], "failed", err.Error())
+					return err
+				}
+				seen := make([]string, 0, len(records))
+				for _, record := range records {
+					seen = append(seen, record.RelativePath)
+				}
+				if err := store.FinalizeScan(ctx, collectionID, args[1], seen); err != nil {
+					_ = store.FinishScan(ctx, args[1], "failed", err.Error())
+					return err
+				}
+				if err := store.FinishScan(ctx, args[1], "completed", ""); err != nil {
+					return err
+				}
+				if _, err := jobs.NewStore(application.DB).Enqueue(ctx, "analysis", 5, map[string]any{"collection_id": collectionID}); err != nil {
+					return err
+				}
+			} else if err := store.SetScanControl(ctx, args[1], args[0]); err != nil {
+				return err
+			}
+			if jsonOutput {
+				return writeJSON(stdout, envelope("scan "+args[0], map[string]string{"scan_run_id": args[1], "action": args[0]}))
+			}
+			fmt.Fprintln(stdout, "ok")
+			return nil
+		}
+		flags := flag.NewFlagSet("scan status", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination("SELECT sr.id, sr.collection_id, sr.status, sr.created_at, sr.completed_at, (SELECT COUNT(*) FROM scan_items si WHERE si.scan_run_id = sr.id), (SELECT COUNT(*) FROM scan_items si WHERE si.scan_run_id = sr.id AND si.status IN ('supported', 'unsupported', 'corrupt', 'unstable', 'failed')) FROM scan_runs sr ORDER BY sr.created_at DESC", nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type scan struct {
+			ID           string  `json:"id"`
+			CollectionID string  `json:"collection_id"`
+			Status       string  `json:"status"`
+			CreatedAt    string  `json:"created_at"`
+			CompletedAt  *string `json:"completed_at,omitempty"`
+			Items        int     `json:"items"`
+			Processed    int     `json:"processed"`
+		}
+		var scans []scan
+		for rows.Next() {
+			var value scan
+			var completed sql.NullString
+			if err := rows.Scan(&value.ID, &value.CollectionID, &value.Status, &value.CreatedAt, &completed, &value.Items, &value.Processed); err != nil {
+				return err
+			}
+			if completed.Valid {
+				value.CompletedAt = &completed.String
+			}
+			scans = append(scans, value)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("scan status", scans))
+		}
+		fmt.Fprintln(stdout, "id\tcollection_id\tstatus\titems\tprocessed")
+		for _, value := range scans {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\t%d\n", value.ID, value.CollectionID, value.Status, value.Items, value.Processed)
+		}
+		return nil
+	}
+	flags := flag.NewFlagSet("scan", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	collectionID := flags.String("collection-id", "", "collection ID")
+	maxPixels := flags.Int64("max-pixels", 0, "CLI-admin decoded pixel limit override")
+	maxWidth := flags.Int("max-width", 0, "CLI-admin decoded width limit override")
+	maxHeight := flags.Int("max-height", 0, "CLI-admin decoded height limit override")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *collectionID == "" {
+		return fmt.Errorf("scan requires --collection-id")
+	}
+	limits := worker.ResourceLimits{MaxPixels: application.Config.AnalysisMaxPixels, MaxWidth: application.Config.AnalysisMaxWidth, MaxHeight: application.Config.AnalysisMaxHeight}
+	adminAccountID := ""
+	provided := map[string]bool{}
+	flags.Visit(func(value *flag.Flag) { provided[value.Name] = true })
+	overrideRequested := provided["max-pixels"] || provided["max-width"] || provided["max-height"]
+	if overrideRequested {
+		adminAccountID = "cli"
+		if provided["max-pixels"] && *maxPixels <= 0 || *maxWidth < 0 || *maxHeight < 0 {
+			return fmt.Errorf("scan limit overrides must be positive")
+		}
+		if provided["max-pixels"] {
+			limits.MaxPixels = *maxPixels
+		}
+		if provided["max-width"] {
+			limits.MaxWidth = *maxWidth
+		}
+		if provided["max-height"] {
+			limits.MaxHeight = *maxHeight
+		}
+		if limits.MaxPixels > application.Config.AnalysisMaxPixelsOverride ||
+			(limits.MaxWidth != 0 && application.Config.AnalysisMaxWidthOverride != 0 && limits.MaxWidth > application.Config.AnalysisMaxWidthOverride) ||
+			(limits.MaxHeight != 0 && application.Config.AnalysisMaxHeightOverride != 0 && limits.MaxHeight > application.Config.AnalysisMaxHeightOverride) {
+			return fmt.Errorf("scan limit override exceeds configured administrator ceiling")
+		}
+	}
+	var root string
+	if err := application.DB.QueryRowContext(ctx, "SELECT root_path FROM collections WHERE id = ?", *collectionID).Scan(&root); err != nil {
+		return err
+	}
+	mediaStore := media.NewStore(application.DB)
+	scanRunID, err := mediaStore.StartScan(ctx, *collectionID)
+	if err != nil {
+		return err
+	}
+	scanner := media.Scanner{Control: func() (string, error) {
+		var status string
+		err := application.DB.QueryRowContext(ctx, `SELECT status FROM scan_runs WHERE id = ?`, scanRunID).Scan(&status)
+		return status, err
+	}, OnRecord: func(record media.FileRecord) error {
+		return mediaStore.PersistScanRecord(ctx, *collectionID, scanRunID, record)
+	}}
+	records, err := scanner.ScanContext(ctx, root)
+	if err != nil {
+		status := "failed"
+		if errors.Is(err, context.Canceled) {
+			status = "cancelled"
+		}
+		_ = mediaStore.FinishScan(ctx, scanRunID, status, err.Error())
+		return err
+	}
+	seen := make([]string, 0, len(records))
+	for _, record := range records {
+		seen = append(seen, record.RelativePath)
+	}
+	if err := mediaStore.FinalizeScan(ctx, *collectionID, scanRunID, seen); err != nil {
+		_ = mediaStore.FinishScan(ctx, scanRunID, "failed", err.Error())
+		return err
+	}
+	if err := mediaStore.FinishScan(ctx, scanRunID, "completed", ""); err != nil {
+		return err
+	}
+	payload := map[string]any{"collection_id": *collectionID}
+	if overrideRequested {
+		payload["analysis_limits"] = limits
+		payload["admin_account_id"] = adminAccountID
+	}
+	job, err := jobs.NewStore(application.DB).Enqueue(ctx, "analysis", 5, payload)
+	if err != nil {
+		return err
+	}
+	result := map[string]any{"collection_id": *collectionID, "scan_run_id": scanRunID, "files": len(records), "supported": countSupported(records), "analysis_job_id": job.ID}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("scan", result))
+	}
+	fmt.Fprintf(stdout, "Scanned %d files; %d supported; analysis job %s\n", len(records), countSupported(records), job.ID)
+	return nil
+}
+
+func jobCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, possible-candidates, pause, resume, cancel, or retry")
+	}
+	store := jobs.NewStore(application.DB)
+	if args[0] == "throttle" {
+		flags := flag.NewFlagSet("job throttle", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		mode := flags.String("mode", string(jobs.ThrottleAutomatic), "automatic, full-speed, reduced, or paused")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if err := store.SetThrottleMode(ctx, jobs.ThrottleMode(*mode)); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "job throttle", map[string]string{"mode": *mode})
+	}
+	if args[0] == "reference-reprocess" {
+		flags := flag.NewFlagSet("job reference-reprocess", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "person ID to reprocess")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *personID == "" {
+			return fmt.Errorf("job reference-reprocess requires --person-id")
+		}
+		job, queued, err := store.EnqueueReferenceReprocess(ctx, *personID)
+		if err != nil {
+			return err
+		}
+		result := map[string]any{"person_id": *personID, "queued": queued}
+		if queued {
+			result["id"], result["kind"], result["status"] = job.ID, job.Kind, job.Status
+		} else {
+			result["status"] = "skipped-no-approved-references"
+		}
+		return writeCommandResult(stdout, jsonOutput, "job reference-reprocess", result)
+	}
+	if args[0] == "reference-discovery" {
+		flags := flag.NewFlagSet("job reference-discovery", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "limit discovery to this person's approved references")
+		since := flags.String("since", "", "only evaluate faces created after this RFC3339 timestamp")
+		sinceLast := flags.Bool("since-last", false, "use the most recent completed reference-discovery audit time")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *since != "" && *sinceLast {
+			return fmt.Errorf("job reference-discovery cannot combine --since and --since-last")
+		}
+		if *since != "" {
+			if _, err := time.Parse(time.RFC3339Nano, *since); err != nil {
+				return fmt.Errorf("invalid --since timestamp: %w", err)
+			}
+		}
+		payload := map[string]any{"person_id": *personID}
+		if *since != "" {
+			payload["since"] = *since
+		}
+		if *sinceLast {
+			payload["since_last"] = true
+		}
+		job, err := store.Enqueue(ctx, "reference-discovery", 1, payload)
+		if err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "job reference-discovery", map[string]any{"id": job.ID, "kind": job.Kind, "person_id": *personID, "status": job.Status, "since": *since, "since_last": *sinceLast})
+	}
+	if args[0] == "possible-candidates" {
+		flags := flag.NewFlagSet("job possible-candidates", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "limit targets to a provisional person")
+		collectionID := flags.String("collection-id", "", "limit targets to a collection")
+		all := flags.Bool("all", false, "evaluate all accessible targets")
+		maxProvisional := flags.Int("max-provisional-faces", application.Config.PossibleCandidates.MaxProvisionalFaces, "maximum provisional faces per target person")
+		maxTemporary := flags.Int("max-temporary-faces", application.Config.PossibleCandidates.MaxTemporaryFaces, "maximum faces per unnamed temporary person")
+		maxCandidates := flags.Int("max-candidates", application.Config.PossibleCandidates.MaxCandidates, "maximum candidates retained per face")
+		minSimilarity := flags.Float64("min-similarity", float64(application.Config.PossibleCandidates.MinSimilarity), "minimum similarity floor")
+		includeDontTrack := flags.Bool("include-dont-track", application.Config.PossibleCandidates.IncludeDontTrack, "include don't-track faces")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		scope, scopeID := "", ""
+		if *personID != "" {
+			scope, scopeID = "person", *personID
+		}
+		if *collectionID != "" {
+			if scope != "" {
+				return fmt.Errorf("job possible-candidates accepts only one scope")
+			}
+			scope, scopeID = "collection", *collectionID
+		}
+		if *all {
+			if scope != "" {
+				return fmt.Errorf("job possible-candidates accepts only one scope")
+			}
+			scope = "all"
+		}
+		if scope == "" {
+			return fmt.Errorf("job possible-candidates requires --person-id, --collection-id, or --all")
+		}
+		if *maxProvisional < 1 || *maxTemporary < 1 || *maxCandidates < 1 || *minSimilarity < 0 || *minSimilarity > 1 {
+			return fmt.Errorf("job possible-candidates has invalid candidate settings")
+		}
+		version, err := candidates.ReferenceSetVersion(ctx, application.DB)
+		if err != nil {
+			return err
+		}
+		payload := candidates.JobPayload{Scope: scope, ScopeID: scopeID, ReferenceSetVersion: version, Policy: candidates.Config{
+			MaxProvisionalFaces: *maxProvisional, MaxTemporaryFaces: *maxTemporary, MaxCandidates: *maxCandidates,
+			MinSimilarity: float32(*minSimilarity), IncludeDontTrack: *includeDontTrack,
+		}}
+		job, queued, err := store.EnqueuePossibleCandidates(ctx, payload)
+		if err != nil {
+			return err
+		}
+		result := map[string]any{"scope": scope, "scope_id": scopeID, "queued": queued}
+		if queued {
+			result["id"], result["kind"], result["status"] = job.ID, job.Kind, job.Status
+		}
+		return writeCommandResult(stdout, jsonOutput, "job possible-candidates", result)
+	}
+	if args[0] == "status" {
+		flags := flag.NewFlagSet("job status", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		jobID := flags.String("job-id", "", "job ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *jobID == "" {
+			return fmt.Errorf("job status requires --job-id")
+		}
+		report, err := currentJobStatus(ctx, store, *jobID)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("job status", report))
+		}
+		current := "-"
+		if report.CurrentItem != nil {
+			current = *report.CurrentItem
+		}
+		eta := "-"
+		if report.EstimatedTimeRemaining != nil {
+			eta = *report.EstimatedTimeRemaining
+		}
+		started := "-"
+		if report.StartedAt != nil {
+			started = report.StartedAt.Format(time.RFC3339Nano)
+		}
+		progress := "-"
+		if len(report.Progress) > 0 {
+			progress = string(report.Progress)
+		}
+		summary := "-"
+		if len(report.Summary) > 0 {
+			summary = string(report.Summary)
+		}
+		fmt.Fprintf(stdout, "Job:                         %s\nJob kind:                   %s\nStatus:                     %s\nItems completed:            %d\nItems remaining:             %d\nCurrent item:                %s\nPercentage complete:         %.1f%%\nTime started:                %s\nTime running:               %s\nEstimated time remaining:   %s\nFailed item count:           %d\nOperational progress:        %s\nCompleted summary:           %s\n", report.JobID, report.JobKind, report.Status, report.ItemsCompleted, report.ItemsRemaining, current, report.PercentageComplete, started, report.TimeRunning, eta, report.FailedItems, progress, summary)
+		return nil
+	}
+	if args[0] == "get" {
+		if len(args) != 2 {
+			return fmt.Errorf("job get requires an ID")
+		}
+		job, err := store.Get(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("job get", job))
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\tattempts=%d/%d\n", job.ID, job.Kind, job.Status, job.Priority, job.Attempts, job.MaxAttempts)
+		return nil
+	}
+	if len(args) == 2 && (args[0] == "pause" || args[0] == "resume" || args[0] == "cancel" || args[0] == "retry") {
+		var err error
+		switch args[0] {
+		case "pause":
+			err = store.Pause(ctx, args[1])
+		case "resume":
+			err = store.Resume(ctx, args[1])
+		case "cancel":
+			err = store.Cancel(ctx, args[1])
+		case "retry":
+			err = store.Retry(ctx, args[1])
+		}
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("job "+args[0], map[string]any{"id": args[1], "status": args[0]}))
+		}
+		fmt.Fprintln(stdout, "ok")
+		return nil
+	}
+	if len(args) == 0 || args[0] != "list" {
+		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, possible-candidates, pause, resume, cancel, or retry")
+	}
+	flags := flag.NewFlagSet("job list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	limit, page := paginationFlags(flags)
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	query, queryArgs, err := applyPagination("SELECT id, kind, priority, status, created_at, COALESCE(started_at, ''), attempts, max_attempts FROM jobs ORDER BY created_at DESC", nil, *limit, *page)
+	if err != nil {
+		return err
+	}
+	rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type item struct {
+		ID          string `json:"id"`
+		Kind        string `json:"kind"`
+		Priority    int    `json:"priority"`
+		Status      string `json:"status"`
+		CreatedAt   string `json:"created_at"`
+		StartedAt   string `json:"started_at"`
+		Attempts    int    `json:"attempts"`
+		MaxAttempts int    `json:"max_attempts"`
+	}
+	var result []item
+	for rows.Next() {
+		var value item
+		if err := rows.Scan(&value.ID, &value.Kind, &value.Priority, &value.Status, &value.CreatedAt, &value.StartedAt, &value.Attempts, &value.MaxAttempts); err != nil {
+			return err
+		}
+		result = append(result, value)
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("job list", result))
+	}
+	fmt.Fprintln(stdout, "id\tkind\tstatus\tpriority\tstarted_at\tattempts")
+	for _, value := range result {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\t%s\t%d/%d\n", value.ID, value.Kind, value.Status, value.Priority, value.StartedAt, value.Attempts, value.MaxAttempts)
+	}
+	return rows.Err()
+}
+
+type jobStatusReport struct {
+	JobID                         string          `json:"job_id"`
+	JobKind                       string          `json:"job_kind"`
+	Status                        jobs.Status     `json:"status"`
+	Progress                      json.RawMessage `json:"progress,omitempty"`
+	Summary                       json.RawMessage `json:"summary,omitempty"`
+	ItemsCompleted                int             `json:"items_completed"`
+	ItemsProcessed                int             `json:"items_processed"`
+	ItemsRemaining                int             `json:"items_remaining"`
+	CurrentItem                   *string         `json:"current_item"`
+	PercentageComplete            float64         `json:"percentage_complete"`
+	StartedAt                     *time.Time      `json:"started_at,omitempty"`
+	TimeRunning                   string          `json:"time_running"`
+	TimeRunningSeconds            float64         `json:"time_running_seconds"`
+	EstimatedTimeRemaining        *string         `json:"estimated_time_remaining,omitempty"`
+	EstimatedTimeRemainingSeconds *float64        `json:"estimated_time_remaining_seconds,omitempty"`
+	FailedItems                   int             `json:"failed_items"`
+}
+
+func currentJobStatus(ctx context.Context, store jobs.Store, jobID string) (jobStatusReport, error) {
+	job, err := store.Get(ctx, jobID)
+	if err != nil {
+		return jobStatusReport{}, err
+	}
+	items, err := store.Items(ctx, jobID)
+	if err != nil {
+		return jobStatusReport{}, err
+	}
+	completed, failed, skipped := 0, 0, 0
+	var current *jobs.Item
+	for index := range items {
+		item := &items[index]
+		switch item.Status {
+		case "completed":
+			completed++
+		case "failed":
+			failed++
+		case "skipped":
+			skipped++
+		case "running":
+			if current == nil || item.UpdatedAt.After(current.UpdatedAt) {
+				current = item
+			}
+		}
+	}
+	processed := completed + failed + skipped
+	remaining := len(items) - processed
+	if remaining < 0 {
+		remaining = 0
+	}
+	percentage := 0.0
+	if len(items) > 0 {
+		percentage = float64(processed) * 100 / float64(len(items))
+	} else if job.Status == jobs.Completed {
+		percentage = 100
+	}
+	end := time.Now().UTC()
+	if job.CompletedAt != nil {
+		end = job.CompletedAt.UTC()
+	}
+	running := time.Duration(0)
+	if job.StartedAt != nil && end.After(job.StartedAt.UTC()) {
+		running = end.Sub(job.StartedAt.UTC())
+	}
+	report := jobStatusReport{JobID: job.ID, JobKind: job.Kind, Status: job.Status, Progress: job.Progress, Summary: job.Summary, ItemsCompleted: completed, ItemsProcessed: processed, ItemsRemaining: remaining, PercentageComplete: percentage, StartedAt: job.StartedAt, TimeRunning: running.String(), TimeRunningSeconds: running.Seconds(), FailedItems: failed}
+	if current != nil {
+		value := current.Key
+		report.CurrentItem = &value
+	}
+	if processed > 0 && remaining > 0 && running > 0 {
+		seconds := running.Seconds() * float64(remaining) / float64(processed)
+		report.EstimatedTimeRemainingSeconds = &seconds
+		duration := (time.Duration(seconds * float64(time.Second))).Round(time.Second)
+		value := duration.String()
+		report.EstimatedTimeRemaining = &value
+	}
+	return report, nil
+}
+
+func accountCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("account requires get, create, list, disable, enable, or reset-password")
+	}
+	store := auth.NewStore(application.DB)
+	if args[0] == "get" {
+		flags := flag.NewFlagSet("account get", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		accountID := flags.String("account-id", "", "account ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *accountID == "" {
+			return fmt.Errorf("account get requires --account-id")
+		}
+		var id, username, role, created, updated string
+		var disabled, mustChange int
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, username, role, disabled_at IS NOT NULL, must_change_password, created_at, updated_at FROM accounts WHERE id = ?`, *accountID).Scan(&id, &username, &role, &disabled, &mustChange, &created, &updated); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "account get", map[string]any{"id": id, "username": username, "role": role, "disabled": disabled == 1, "must_change_password": mustChange == 1, "created_at": created, "updated_at": updated})
+	}
+	if args[0] == "list" {
+		flags := flag.NewFlagSet("account list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination("SELECT id, username, role, disabled_at IS NOT NULL FROM accounts ORDER BY username", nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type account struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+			Role     string `json:"role"`
+			Disabled bool   `json:"disabled"`
+		}
+		var result []account
+		for rows.Next() {
+			var value account
+			var disabled int
+			if err := rows.Scan(&value.ID, &value.Username, &value.Role, &disabled); err != nil {
+				return err
+			}
+			value.Disabled = disabled == 1
+			result = append(result, value)
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("account list", result))
+		}
+		fmt.Fprintln(stdout, "id\tusername\trole\tdisabled")
+		for _, value := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%t\n", value.ID, value.Username, value.Role, value.Disabled)
+		}
+		return rows.Err()
+	}
+	if args[0] == "create" {
+		flags := flag.NewFlagSet("account create", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		username := flags.String("username", "", "username")
+		password := flags.String("password", "", "password")
+		role := flags.String("role", string(auth.Reviewer), "role")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		account, err := store.CreateAccount(ctx, *username, *password, auth.Role(*role), true)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("account create", account))
+		}
+		fmt.Fprintln(stdout, account.ID)
+		return nil
+	}
+	if args[0] == "dont-track" {
+		flags := flag.NewFlagSet("people dont-track", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "person ID")
+		value := flags.Bool("value", true, "set or clear don't-track")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *personID == "" {
+			return fmt.Errorf("people dont-track requires --person-id")
+		}
+		if err := review.NewStore(application.DB).SetPersonDontTrack(ctx, *personID, *value, review.Actor{Type: "user"}, "cli"); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "people dont-track", map[string]any{"person_id": *personID, "dont_track": *value})
+	}
+	if args[0] == "disable" || args[0] == "enable" {
+		flags := flag.NewFlagSet("account state", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		accountID := flags.String("account-id", "", "account ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *accountID == "" {
+			return fmt.Errorf("account state requires --account-id")
+		}
+		if err := store.SetDisabled(ctx, *accountID, args[0] == "disable"); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("account "+args[0], map[string]any{"account_id": *accountID, "disabled": args[0] == "disable"}))
+		}
+		fmt.Fprintln(stdout, "ok")
+		return nil
+	}
+	if args[0] == "grant" {
+		flags := flag.NewFlagSet("account grant", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		accountID := flags.String("account-id", "", "account ID")
+		collectionID := flags.String("collection-id", "", "collection ID")
+		view := flags.Bool("view", true, "grant view permission")
+		modify := flags.Bool("modify", false, "grant modify permission")
+		undo := flags.Bool("undo", true, "grant undo permission")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *accountID == "" || *collectionID == "" {
+			return fmt.Errorf("grant requires --account-id and --collection-id")
+		}
+		if err := store.SetCollectionPermission(ctx, *accountID, *collectionID, *view, *modify, *undo); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("account grant", map[string]any{"account_id": *accountID, "collection_id": *collectionID, "view": *view, "modify": *modify, "undo": *undo}))
+		}
+		fmt.Fprintln(stdout, "ok")
+		return nil
+	}
+	if args[0] != "reset-password" {
+		return fmt.Errorf("unknown account command %q", args[0])
+	}
+	flags := flag.NewFlagSet("account reset-password", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	accountID := flags.String("account-id", "", "account ID")
+	password := flags.String("password", "", "new password")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *accountID == "" || *password == "" {
+		return fmt.Errorf("reset-password requires --account-id and --password")
+	}
+	if err := auth.NewStore(application.DB).ResetPassword(ctx, *accountID, *password, true); err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("account reset-password", map[string]bool{"reset": true}))
+	}
+	fmt.Fprintln(stdout, "Password reset; user must change it at next login.")
+	return nil
+}
+
+func peopleCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("people requires get, create, list, or representative")
+	}
+	if args[0] == "representative" {
+		flags := flag.NewFlagSet("people representative", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "person ID")
+		faceID := flags.String("face-id", "", "explicit representative face ID")
+		clear := flags.Bool("clear", false, "clear explicit selection and use automatic selection")
+		yes := flags.Bool("yes", false, "confirm representative selection change")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *personID == "" || !*yes || (*faceID == "" && !*clear) || (*faceID != "" && *clear) {
+			return fmt.Errorf("people representative requires --person-id, exactly one of --face-id or --clear, and --yes")
+		}
+		store := representative.NewStoreWithPython(application.DB, application.Config.PythonPath)
+		if *clear {
+			if err := store.Clear(ctx, *personID, review.Actor{Type: "user"}); err != nil {
+				return err
+			}
+			image, err := store.Ensure(ctx, *personID)
+			if errors.Is(err, representative.ErrNoUsableFace) {
+				return writeCommandResult(stdout, jsonOutput, "people representative", map[string]any{"person_id": *personID, "face_id": "", "selection_mode": "automatic"})
+			}
+			if err != nil {
+				return err
+			}
+			return writeCommandResult(stdout, jsonOutput, "people representative", representativeSummary(image))
+		}
+		image, err := store.Select(ctx, *personID, *faceID, review.Actor{Type: "user"})
+		if err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "people representative", representativeSummary(image))
+	}
+	if args[0] == "get" {
+		flags := flag.NewFlagSet("people get", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		personID := flags.String("person-id", "", "person ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *personID == "" {
+			return fmt.Errorf("people get requires --person-id")
+		}
+		var id, name, created, updated string
+		var provisional, dontTrack int
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)), is_provisional, dont_track, created_at, updated_at FROM people WHERE id = ?`, *personID).Scan(&id, &name, &provisional, &dontTrack, &created, &updated); err != nil {
+			return err
+		}
+		result := map[string]any{"id": id, "name": name, "provisional": provisional == 1, "dont_track": dontTrack == 1, "created_at": created, "updated_at": updated}
+		if image, representativeErr := representative.NewStoreWithPython(application.DB, application.Config.PythonPath).Ensure(ctx, *personID); representativeErr == nil {
+			result["representative"] = representativeSummary(image)
+		} else if !errors.Is(representativeErr, representative.ErrNoUsableFace) {
+			return representativeErr
+		}
+		return writeCommandResult(stdout, jsonOutput, "people get", result)
+	}
+	if args[0] == "create" {
+		flags := flag.NewFlagSet("people create", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		name := flags.String("name", "", "person name")
+		provisional := flags.Bool("provisional", false, "mark provisional")
+		yes := flags.Bool("yes", false, "confirm creation of an identity record")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *name == "" || !*yes {
+			return fmt.Errorf("people create requires --name and --yes")
+		}
+		personID, err := id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := application.DB.ExecContext(ctx, `INSERT INTO people (id, name, is_provisional, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`, personID, *name, boolInt(*provisional), now, now); err != nil {
+			return err
+		}
+		_ = audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "person-create", EntityType: "person", EntityID: personID, New: map[string]any{"name": *name, "provisional": *provisional, "actor": "cli"}})
+		if jsonOutput {
+			return writeJSON(stdout, envelope("people create", map[string]any{"id": personID, "name": *name, "provisional": *provisional}))
+		}
+		fmt.Fprintln(stdout, personID)
+		return nil
+	}
+	if args[0] != "list" {
+		return fmt.Errorf("unknown people command %q", args[0])
+	}
+	flags := flag.NewFlagSet("people list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	limit, page := paginationFlags(flags)
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	query, queryArgs, err := applyPagination("SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)), is_provisional, dont_track FROM people ORDER BY COALESCE(NULLIF(name, ''), substr(id, -8)), id", nil, *limit, *page)
+	if err != nil {
+		return err
+	}
+	rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type person struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Provisional bool   `json:"provisional"`
+		DontTrack   bool   `json:"dont_track"`
+	}
+	var result []person
+	for rows.Next() {
+		var value person
+		var provisional, dontTrack int
+		if err := rows.Scan(&value.ID, &value.Name, &provisional, &dontTrack); err != nil {
+			return err
+		}
+		value.Provisional = provisional == 1
+		value.DontTrack = dontTrack == 1
+		result = append(result, value)
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("people list", result))
+	}
+	fmt.Fprintln(stdout, "id\tname")
+	for _, value := range result {
+		fmt.Fprintf(stdout, "%s\t%s\n", value.ID, value.Name)
+	}
+	return rows.Err()
+}
+
+func representativeSummary(image representative.Image) map[string]any {
+	return map[string]any{"person_id": image.PersonID, "face_id": image.FaceID, "selection_mode": image.SelectionMode, "face_quality": image.FaceQuality, "detection_confidence": image.DetectionConfidence, "crop_version": image.CropVersion, "mime_type": image.MIMEType, "width": image.Width, "height": image.Height, "updated_at": image.UpdatedAt}
+}
+
+func configCommand(application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("config requires show or set-search")
+	}
+	if args[0] == "set-search" {
+		flags := flag.NewFlagSet("config set-search", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		method := flags.String("method", application.Config.NeighborSearchMethod, "neighbor search method: exact or ann")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *method != "exact" && *method != "ann" {
+			return fmt.Errorf("search method must be exact or ann")
+		}
+		settings := map[string]any{}
+		if data, err := os.ReadFile(application.Config.ConfigFile); err == nil {
+			if err := json.Unmarshal(data, &settings); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		settings["neighbor_search_method"] = *method
+		data, err := json.MarshalIndent(settings, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(application.Config.ConfigFile, append(data, '\n'), 0o600); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "config set-search", map[string]string{"method": *method, "config_file": application.Config.ConfigFile})
+	}
+	if args[0] != "show" || len(args) != 1 {
+		return fmt.Errorf("config requires show or set-search")
+	}
+	status, err := application.Status(context.Background())
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("config show", status))
+	}
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, string(data))
+	return err
+}
+
+func faceCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("face requires get, list, candidates, assign, disposition, or reference")
+	}
+	flags := flag.NewFlagSet("face "+args[0], flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	faceID := flags.String("face-id", "", "face ID")
+	personID := flags.String("person-id", "", "person ID")
+	state := flags.String("state", "", "assignment state")
+	disposition := flags.String("disposition", "", "face disposition")
+	reference := flags.Bool("reference", false, "set as reference")
+	yes := flags.Bool("yes", false, "confirm identity-changing operation")
+	limit, page := paginationFlags(flags)
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if args[0] == "candidates" {
+		if *faceID == "" {
+			return fmt.Errorf("face candidates requires --face-id")
+		}
+		rows, err := application.DB.QueryContext(ctx, `
+			SELECT pc.id, pc.run_id, pc.person_id,
+			       COALESCE(NULLIF(p.name, ''), substr(p.id, -8), p.id),
+			       pc.rank, pc.similarity, pc.margin, pc.support_count,
+			       pc.quality, pc.detection_confidence, pc.evidence,
+			       pc.retention_reason, pc.is_current, pc.created_at
+			FROM possible_face_candidates pc
+			JOIN people p ON p.id = pc.person_id
+			WHERE pc.face_id = ? AND pc.is_current = 1
+			ORDER BY pc.rank`, *faceID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type candidate struct {
+			ID, RunID, PersonID, PersonName string
+			Rank                            int
+			Similarity, Margin              float64
+			Support                         int
+			Quality, Detection              float64
+			Evidence, RetentionReason       string
+			Current                         bool
+			CreatedAt                       string
+		}
+		var result []candidate
+		for rows.Next() {
+			var item candidate
+			var current int
+			if err := rows.Scan(&item.ID, &item.RunID, &item.PersonID, &item.PersonName, &item.Rank, &item.Similarity, &item.Margin, &item.Support, &item.Quality, &item.Detection, &item.Evidence, &item.RetentionReason, &current, &item.CreatedAt); err != nil {
+				return err
+			}
+			item.Current = current == 1
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("face candidates", result))
+		}
+		fmt.Fprintln(stdout, "rank\tperson\tsimilarity\tmargin\tsupport\tquality\tdetection\tevidence\tretention_reason\trun_id")
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%d\t%s\t%.4f\t%.4f\t%d\t%.4f\t%.4f\t%s\t%s\t%s\n", item.Rank, item.PersonName, item.Similarity, item.Margin, item.Support, item.Quality, item.Detection, item.Evidence, item.RetentionReason, item.RunID)
+		}
+		return nil
+	}
+	if args[0] == "list" {
+		query := `SELECT f.id, f.analysis_id, f.face_index, f.detection_confidence, f.quality, COALESCE(a.state, 'unassigned'), COALESCE(a.person_id, ''), COALESCE(NULLIF(p.name, ''), substr(p.id, -8), '')
+			FROM faces f LEFT JOIN current_face_assignments a ON a.face_id = f.id LEFT JOIN people p ON p.id = a.person_id ORDER BY f.created_at, f.id`
+		query, queryArgs, err := applyPagination(query, nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type face struct {
+			ID                  string  `json:"id"`
+			AnalysisID          string  `json:"analysis_id"`
+			Index               int     `json:"face_index"`
+			DetectionConfidence float64 `json:"detection_confidence"`
+			Quality             float64 `json:"quality"`
+			State               string  `json:"state"`
+			PersonID            string  `json:"person_id"`
+			PersonName          string  `json:"person_name"`
+		}
+		var result []face
+		for rows.Next() {
+			var item face
+			var detection, quality sql.NullFloat64
+			if err := rows.Scan(&item.ID, &item.AnalysisID, &item.Index, &detection, &quality, &item.State, &item.PersonID, &item.PersonName); err != nil {
+				return err
+			}
+			if detection.Valid {
+				item.DetectionConfidence = detection.Float64
+			}
+			if quality.Valid {
+				item.Quality = quality.Float64
+			}
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("face list", result))
+		}
+		fmt.Fprintln(stdout, "id\tstate\tperson_name\tquality\tdetection_confidence")
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%g\t%g\n", item.ID, item.State, item.PersonName, item.Quality, item.DetectionConfidence)
+		}
+		return nil
+	}
+	if *faceID == "" {
+		return fmt.Errorf("face %s requires --face-id", args[0])
+	}
+	if args[0] == "get" {
+		var currentState, currentPerson, currentEvent string
+		var dispositionValue, referenceValue sql.NullString
+		if err := application.DB.QueryRowContext(ctx, `SELECT COALESCE(state, 'unassigned'), COALESCE(person_id, ''), event_id FROM current_face_assignments WHERE face_id = ?`, *faceID).Scan(&currentState, &currentPerson, &currentEvent); err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		_ = application.DB.QueryRowContext(ctx, `SELECT disposition FROM current_face_dispositions WHERE face_id = ?`, *faceID).Scan(&dispositionValue)
+		_ = application.DB.QueryRowContext(ctx, `SELECT reference FROM current_face_references WHERE face_id = ?`, *faceID).Scan(&referenceValue)
+		result := map[string]any{"face_id": *faceID, "state": currentState, "person_id": currentPerson, "event_id": currentEvent, "disposition": dispositionValue.String, "reference": referenceValue.String == "1"}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("face get", result))
+		}
+		return writeJSON(stdout, result)
+	}
+	if !*yes {
+		return fmt.Errorf("face %s requires --yes", args[0])
+	}
+	store := review.NewStore(application.DB)
+	switch args[0] {
+	case "assign":
+		if *state == "" {
+			return fmt.Errorf("face assign requires --state")
+		}
+		assignment, err := store.Assign(ctx, *faceID, *personID, review.AssignmentState(*state), review.Actor{Type: "user"}, review.Evidence{}, "cli")
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("face assign", assignment))
+		}
+		fmt.Fprintln(stdout, assignment.EventID)
+		return nil
+	case "disposition":
+		if *disposition == "" {
+			return fmt.Errorf("face disposition requires --disposition")
+		}
+		if err := store.SetDisposition(ctx, *faceID, *disposition, true, review.Actor{Type: "user"}, "cli"); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "face disposition", map[string]any{"face_id": *faceID, "disposition": *disposition})
+	case "reference":
+		if *personID == "" {
+			return fmt.Errorf("face reference requires --person-id")
+		}
+		if err := store.SetReference(ctx, *faceID, *personID, *reference, review.Actor{Type: "user"}, "cli"); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "face reference", map[string]any{"face_id": *faceID, "person_id": *personID, "reference": *reference})
+	default:
+		return fmt.Errorf("unknown face command %q", args[0])
+	}
+}
+
+func candidateCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) < 2 || args[0] != "run" {
+		return fmt.Errorf("candidate requires run get, list, or status")
+	}
+	store := candidates.NewStore(application.DB)
+	subcommand := args[1]
+	if subcommand == "list" {
+		flags := flag.NewFlagSet("candidate run list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[2:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination(`
+			SELECT id, scope, COALESCE(scope_id, ''), status, target_count,
+			       candidate_count, skipped_count, created_at
+			FROM possible_candidate_runs ORDER BY created_at DESC, id DESC`, nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type item struct {
+			ID, Scope, ScopeID, Status, CreatedAt string
+			Targets, Candidates, Skipped          int
+		}
+		var result []item
+		for rows.Next() {
+			var value item
+			if err := rows.Scan(&value.ID, &value.Scope, &value.ScopeID, &value.Status, &value.Targets, &value.Candidates, &value.Skipped, &value.CreatedAt); err != nil {
+				return err
+			}
+			result = append(result, value)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("candidate run list", result))
+		}
+		fmt.Fprintln(stdout, "id\tscope\tscope_id\tstatus\ttargets\tcandidates\tskipped\tcreated_at")
+		for _, value := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n", value.ID, value.Scope, value.ScopeID, value.Status, value.Targets, value.Candidates, value.Skipped, value.CreatedAt)
+		}
+		return nil
+	}
+	if subcommand != "get" && subcommand != "status" {
+		return fmt.Errorf("candidate run requires get, list, or status")
+	}
+	flags := flag.NewFlagSet("candidate run "+subcommand, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	runID := flags.String("run-id", "", "possible-candidate run ID")
+	if err := flags.Parse(args[2:]); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return fmt.Errorf("candidate run %s requires --run-id", subcommand)
+	}
+	run, err := store.GetRun(ctx, *runID)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("candidate run "+subcommand, run))
+	}
+	if subcommand == "status" {
+		fmt.Fprintf(stdout, "Run:              %s\nScope:             %s\nScope ID:          %s\nStatus:            %s\nTarget faces:      %d\nCandidates:        %d\nSkipped:           %d\nReference version: %s\nCreated:           %s\n", run.ID, run.Scope, run.ScopeID, run.Status, run.TargetCount, run.CandidateCount, run.SkippedCount, run.ReferenceSetVersion, run.CreatedAt.Format(time.RFC3339Nano))
+		return nil
+	}
+	data, err := json.MarshalIndent(run, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, string(data))
+	return err
+}
+
+type clusteringRunInfo struct {
+	ID                   string  `json:"id"`
+	Algorithm            string  `json:"algorithm"`
+	AlgorithmVersion     string  `json:"algorithm_version"`
+	K                    int     `json:"k"`
+	SimilarityThreshold  float64 `json:"similarity_threshold"`
+	NeighborSearchMethod string  `json:"neighbor_search_method"`
+	MutualEdgePolicy     string  `json:"mutual_edge_policy"`
+	CandidateScope       string  `json:"candidate_scope"`
+	InputFaces           int     `json:"input_faces"`
+	Status               string  `json:"status"`
+	StartedAt            string  `json:"started_at,omitempty"`
+	CompletedAt          string  `json:"completed_at,omitempty"`
+	AcceptedAt           string  `json:"accepted_at,omitempty"`
+	SupersededBy         string  `json:"superseded_by,omitempty"`
+	CreatedAt            string  `json:"created_at"`
+	Clusters             int     `json:"clusters"`
+	ClusterFaces         int     `json:"cluster_faces"`
+	MixedClusters        int     `json:"mixed_clusters"`
+}
+
+func loadClusteringRun(ctx context.Context, database *sql.DB, runID string) (clusteringRunInfo, error) {
+	var run clusteringRunInfo
+	var inputJSON, startedAt, completedAt, acceptedAt, supersededBy string
+	var inputFaces int
+	err := database.QueryRowContext(ctx, `
+		SELECT r.id, r.algorithm, r.algorithm_version, r.k, r.similarity_threshold,
+		       r.neighbor_search_method, r.mutual_edge_policy, r.candidate_scope,
+		       r.input_face_set_json, r.status, COALESCE(r.started_at, ''),
+		       COALESCE(r.completed_at, ''), COALESCE(r.accepted_at, ''),
+		       COALESCE(r.superseded_by, ''), r.created_at,
+		       (SELECT COUNT(*) FROM clusters c WHERE c.clustering_run_id = r.id),
+		       (SELECT COUNT(*) FROM cluster_memberships cm JOIN clusters c ON c.id = cm.cluster_id WHERE c.clustering_run_id = r.id),
+		       (SELECT COUNT(*) FROM clusters c WHERE c.clustering_run_id = r.id AND c.is_mixed = 1)
+		FROM clustering_runs r WHERE r.id = ?`, runID).Scan(
+		&run.ID, &run.Algorithm, &run.AlgorithmVersion, &run.K, &run.SimilarityThreshold,
+		&run.NeighborSearchMethod, &run.MutualEdgePolicy, &run.CandidateScope,
+		&inputJSON, &run.Status, &startedAt, &completedAt, &acceptedAt, &supersededBy,
+		&run.CreatedAt, &run.Clusters, &run.ClusterFaces, &run.MixedClusters)
+	if err != nil {
+		return clusteringRunInfo{}, err
+	}
+	var faceIDs []string
+	if err := json.Unmarshal([]byte(inputJSON), &faceIDs); err == nil {
+		inputFaces = len(faceIDs)
+	}
+	run.InputFaces = inputFaces
+	run.StartedAt = startedAt
+	run.CompletedAt = completedAt
+	run.AcceptedAt = acceptedAt
+	run.SupersededBy = supersededBy
+	return run, nil
+}
+
+func printClusteringRun(stdout io.Writer, run clusteringRunInfo) {
+	fmt.Fprintf(stdout, "id\tstatus\talgorithm\tversion\tk\tsimilarity\tinput_faces\tclusters\tmixed_clusters\tcreated_at\tcompleted_at\n")
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%.3f\t%d\t%d\t%d\t%s\t%s\n", run.ID, run.Status, run.Algorithm, run.AlgorithmVersion, run.K, run.SimilarityThreshold, run.InputFaces, run.Clusters, run.MixedClusters, run.CreatedAt, run.CompletedAt)
+}
+
+func clusterRunCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("cluster run requires get, list, status, or execution flags")
+	}
+	subcommand := args[0]
+	if subcommand != "get" && subcommand != "list" && subcommand != "status" {
+		return fmt.Errorf("unknown cluster run command %q", subcommand)
+	}
+	flags := flag.NewFlagSet("cluster run "+subcommand, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	runID := flags.String("run-id", "", "clustering run ID")
+	if subcommand == "list" {
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination("SELECT id FROM clustering_runs ORDER BY created_at DESC, id DESC", nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var result []clusteringRunInfo
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			run, err := loadClusteringRun(ctx, application.DB, id)
+			if err != nil {
+				return err
+			}
+			result = append(result, run)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("cluster run list", result))
+		}
+		fmt.Fprintln(stdout, "id\tstatus\talgorithm\tversion\tk\tsimilarity\tinput_faces\tclusters\tmixed_clusters\tcreated_at\tcompleted_at")
+		for _, run := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%.3f\t%d\t%d\t%d\t%s\t%s\n", run.ID, run.Status, run.Algorithm, run.AlgorithmVersion, run.K, run.SimilarityThreshold, run.InputFaces, run.Clusters, run.MixedClusters, run.CreatedAt, run.CompletedAt)
+		}
+		return nil
+	}
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return fmt.Errorf("cluster run %s requires --run-id", subcommand)
+	}
+	run, err := loadClusteringRun(ctx, application.DB, *runID)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("cluster run "+subcommand, run))
+	}
+	if subcommand == "get" {
+		fmt.Fprintf(stdout, "Run:                         %s\nAlgorithm:                   %s\nAlgorithm version:           %s\nk:                           %d\nSimilarity threshold:        %.3f\nNeighbor search method:      %s\nMutual edge policy:           %s\nCandidate scope:              %s\nInput faces:                  %d\nStatus:                      %s\nClusters:                    %d\nCluster faces:               %d\nMixed clusters:              %d\nCreated:                     %s\nStarted:                     %s\nCompleted:                   %s\nAccepted:                    %s\nSuperseded by:               %s\n", run.ID, run.Algorithm, run.AlgorithmVersion, run.K, run.SimilarityThreshold, run.NeighborSearchMethod, run.MutualEdgePolicy, run.CandidateScope, run.InputFaces, run.Status, run.Clusters, run.ClusterFaces, run.MixedClusters, run.CreatedAt, run.StartedAt, run.CompletedAt, run.AcceptedAt, run.SupersededBy)
+		return nil
+	}
+	percentage := 0.0
+	if run.InputFaces > 0 {
+		percentage = float64(run.ClusterFaces) * 100 / float64(run.InputFaces)
+	}
+	if run.Status == "completed" || run.Status == "active" || run.Status == "superseded" {
+		percentage = 100
+	}
+	fmt.Fprintf(stdout, "Run:                         %s\nStatus:                      %s\nInput faces:                 %d\nClustered faces:             %d\nClusters:                    %d\nMixed clusters:              %d\nPercentage complete:         %.1f%%\nTime started:                %s\nTime completed:              %s\n", run.ID, run.Status, run.InputFaces, run.ClusterFaces, run.Clusters, run.MixedClusters, percentage, run.StartedAt, run.CompletedAt)
+	return nil
+}
+
+func clusterCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("cluster requires run, get, list, or review")
+	}
+	if args[0] == "run" {
+		if len(args) > 1 && (args[1] == "get" || args[1] == "list" || args[1] == "status") {
+			return clusterRunCommand(ctx, application, args[1:], jsonOutput, stdout, stderr)
+		}
+		flags := flag.NewFlagSet("cluster run", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		collectionID := flags.String("collection-id", "", "collection ID used for the per-collection search method")
+		scope := flags.String("scope", "all", "clustering scope; only all is currently supported")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		settings := application.Config.ClusteringConfig
+		if *collectionID != "" {
+			if err := application.DB.QueryRowContext(ctx, "SELECT neighbor_search_method FROM collections WHERE id = ?", *collectionID).Scan(&settings.NeighborSearchMethod); err != nil {
+				return err
+			}
+		}
+		if *scope != "all" {
+			return fmt.Errorf("cluster run only supports --scope all until subset invalidation is implemented")
+		}
+		runID, err := clustering.NewProcessor(application.DB, settings).Run(ctx, "all")
+		if err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "cluster run", map[string]string{"run_id": runID, "neighbor_search_method": settings.NeighborSearchMethod})
+	}
+	if args[0] == "list" {
+		flags := flag.NewFlagSet("cluster list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		runID := flags.String("run-id", "", "clustering run ID")
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query := `SELECT c.id, c.clustering_run_id, c.cluster_key, COALESCE(c.proposed_person_id, ''), COALESCE(NULLIF(p.name, ''), substr(p.id, -8), ''), c.review_status, c.is_mixed, c.purity, c.connectivity, COUNT(cm.face_id)
+			FROM clusters c LEFT JOIN people p ON p.id = c.proposed_person_id LEFT JOIN cluster_memberships cm ON cm.cluster_id = c.id`
+		var queryArgs []any
+		if *runID != "" {
+			query += " WHERE c.clustering_run_id = ?"
+			queryArgs = append(queryArgs, *runID)
+		}
+		query += " GROUP BY c.id ORDER BY c.created_at, c.id"
+		var err error
+		query, queryArgs, err = applyPagination(query, queryArgs, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type cluster struct {
+			ID                 string  `json:"id"`
+			RunID              string  `json:"clustering_run_id"`
+			Key                string  `json:"cluster_key"`
+			ProposedPersonID   string  `json:"proposed_person_id"`
+			ProposedPersonName string  `json:"proposed_person_name"`
+			ReviewStatus       string  `json:"review_status"`
+			Mixed              bool    `json:"mixed"`
+			Purity             float64 `json:"purity"`
+			Connectivity       float64 `json:"connectivity"`
+			Faces              int     `json:"faces"`
+		}
+		var result []cluster
+		for rows.Next() {
+			var item cluster
+			var mixed int
+			var purity, connectivity sql.NullFloat64
+			if err := rows.Scan(&item.ID, &item.RunID, &item.Key, &item.ProposedPersonID, &item.ProposedPersonName, &item.ReviewStatus, &mixed, &purity, &connectivity, &item.Faces); err != nil {
+				return err
+			}
+			item.Mixed = mixed == 1
+			if purity.Valid {
+				item.Purity = purity.Float64
+			}
+			if connectivity.Valid {
+				item.Connectivity = connectivity.Float64
+			}
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("cluster list", result))
+		}
+		fmt.Fprintln(stdout, "id\treview_status\tfaces\tproposed_person_name\tclustering_run_id")
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%d\t%s\t%s\n", item.ID, item.ReviewStatus, item.Faces, item.ProposedPersonName, item.RunID)
+		}
+		return nil
+	}
+	flags := flag.NewFlagSet("cluster "+args[0], flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	clusterID := flags.String("cluster-id", "", "cluster ID")
+	status := flags.String("status", "reviewed", "review status")
+	defaultPersonID := flags.String("default-person-id", "", "default person ID")
+	expectedVersion := flags.Int("expected-version", 0, "optimistic review version")
+	faceID := flags.String("face-id", "", "optional face decision ID")
+	facePersonID := flags.String("face-person-id", "", "person ID for the face decision")
+	faceState := flags.String("face-state", "", "state for the face decision")
+	disposition := flags.String("disposition", "", "face disposition")
+	yes := flags.Bool("yes", false, "confirm identity-changing operation")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *clusterID == "" {
+		return fmt.Errorf("cluster %s requires --cluster-id", args[0])
+	}
+	if args[0] == "get" {
+		var key, reviewStatus string
+		var version, mixed int
+		var purity, connectivity sql.NullFloat64
+		if err := application.DB.QueryRowContext(ctx, `SELECT cluster_key, review_status, review_version, is_mixed, purity, connectivity FROM clusters WHERE id = ?`, *clusterID).Scan(&key, &reviewStatus, &version, &mixed, &purity, &connectivity); err != nil {
+			return err
+		}
+		result := map[string]any{"id": *clusterID, "cluster_key": key, "review_status": reviewStatus, "review_version": version, "mixed": mixed == 1, "purity": purity.Float64, "connectivity": connectivity.Float64}
+		return writeCommandResult(stdout, jsonOutput, "cluster get", result)
+	}
+	if args[0] != "review" {
+		return fmt.Errorf("unknown cluster command %q", args[0])
+	}
+	if !*yes {
+		return fmt.Errorf("cluster review requires --yes")
+	}
+	var decisions []review.ClusterFaceDecision
+	if *faceID != "" {
+		decisions = append(decisions, review.ClusterFaceDecision{FaceID: *faceID, PersonID: *facePersonID, State: review.AssignmentState(*faceState), Disposition: *disposition})
+	}
+	if err := review.NewStore(application.DB).ReviewCluster(ctx, *clusterID, *defaultPersonID, *status, *expectedVersion, decisions, review.Actor{Type: "user"}, "cli"); err != nil {
+		return err
+	}
+	return writeCommandResult(stdout, jsonOutput, "cluster review", map[string]any{"cluster_id": *clusterID, "status": *status, "expected_version": *expectedVersion + 1})
+}
+
+func writeCommandResult(stdout io.Writer, jsonOutput bool, command string, result any) error {
+	if jsonOutput {
+		return writeJSON(stdout, envelope(command, result))
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, string(data))
+	return err
+}
+
+// paginationFlags uses zero-based pages so page 10 with a limit of 20 starts
+// at row 201, matching the CLI's documented offset semantics.
+func paginationFlags(flags *flag.FlagSet) (*int, *int) {
+	return flags.Int("limit", 100, "maximum rows to return"), flags.Int("page", 0, "zero-based page number")
+}
+
+func applyPagination(query string, args []any, limit, page int) (string, []any, error) {
+	if limit < 1 {
+		return "", nil, fmt.Errorf("--limit must be positive")
+	}
+	if page < 0 {
+		return "", nil, fmt.Errorf("--page must be non-negative")
+	}
+	return query + " LIMIT ? OFFSET ?", append(args, limit, page*limit), nil
+}
+
+func searchCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("search", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	options := search.Options{}
+	person := flags.String("person-id", "", "person ID")
+	directory := flags.String("directory", "", "relative directory")
+	from := flags.String("from", "", "capture date lower bound")
+	until := flags.String("until", "", "capture date upper bound")
+	includeProvisional := flags.Bool("include-provisional", false, "include provisional assignments")
+	reviewMode := flags.Bool("review-mode", false, "show faces needing review; excludes assigned faces by default")
+	includeAssignedSystem := flags.Bool("include-assigned-system", false, "include system-assigned faces in review mode")
+	includeAssignedUser := flags.Bool("include-assigned-user", false, "include user-assigned faces in review mode")
+	states := flags.String("states", "", "comma-separated assignment states")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	options.PersonID, options.RelativePrefix, options.CaptureDateFrom, options.CaptureDateUntil, options.IncludeProvisional = *person, *directory, *from, *until, *includeProvisional
+	options.ReviewMode, options.IncludeAssignedSystem, options.IncludeAssignedUser = *reviewMode, *includeAssignedSystem, *includeAssignedUser
+	if *states != "" {
+		options.AssignmentStates = strings.Split(*states, ",")
+	}
+	result, err := search.NewStore(application.DB).Photos(ctx, options)
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("search", result))
+	}
+	for _, photo := range result {
+		fmt.Fprintf(stdout, "%s\t%d\t%s\n", photo.RelativePath, photo.FaceCount, photo.CaptureDate)
+	}
+	return nil
+}
+
+func auditCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("audit requires list or purge")
+	}
+	if args[0] == "list" {
+		flags := flag.NewFlagSet("audit list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		entityType := flags.String("entity-type", "", "filter by entity type")
+		entityID := flags.String("entity-id", "", "filter by entity ID")
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query := `SELECT id, COALESCE(account_id, ''), action, entity_type, entity_id, COALESCE(target_event_id, ''), COALESCE(previous_json, ''), COALESCE(new_json, ''), conflict, created_at FROM audit_events WHERE 1 = 1`
+		var queryArgs []any
+		if *entityType != "" {
+			query += " AND entity_type = ?"
+			queryArgs = append(queryArgs, *entityType)
+		}
+		if *entityID != "" {
+			query += " AND entity_id = ?"
+			queryArgs = append(queryArgs, *entityID)
+		}
+		query += " ORDER BY created_at DESC, id DESC"
+		var err error
+		query, queryArgs, err = applyPagination(query, queryArgs, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		type event struct {
+			ID            string          `json:"id"`
+			AccountID     string          `json:"account_id"`
+			Action        string          `json:"action"`
+			EntityType    string          `json:"entity_type"`
+			EntityID      string          `json:"entity_id"`
+			TargetEventID string          `json:"target_event_id"`
+			Previous      json.RawMessage `json:"previous"`
+			New           json.RawMessage `json:"new"`
+			Conflict      bool            `json:"conflict"`
+			CreatedAt     string          `json:"created_at"`
+		}
+		var result []event
+		for rows.Next() {
+			var item event
+			var previous, current string
+			var conflict int
+			if err := rows.Scan(&item.ID, &item.AccountID, &item.Action, &item.EntityType, &item.EntityID, &item.TargetEventID, &previous, &current, &conflict, &item.CreatedAt); err != nil {
+				return err
+			}
+			item.Previous = json.RawMessage(previous)
+			item.New = json.RawMessage(current)
+			item.Conflict = conflict == 1
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("audit list", result))
+		}
+		fmt.Fprintln(stdout, "created_at\taction\tentity_type\tentity_id\tid")
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", item.CreatedAt, item.Action, item.EntityType, item.EntityID, item.ID)
+		}
+		return nil
+	}
+	if args[0] != "purge" {
+		return fmt.Errorf("audit requires list or purge")
+	}
+	flags := flag.NewFlagSet("audit purge", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	ageDays := flags.Int("age-days", 365, "remove events older than this many days")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	removed, err := audit.NewStore(application.DB).PurgeBefore(ctx, time.Now().UTC().AddDate(0, 0, -*ageDays))
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("audit purge", map[string]int64{"removed": removed}))
+	}
+	fmt.Fprintf(stdout, "Removed %d audit events\n", removed)
+	return nil
+}
+
+func setupCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) != 1 || args[0] != "check" {
+		return fmt.Errorf("setup requires check")
+	}
+	report := setup.Validate(ctx, application.Config.PythonPath, "", application.Config.ModelRoot)
+	if jsonOutput {
+		return writeJSON(stdout, envelope("setup check", report))
+	}
+	for _, check := range report.Checks {
+		state := "FAIL"
+		if check.Passed {
+			state = "OK"
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%s\n", state, check.Name, check.Details)
+	}
+	if !report.Valid {
+		return fmt.Errorf("setup validation failed")
+	}
+	return nil
+}
+
+func serveCommand(ctx context.Context, application *app.App, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	address := flags.String("address", application.Config.ServeAddress, "HTTP listen address override")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if _, err := auth.NewStore(application.DB).EnsureBootstrapAdmin(ctx); err != nil {
+		return err
+	}
+	status, err := application.Status(ctx)
+	if err != nil {
+		return err
+	}
+	setupReport := setup.Validate(ctx, application.Config.PythonPath, "", application.Config.ModelRoot)
+	statusJSON, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return err
+	}
+	setupJSON, err := json.MarshalIndent(setupReport, "", "  ")
+	if err != nil {
+		return err
+	}
+	server, err := web.NewServerWithDiagnosticsAndThresholds(auth.NewStore(application.DB), application.DB, application.Config.PythonPath, statusJSON, setupJSON, application.Config.RecognitionThresholds)
+	if err != nil {
+		return err
+	}
+	httpServer := &http.Server{Addr: *address, Handler: server.Handler()}
+	go func() {
+		<-ctx.Done()
+		_ = httpServer.Shutdown(context.Background())
+	}()
+	fmt.Fprintf(stdout, "Listening on http://%s\n", *address)
+	err = httpServer.ListenAndServe()
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
+}
+
+func pipelineCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return fmt.Errorf("pipeline requires get, register, or list")
+	}
+	if args[0] == "get" {
+		flags := flag.NewFlagSet("pipeline get", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		pipelineID := flags.String("pipeline-id", "", "pipeline ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *pipelineID == "" {
+			return fmt.Errorf("pipeline get requires --pipeline-id")
+		}
+		var id, family, version, checksums, detector, preprocessing, dtype, normalization, provider, dependencies, created string
+		var dimension int
+		if err := application.DB.QueryRowContext(ctx, `SELECT id, model_family, model_version, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension, embedding_dtype, normalization, execution_provider, dependency_versions_json, created_at FROM pipelines WHERE id = ?`, *pipelineID).Scan(&id, &family, &version, &checksums, &detector, &preprocessing, &dimension, &dtype, &normalization, &provider, &dependencies, &created); err != nil {
+			return err
+		}
+		result := map[string]any{"id": id, "model_family": family, "model_version": version, "model_checksums": json.RawMessage(checksums), "detector_config": json.RawMessage(detector), "preprocessing_config": json.RawMessage(preprocessing), "embedding_dimension": dimension, "embedding_dtype": dtype, "normalization": normalization, "execution_provider": provider, "dependency_versions": json.RawMessage(dependencies), "created_at": created}
+		return writeCommandResult(stdout, jsonOutput, "pipeline get", result)
+	}
+	if args[0] == "list" {
+		flags := flag.NewFlagSet("pipeline list", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		limit, page := paginationFlags(flags)
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		query, queryArgs, err := applyPagination(`SELECT id, model_family, model_version, embedding_dimension, embedding_dtype, normalization, execution_provider, model_checksums_json, detector_config_json, preprocessing_config_json FROM pipelines ORDER BY created_at DESC`, nil, *limit, *page)
+		if err != nil {
+			return err
+		}
+		rows, err := application.DB.QueryContext(ctx, query, queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var result []map[string]any
+		for rows.Next() {
+			var id, family, version, dtype, normalization, provider, checksums, detector, preprocessing string
+			var dimension int
+			if err := rows.Scan(&id, &family, &version, &dimension, &dtype, &normalization, &provider, &checksums, &detector, &preprocessing); err != nil {
+				return err
+			}
+			result = append(result, map[string]any{"id": id, "model_family": family, "model_version": version, "embedding_dimension": dimension, "embedding_dtype": dtype, "normalization": normalization, "execution_provider": provider, "model_checksums": json.RawMessage(checksums), "detector_config": json.RawMessage(detector), "preprocessing_config": json.RawMessage(preprocessing)})
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return writeJSON(stdout, envelope("pipeline list", result))
+		}
+		fmt.Fprintln(stdout, "id\tmodel_family\tmodel_version\texecution_provider")
+		for _, item := range result {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", item["id"], item["model_family"], item["model_version"], item["execution_provider"])
+		}
+		return nil
+	}
+	if args[0] != "register" {
+		return fmt.Errorf("pipeline requires get, register, or list")
+	}
+	flags := flag.NewFlagSet("pipeline register", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	family := flags.String("model-family", "buffalo_l", "model family")
+	version := flags.String("model-version", "2.0.0", "model version")
+	dimension := flags.Int("embedding-dimension", 512, "embedding dimension")
+	provider := flags.String("provider", application.Config.Provider, "execution provider")
+	checksums := flags.String("model-checksums-json", "{}", "model checksum JSON object")
+	detector := flags.String("detector-config-json", "{}", "detector configuration JSON object")
+	preprocessing := flags.String("preprocessing-config-json", "{}", "preprocessing configuration JSON object")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	var checksumValue map[string]string
+	if err := json.Unmarshal([]byte(*checksums), &checksumValue); err != nil {
+		return fmt.Errorf("invalid model checksums JSON: %w", err)
+	}
+	var detectorValue, preprocessingValue any
+	if err := json.Unmarshal([]byte(*detector), &detectorValue); err != nil {
+		return fmt.Errorf("invalid detector config JSON: %w", err)
+	}
+	if err := json.Unmarshal([]byte(*preprocessing), &preprocessingValue); err != nil {
+		return fmt.Errorf("invalid preprocessing config JSON: %w", err)
+	}
+	pipelineID, err := analysis.NewStore(application.DB).RegisterPipeline(ctx, analysis.Pipeline{ModelFamily: *family, ModelVersion: *version, ModelChecksums: checksumValue, DetectorConfig: detectorValue, PreprocessingConfig: preprocessingValue, EmbeddingDimension: *dimension, EmbeddingDType: "float32", Normalization: "l2", ExecutionProvider: *provider})
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return writeJSON(stdout, envelope("pipeline register", map[string]string{"id": pipelineID}))
+	}
+	fmt.Fprintln(stdout, pipelineID)
+	return nil
+}
+
+func workerCommand(ctx context.Context, application *app.App, args []string, stdout, stderr io.Writer) error {
+	if len(args) > 0 && (args[0] == "status" || args[0] == "stop") {
+		pidPath := filepath.Join(application.Config.RuntimeDataRoot, "worker.pid")
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintln(stdout, "stopped")
+				return nil
+			}
+			return err
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return fmt.Errorf("invalid worker pid file: %w", err)
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return err
+		}
+		if args[0] == "status" {
+			if err := process.Signal(syscall.Signal(0)); err != nil {
+				fmt.Fprintln(stdout, "stopped")
+				_ = os.Remove(pidPath)
+				return nil
+			}
+			fmt.Fprintf(stdout, "running\t%d\n", pid)
+			return nil
+		}
+		if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		_ = os.Remove(pidPath)
+		fmt.Fprintln(stdout, "stopping")
+		return nil
+	}
+	flags := flag.NewFlagSet("worker", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	pipelineID := flags.String("pipeline-id", "", "pipeline ID")
+	pythonPath := flags.String("python", application.Config.PythonPath, "Python executable override")
+	workerScript := flags.String("script", "worker/insightface_worker.py", "worker script")
+	maxPixels := flags.Int64("max-pixels", application.Config.AnalysisMaxPixels, "maximum decoded pixels")
+	maxWidth := flags.Int("max-width", application.Config.AnalysisMaxWidth, "maximum decoded image width")
+	maxHeight := flags.Int("max-height", application.Config.AnalysisMaxHeight, "maximum decoded image height")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *pipelineID == "" {
+		return fmt.Errorf("worker requires --pipeline-id")
+	}
+	if *maxPixels < 0 || *maxWidth < 0 || *maxHeight < 0 || *maxPixels > application.Config.AnalysisMaxPixelsOverride || (*maxWidth != 0 && application.Config.AnalysisMaxWidthOverride != 0 && *maxWidth > application.Config.AnalysisMaxWidthOverride) || (*maxHeight != 0 && application.Config.AnalysisMaxHeightOverride != 0 && *maxHeight > application.Config.AnalysisMaxHeightOverride) {
+		return fmt.Errorf("worker resource limits exceed configured administrator ceilings")
+	}
+	var modelFamily, provider, checksumsJSON, detectorJSON, preprocessingJSON string
+	var dimension int
+	if err := application.DB.QueryRowContext(ctx, `
+		SELECT model_family, execution_provider, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension
+		FROM pipelines WHERE id = ?`, *pipelineID).Scan(&modelFamily, &provider, &checksumsJSON, &detectorJSON, &preprocessingJSON, &dimension); err != nil {
+		return fmt.Errorf("load pipeline contract: %w", err)
+	}
+	var checksums map[string]string
+	if err := json.Unmarshal([]byte(checksumsJSON), &checksums); err != nil {
+		return fmt.Errorf("decode pipeline model checksums: %w", err)
+	}
+	client := worker.NewClientForPipeline(*pythonPath, worker.Expectation{
+		PipelineID:         *pipelineID,
+		Model:              modelFamily,
+		Provider:           provider,
+		ModelChecksums:     checksums,
+		EmbeddingDimension: dimension,
+		EmbeddingDType:     "float32",
+		EmbeddingMetric:    "cosine",
+		Modules:            []string{"detection", "recognition"},
+	}, *workerScript, "--model", modelFamily, "--model-root", application.Config.ModelRoot,
+		"--providers", provider, "--model-checksums-json", checksumsJSON,
+		"--detector-config-json", detectorJSON, "--preprocessing-config-json", preprocessingJSON,
+		"--modules", "detection,recognition", "--pipeline-id", *pipelineID,
+		"--max-pixels", strconv.FormatInt(application.Config.AnalysisMaxPixelsOverride, 10),
+		"--max-width", strconv.Itoa(application.Config.AnalysisMaxWidthOverride), "--max-height", strconv.Itoa(application.Config.AnalysisMaxHeightOverride))
+	if err := client.Start(ctx); err != nil {
+		return err
+	}
+	defer client.Close()
+	pidPath := filepath.Join(application.Config.RuntimeDataRoot, "worker.pid")
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(pidPath)
+	processor := analysis.NewProcessorWithLimits(application.DB, client, *pipelineID, worker.ResourceLimits{MaxPixels: *maxPixels, MaxWidth: *maxWidth, MaxHeight: *maxHeight})
+	jobStore := jobs.NewStore(application.DB)
+	runner := jobs.Runner{Store: jobStore, Handlers: map[string]jobs.Handler{
+		"analysis": func(jobContext context.Context, job jobs.Job) error {
+			var payload struct {
+				CollectionID   string                 `json:"collection_id"`
+				AnalysisLimits *worker.ResourceLimits `json:"analysis_limits,omitempty"`
+				AdminAccountID string                 `json:"admin_account_id,omitempty"`
+			}
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.CollectionID == "" {
+				return fmt.Errorf("analysis job has no collection_id")
+			}
+			rows, err := application.DB.QueryContext(jobContext, `SELECT DISTINCT asset_id FROM photo_paths WHERE collection_id = ? AND missing_at IS NULL`, payload.CollectionID)
+			if err != nil {
+				return err
+			}
+			var assetIDs []string
+			for rows.Next() {
+				var assetID string
+				if err := rows.Scan(&assetID); err != nil {
+					rows.Close()
+					return err
+				}
+				assetIDs = append(assetIDs, assetID)
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+			if err := jobStore.EnsureItems(jobContext, job.ID, assetIDs); err != nil {
+				return err
+			}
+			jobProcessor := processor
+			if payload.AnalysisLimits != nil {
+				limits := *payload.AnalysisLimits
+				if payload.AdminAccountID != "cli" {
+					var role string
+					if err := application.DB.QueryRowContext(jobContext, `SELECT role FROM accounts WHERE id = ? AND disabled_at IS NULL`, payload.AdminAccountID).Scan(&role); err != nil || role != string(auth.SystemAdmin) {
+						return fmt.Errorf("analysis job limit override is not authorized")
+					}
+				}
+				if limits.MaxPixels < application.Config.AnalysisMaxPixels || limits.MaxPixels > application.Config.AnalysisMaxPixelsOverride ||
+					(limits.MaxWidth != 0 && application.Config.AnalysisMaxWidth != 0 && limits.MaxWidth < application.Config.AnalysisMaxWidth) ||
+					(limits.MaxWidth != 0 && application.Config.AnalysisMaxWidthOverride != 0 && limits.MaxWidth > application.Config.AnalysisMaxWidthOverride) ||
+					(limits.MaxHeight != 0 && application.Config.AnalysisMaxHeight != 0 && limits.MaxHeight < application.Config.AnalysisMaxHeight) ||
+					(limits.MaxHeight != 0 && application.Config.AnalysisMaxHeightOverride != 0 && limits.MaxHeight > application.Config.AnalysisMaxHeightOverride) {
+					return fmt.Errorf("analysis job resource limits are outside configured bounds")
+				}
+				jobProcessor = analysis.NewProcessorWithLimits(application.DB, client, *pipelineID, limits)
+			}
+			if err := jobProcessor.ProcessCollectionWithItemProgress(jobContext, payload.CollectionID, func(assetID string, itemErr error) error {
+				claimed, claimErr := jobStore.ClaimItem(jobContext, job.ID, assetID)
+				if claimErr != nil {
+					return claimErr
+				}
+				if !claimed {
+					return nil
+				}
+				if itemErr != nil {
+					return jobStore.FailItem(jobContext, job.ID, assetID, "analysis_failed", itemErr.Error(), false)
+				}
+				return jobStore.CompleteItem(jobContext, job.ID, assetID)
+			}); err != nil {
+				return err
+			}
+			_, err = jobStore.Enqueue(jobContext, "recognition", 1, map[string]string{"pipeline_id": *pipelineID})
+			return err
+		},
+		"recognition": func(jobContext context.Context, job jobs.Job) error {
+			faceIDs, err := jobFaceIDs(jobContext, application.DB)
+			if err != nil {
+				return err
+			}
+			if err := jobStore.EnsureItems(jobContext, job.ID, faceIDs); err != nil {
+				return err
+			}
+			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "recognition", "items": len(faceIDs), "completed": 0})
+			if err := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds, *pipelineID).ProcessAll(jobContext); err != nil {
+				return err
+			}
+			if err := completeJobItems(jobContext, jobStore, job.ID, faceIDs); err != nil {
+				return err
+			}
+			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "recognition", "items": len(faceIDs), "completed": len(faceIDs)})
+			_, err = jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"})
+			return err
+		},
+		"possible-candidates": func(jobContext context.Context, job jobs.Job) error {
+			var payload candidates.JobPayload
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.Scope == "" {
+				return fmt.Errorf("possible-candidates job has no scope")
+			}
+			policy := payload.Policy
+			if policy.MaxProvisionalFaces == 0 {
+				policy = application.Config.PossibleCandidates
+			}
+			generator := candidates.NewGenerator(application.DB, policy, application.Config.RecognitionThresholds, *pipelineID)
+			if job.Attempts > 0 {
+				if err := audit.NewStore(application.DB).Record(jobContext, audit.Event{Action: "possible-candidate-run", EntityType: "job", EntityID: job.ID, New: map[string]any{
+					"status": "retry", "attempt": job.Attempts,
+				}}); err != nil {
+					return err
+				}
+			}
+			run, err := generator.RunWithProgress(jobContext, candidates.Request{Scope: payload.Scope, ScopeID: payload.ScopeID, ReferenceSetVersion: payload.ReferenceSetVersion}, func(progress candidates.Progress) error {
+				return jobStore.UpdateProgress(jobContext, job.ID, map[string]any{
+					"phase": "possible-candidates", "run_id": progress.RunID,
+					"processed": progress.Processed, "total": progress.Total,
+					"targets": progress.Total, "candidates": progress.Candidates,
+					"skipped": progress.Skipped,
+				})
+			})
+			if err != nil {
+				return err
+			}
+			return jobStore.UpdateProgress(jobContext, job.ID, map[string]any{
+				"phase": "possible-candidates", "run_id": run.ID,
+				"targets": run.TargetCount, "candidates": run.CandidateCount,
+				"skipped": run.SkippedCount,
+			})
+		},
+		"reference-reprocess": func(jobContext context.Context, job jobs.Job) error {
+			var payload struct {
+				PersonID string `json:"person_id"`
+			}
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.PersonID == "" {
+				return fmt.Errorf("reference reprocess job has no person_id")
+			}
+			recognitionProcessor := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds, *pipelineID)
+			hasReferences, err := hasApprovedReferences(jobContext, application.DB, payload.PersonID)
+			if err != nil {
+				return err
+			}
+			// A person-level recommendation refresh is also used before the user
+			// has selected any references. In that state there is no recognition
+			// gallery to reprocess. Running recognition anyway would clear the
+			// existing provisional assignments, and clustering could then create a
+			// new provisional person for the same faces.
+			if !hasReferences {
+				return recognitionProcessor.RefreshRecommendations(jobContext, payload.PersonID)
+			}
+			if err := recognitionProcessor.ProcessDiscovery(jobContext, payload.PersonID, nil); err != nil {
+				return err
+			}
+			version, err := candidates.ReferenceSetVersion(jobContext, application.DB)
+			if err != nil {
+				return err
+			}
+			_, _, err = jobStore.EnqueuePossibleCandidates(jobContext, candidates.JobPayload{
+				Scope: "all", ReferenceSetVersion: version, Policy: application.Config.PossibleCandidates,
+			})
+			return err
+		},
+		"reference-discovery": func(jobContext context.Context, job jobs.Job) error {
+			var payload struct {
+				PersonID  string `json:"person_id"`
+				Since     string `json:"since"`
+				SinceLast bool   `json:"since_last"`
+			}
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.Since != "" && payload.SinceLast {
+				return fmt.Errorf("reference discovery cannot combine since and since_last")
+			}
+			var since *time.Time
+			if payload.SinceLast {
+				var err error
+				since, err = lastReferenceDiscovery(jobContext, application.DB)
+				if err != nil {
+					return err
+				}
+			} else if payload.Since != "" {
+				parsed, err := time.Parse(time.RFC3339Nano, payload.Since)
+				if err != nil {
+					return fmt.Errorf("parse reference discovery since: %w", err)
+				}
+				since = &parsed
+			}
+
+			hasReferences := false
+			var err error
+			if payload.PersonID != "" {
+				hasReferences, err = hasApprovedReferences(jobContext, application.DB, payload.PersonID)
+			} else {
+				var count int
+				err = application.DB.QueryRowContext(jobContext, `SELECT COUNT(*) FROM current_face_references WHERE reference = 1`).Scan(&count)
+				hasReferences = count > 0
+			}
+			if err != nil {
+				return err
+			}
+			details := map[string]any{
+				"status":     "completed",
+				"person_id":  payload.PersonID,
+				"since_last": payload.SinceLast,
+			}
+			if since != nil {
+				details["since"] = since.UTC().Format(time.RFC3339Nano)
+			}
+			if !hasReferences {
+				details["skipped"] = "no-approved-references"
+				if err := audit.NewStore(application.DB).Record(jobContext, audit.Event{Action: "reference-discovery", EntityType: "job", EntityID: job.ID, New: details}); err != nil {
+					return err
+				}
+				return nil
+			}
+
+			processor := recognition.NewProcessor(application.DB, application.Config.RecognitionThresholds, *pipelineID)
+			if err := processor.ProcessDiscovery(jobContext, payload.PersonID, since); err != nil {
+				return err
+			}
+			if _, err := jobStore.Enqueue(jobContext, "clustering", 2, map[string]string{"scope": "all"}); err != nil {
+				return err
+			}
+			if err := audit.NewStore(application.DB).Record(jobContext, audit.Event{Action: "reference-discovery", EntityType: "job", EntityID: job.ID, New: details}); err != nil {
+				return err
+			}
+			return nil
+		},
+		"clustering": func(jobContext context.Context, job jobs.Job) error {
+			var payload struct {
+				Scope string `json:"scope"`
+			}
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
+			if payload.Scope != "" && payload.Scope != "all" {
+				return fmt.Errorf("clustering jobs only support scope all")
+			}
+			clusteringConfig := application.Config.ClusteringConfig
+			faceIDs, err := jobFaceIDs(jobContext, application.DB)
+			if err != nil {
+				return err
+			}
+			if err := jobStore.EnsureItems(jobContext, job.ID, faceIDs); err != nil {
+				return err
+			}
+			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "clustering", "items": len(faceIDs), "completed": 0})
+			_, err = clustering.NewProcessor(application.DB, clusteringConfig).Run(jobContext, "all")
+			if err != nil {
+				return err
+			}
+			if err := completeJobItems(jobContext, jobStore, job.ID, faceIDs); err != nil {
+				return err
+			}
+			_ = jobStore.UpdateProgress(jobContext, job.ID, map[string]any{"phase": "clustering", "items": len(faceIDs), "completed": len(faceIDs)})
+			return err
+		},
+	}, IdleWait: time.Second}
+	fmt.Fprintln(stdout, "Worker running")
+	return runner.Run(ctx)
+}
+
+func countSupported(records []media.FileRecord) int {
+	count := 0
+	for _, record := range records {
+		if record.Status == media.StatusSupported {
+			count++
+		}
+	}
+	return count
+}
+
+func jobFaceIDs(ctx context.Context, database *sql.DB) ([]string, error) {
+	rows, err := database.QueryContext(ctx, `SELECT f.id FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.embedding IS NOT NULL AND COALESCE(ca.state, 'unassigned') <> 'assigned-user' ORDER BY f.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func completeJobItems(ctx context.Context, store jobs.Store, jobID string, ids []string) error {
+	for _, id := range ids {
+		claimed, err := store.ClaimItem(ctx, jobID, id)
+		if err != nil {
+			return err
+		}
+		if claimed {
+			if err := store.CompleteItem(ctx, jobID, id); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func envelope(command string, result any) map[string]any {
+	return map[string]any{"schema_version": outputSchemaVersion, "command": command, "result": result, "warnings": []string{}}
+}
+
+func writeJSON(stdout io.Writer, value any) error {
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}

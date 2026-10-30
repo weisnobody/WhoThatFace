@@ -1,0 +1,4 @@
+# Prototype baseline for Apple Silicon / Python 3.11.
+# Keep these pins together with the generated environment lockfile.
+insightface==2.0.0
+onnxruntime==1.30.0

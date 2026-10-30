@@ -1,0 +1,438 @@
+// Package review contains review-state services shared by the CLI and web UI.
+package review
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+
+	"github.com/pjg/face_me_bro/internal/audit"
+	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/pjg/face_me_bro/internal/jobs"
+)
+
+type AssignmentState string
+
+const (
+	Unassigned     AssignmentState = "unassigned"
+	Provisional    AssignmentState = "provisional"
+	AssignedSystem AssignmentState = "assigned-system"
+	AssignedUser   AssignmentState = "assigned-user"
+	Unknown        AssignmentState = "unknown"
+	Ambiguous      AssignmentState = "ambiguous"
+)
+
+type Actor struct {
+	Type      string
+	AccountID string
+}
+
+type Evidence struct {
+	PipelineID      string
+	ClusteringRunID string
+	ClusterID       string
+	Similarity      *float32
+	Margin          *float32
+	Support         *int
+	Quality         *float32
+	Detection       *float32
+	Purity          *float32
+	Connectivity    *float32
+	Agreement       *bool
+}
+
+type Assignment struct {
+	FaceID    string
+	PersonID  string
+	State     AssignmentState
+	EventID   string
+	UpdatedAt time.Time
+}
+
+type Store struct{ db *sql.DB }
+
+func NewStore(database *sql.DB) Store { return Store{db: database} }
+
+func (s Store) SetPersonDontTrack(ctx context.Context, personID string, dontTrack bool, actor Actor, reason string) error {
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := s.db.ExecContext(ctx, `UPDATE people SET dont_track = ?, updated_at = ? WHERE id = ?`, boolInt(dontTrack), now, personID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return fmt.Errorf("person %q does not exist", personID)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO person_state_events (id, person_id, dont_track, account_id, reason, created_at) VALUES (?, ?, ?, NULLIF(?, ''), ?, ?)`, eventID, personID, boolInt(dontTrack), actor.AccountID, reason, now); err != nil {
+		return err
+	}
+	return audit.NewStore(s.db).Record(ctx, audit.Event{AccountID: actor.AccountID, TargetEventID: eventID, Action: "person-state", EntityType: "person", EntityID: personID, New: map[string]any{"dont_track": dontTrack}})
+}
+
+// InitializeFace creates the initial unassigned state once analysis discovers
+// a face. It is safe to call repeatedly.
+func (s Store) InitializeFace(ctx context.Context, faceID string, actor Actor) error {
+	var exists int
+	err := s.db.QueryRowContext(ctx, "SELECT 1 FROM current_face_assignments WHERE face_id = ?", faceID).Scan(&exists)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+	_, err = s.setAssignment(ctx, faceID, "", Unassigned, actor, Evidence{}, "face-seen", "")
+	return err
+}
+
+// Assign changes the current state. Automatic actors cannot replace a
+// user-confirmed assignment.
+func (s Store) Assign(ctx context.Context, faceID, personID string, state AssignmentState, actor Actor, evidence Evidence, reason string) (Assignment, error) {
+	if err := validateAssignment(state, personID); err != nil {
+		return Assignment{}, err
+	}
+	current, err := s.Current(ctx, faceID)
+	if err != nil && err != sql.ErrNoRows {
+		return Assignment{}, err
+	}
+	if err == nil && current.State == AssignedUser && actor.Type != "user" {
+		return current, fmt.Errorf("user-confirmed assignment is protected")
+	}
+	return s.setAssignment(ctx, faceID, personID, state, actor, evidence, "assignment", reason)
+}
+
+// AssignMany changes multiple current face states in one transaction. Audit
+// events are recorded only after all projections and assignment events commit.
+func (s Store) AssignMany(ctx context.Context, faceIDs []string, personID string, state AssignmentState, actor Actor, evidence Evidence, reason string) ([]Assignment, error) {
+	if len(faceIDs) == 0 {
+		return nil, fmt.Errorf("at least one face is required")
+	}
+	if err := validateAssignment(state, personID); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(faceIDs))
+	for _, faceID := range faceIDs {
+		if faceID == "" {
+			return nil, fmt.Errorf("face ID cannot be empty")
+		}
+		if _, exists := seen[faceID]; exists {
+			return nil, fmt.Errorf("duplicate face ID %q", faceID)
+		}
+		seen[faceID] = struct{}{}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	assignments := make([]Assignment, 0, len(faceIDs))
+	auditEvents := make([]audit.Event, 0, len(faceIDs))
+	for _, faceID := range faceIDs {
+		assignment, auditEvent, err := s.setAssignmentInTx(ctx, tx, faceID, personID, state, actor, evidence, "assignment", reason)
+		if err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, assignment)
+		auditEvents = append(auditEvents, auditEvent)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, auditEvent := range auditEvents {
+		if err := audit.NewStore(s.db).Record(ctx, auditEvent); err != nil {
+			return nil, fmt.Errorf("record assignment audit event: %w", err)
+		}
+	}
+	return assignments, nil
+}
+
+// Reject restores the previous state recorded by the current event, or starts
+// an unassigned state when there is no prior event.
+func (s Store) Reject(ctx context.Context, faceID string, actor Actor, reason string) (Assignment, error) {
+	current, err := s.Current(ctx, faceID)
+	if err != nil {
+		return Assignment{}, err
+	}
+	var state, personID sql.NullString
+	err = s.db.QueryRowContext(ctx, `
+		SELECT previous_state, previous_person_id
+		FROM assignment_events WHERE id = ?`, current.EventID).Scan(&state, &personID)
+	if err != nil {
+		return Assignment{}, err
+	}
+	newState := Unassigned
+	if state.Valid {
+		newState = AssignmentState(state.String)
+	}
+	newPerson := ""
+	if personID.Valid {
+		newPerson = personID.String
+	}
+	return s.setAssignment(ctx, faceID, newPerson, newState, actor, Evidence{}, "reject", reason)
+}
+
+func (s Store) Current(ctx context.Context, faceID string) (Assignment, error) {
+	var result Assignment
+	var updated string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT face_id, COALESCE(person_id, ''), state, event_id, updated_at
+		FROM current_face_assignments WHERE face_id = ?`, faceID).Scan(&result.FaceID, &result.PersonID, &result.State, &result.EventID, &updated)
+	if err != nil {
+		return Assignment{}, err
+	}
+	result.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated)
+	return result, err
+}
+
+func (s Store) SetReference(ctx context.Context, faceID, personID string, reference bool, actor Actor, reason string) error {
+	var assignedPerson string
+	var state string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(ca.person_id, ''), COALESCE(ca.state, 'unassigned') FROM faces f LEFT JOIN current_face_assignments ca ON ca.face_id = f.id WHERE f.id = ?`, faceID).Scan(&assignedPerson, &state); err != nil {
+		return err
+	}
+	if reference {
+		if assignedPerson == "" || assignedPerson != personID || (state != string(AssignedUser) && state != string(AssignedSystem)) {
+			return fmt.Errorf("face %q is not assigned to person %q as an eligible assignment", faceID, personID)
+		}
+		var invalidDisposition int
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM current_face_dispositions WHERE face_id = ? AND disposition IN ('incorrect-assignment', 'false-detection'))`, faceID).Scan(&invalidDisposition); err != nil {
+			return err
+		}
+		if invalidDisposition == 1 {
+			return fmt.Errorf("face %q has a disposition that prevents reference selection", faceID)
+		}
+	}
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var recommendationID sql.NullString
+	_ = s.db.QueryRowContext(ctx, `SELECT id FROM reference_recommendations WHERE face_id = ? AND person_id = ? AND is_current = 1 ORDER BY created_at DESC LIMIT 1`, faceID, personID).Scan(&recommendationID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var previousEvent sql.NullString
+	_ = tx.QueryRowContext(ctx, "SELECT event_id FROM current_face_references WHERE face_id = ?", faceID).Scan(&previousEvent)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO reference_selection_events (id, face_id, person_id, reference, account_id, recommendation_id, reason, supersedes_event_id, created_at)
+		VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, NULLIF(?, ''), ?)`, eventID, faceID, personID, boolInt(reference), actor.AccountID, recommendationID.String, reason, previousEvent.String, now)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO current_face_references (face_id, person_id, reference, event_id, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(face_id) DO UPDATE SET person_id = excluded.person_id, reference = excluded.reference, event_id = excluded.event_id, updated_at = excluded.updated_at`, faceID, personID, boolInt(reference), eventID, now)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if err := audit.NewStore(s.db).Record(ctx, audit.Event{
+		AccountID: actor.AccountID, TargetEventID: eventID, Action: "reference-selection", EntityType: "face", EntityID: faceID,
+		New: map[string]any{"person_id": personID, "reference": reference},
+	}); err != nil {
+		return fmt.Errorf("record reference audit event: %w", err)
+	}
+	if recommendationID.Valid {
+		decision := "rejected"
+		if reference {
+			decision = "approved"
+		}
+		decisionID, err := id.NewUUIDv7()
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO reference_recommendation_decisions (id, recommendation_id, person_id, face_id, decision, account_id, created_at) VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?)`, decisionID, recommendationID.String, personID, faceID, decision, actor.AccountID, now); err != nil {
+			return err
+		}
+	}
+	_, _, err = jobs.NewStore(s.db).EnqueueReferenceReprocess(ctx, personID)
+	return err
+}
+
+func (s Store) SetDisposition(ctx context.Context, faceID, disposition string, active bool, actor Actor, reason string) error {
+	if disposition != "incorrect-assignment" && disposition != "false-detection" && disposition != "dont-track" {
+		return fmt.Errorf("invalid disposition %q", disposition)
+	}
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO face_disposition_events (id, face_id, disposition, active, account_id, reason, created_at)
+		VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?)`, eventID, faceID, disposition, boolInt(active), actor.AccountID, reason, now)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO current_face_dispositions (face_id, disposition, event_id, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(face_id) DO UPDATE SET disposition = excluded.disposition, event_id = excluded.event_id, updated_at = excluded.updated_at`, faceID, disposition, eventID, now)
+	if err != nil {
+		return err
+	}
+	if !active {
+		_, err = s.db.ExecContext(ctx, `DELETE FROM current_face_dispositions WHERE face_id = ?`, faceID)
+		if err != nil {
+			return err
+		}
+	}
+	return audit.NewStore(s.db).Record(ctx, audit.Event{
+		AccountID: actor.AccountID, TargetEventID: eventID, Action: "face-disposition", EntityType: "face", EntityID: faceID,
+		New: map[string]any{"disposition": disposition, "active": active},
+	})
+}
+
+func (s Store) setAssignment(ctx context.Context, faceID, personID string, state AssignmentState, actor Actor, evidence Evidence, action, reason string) (Assignment, error) {
+	current, currentErr := s.Current(ctx, faceID)
+	if currentErr != nil && currentErr != sql.ErrNoRows {
+		return Assignment{}, currentErr
+	}
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return Assignment{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Assignment{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO assignment_events (
+			id, face_id, person_id, previous_state, previous_person_id, new_state,
+			actor_type, account_id, source_pipeline_id, clustering_run_id,
+			cluster_id, similarity, margin, support_count, quality,
+			detection_confidence, purity, connectivity, agreement, action, reason, created_at
+		) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		eventID, faceID, personID, previousState(current, currentErr), previousPerson(current, currentErr), state,
+		actor.Type, actor.AccountID, evidence.PipelineID, evidence.ClusteringRunID, evidence.ClusterID,
+		evidence.Similarity, evidence.Margin, evidence.Support, evidence.Quality, evidence.Detection,
+		evidence.Purity, evidence.Connectivity, nullableBool(evidence.Agreement), action, reason, now)
+	if err != nil {
+		return Assignment{}, err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO current_face_assignments (face_id, person_id, state, event_id, updated_at)
+		VALUES (?, NULLIF(?, ''), ?, ?, ?)
+		ON CONFLICT(face_id) DO UPDATE SET person_id = excluded.person_id, state = excluded.state, event_id = excluded.event_id, updated_at = excluded.updated_at`, faceID, personID, state, eventID, now)
+	if err != nil {
+		return Assignment{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Assignment{}, err
+	}
+	if err := audit.NewStore(s.db).Record(ctx, audit.Event{
+		AccountID: actor.AccountID, TargetEventID: eventID, Action: action, EntityType: "face", EntityID: faceID,
+		Previous: map[string]any{"state": previousState(current, currentErr), "person_id": previousPerson(current, currentErr)},
+		New:      map[string]any{"state": state, "person_id": personID},
+	}); err != nil {
+		return Assignment{}, fmt.Errorf("record assignment audit event: %w", err)
+	}
+	parsed, _ := time.Parse(time.RFC3339Nano, now)
+	return Assignment{FaceID: faceID, PersonID: personID, State: state, EventID: eventID, UpdatedAt: parsed}, nil
+}
+
+// setAssignmentInTx applies an assignment projection and event using the
+// caller's transaction. Audit recording is intentionally deferred until the
+// transaction commits so a failed multi-face review cannot expose partial
+// review state.
+func (s Store) setAssignmentInTx(ctx context.Context, tx *sql.Tx, faceID, personID string, state AssignmentState, actor Actor, evidence Evidence, action, reason string) (Assignment, audit.Event, error) {
+	var current Assignment
+	var updated string
+	currentErr := tx.QueryRowContext(ctx, `SELECT face_id, COALESCE(person_id, ''), state, event_id, updated_at FROM current_face_assignments WHERE face_id = ?`, faceID).Scan(&current.FaceID, &current.PersonID, &current.State, &current.EventID, &updated)
+	if currentErr != nil && currentErr != sql.ErrNoRows {
+		return Assignment{}, audit.Event{}, currentErr
+	}
+	if currentErr == nil && current.State == AssignedUser && actor.Type != "user" {
+		return Assignment{}, audit.Event{}, fmt.Errorf("user-confirmed assignment is protected")
+	}
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return Assignment{}, audit.Event{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	previousStateValue := previousState(current, currentErr)
+	previousPersonValue := previousPerson(current, currentErr)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO assignment_events (id, face_id, person_id, previous_state, previous_person_id, new_state, actor_type, account_id, source_pipeline_id, clustering_run_id, cluster_id, similarity, margin, support_count, quality, detection_confidence, purity, connectivity, agreement, action, reason, created_at) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, eventID, faceID, personID, previousStateValue, previousPersonValue, state, actor.Type, actor.AccountID, evidence.PipelineID, evidence.ClusteringRunID, evidence.ClusterID, evidence.Similarity, evidence.Margin, evidence.Support, evidence.Quality, evidence.Detection, evidence.Purity, evidence.Connectivity, nullableBool(evidence.Agreement), action, reason, now); err != nil {
+		return Assignment{}, audit.Event{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO current_face_assignments (face_id, person_id, state, event_id, updated_at) VALUES (?, NULLIF(?, ''), ?, ?, ?) ON CONFLICT(face_id) DO UPDATE SET person_id = excluded.person_id, state = excluded.state, event_id = excluded.event_id, updated_at = excluded.updated_at`, faceID, personID, state, eventID, now); err != nil {
+		return Assignment{}, audit.Event{}, err
+	}
+	parsed, _ := time.Parse(time.RFC3339Nano, now)
+	return Assignment{FaceID: faceID, PersonID: personID, State: state, EventID: eventID, UpdatedAt: parsed}, audit.Event{AccountID: actor.AccountID, TargetEventID: eventID, Action: action, EntityType: "face", EntityID: faceID, Previous: map[string]any{"state": previousStateValue, "person_id": previousPersonValue}, New: map[string]any{"state": state, "person_id": personID}}, nil
+}
+
+func (s Store) setDispositionInTx(ctx context.Context, tx *sql.Tx, faceID, disposition string, active bool, actor Actor, reason string) (audit.Event, error) {
+	if disposition != "incorrect-assignment" && disposition != "false-detection" && disposition != "dont-track" {
+		return audit.Event{}, fmt.Errorf("invalid disposition %q", disposition)
+	}
+	eventID, err := id.NewUUIDv7()
+	if err != nil {
+		return audit.Event{}, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO face_disposition_events (id, face_id, disposition, active, account_id, reason, created_at) VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?)`, eventID, faceID, disposition, boolInt(active), actor.AccountID, reason, now); err != nil {
+		return audit.Event{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO current_face_dispositions (face_id, disposition, event_id, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(face_id) DO UPDATE SET disposition = excluded.disposition, event_id = excluded.event_id, updated_at = excluded.updated_at`, faceID, disposition, eventID, now); err != nil {
+		return audit.Event{}, err
+	}
+	if !active {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM current_face_dispositions WHERE face_id = ?`, faceID); err != nil {
+			return audit.Event{}, err
+		}
+	}
+	return audit.Event{AccountID: actor.AccountID, TargetEventID: eventID, Action: "face-disposition", EntityType: "face", EntityID: faceID, New: map[string]any{"disposition": disposition, "active": active}}, nil
+}
+
+func validateAssignment(state AssignmentState, personID string) error {
+	if state != Unassigned && state != Provisional && state != AssignedSystem && state != AssignedUser && state != Unknown && state != Ambiguous {
+		return fmt.Errorf("invalid assignment state %q", state)
+	}
+	if (state == Provisional || state == AssignedSystem || state == AssignedUser) && personID == "" {
+		return fmt.Errorf("state %q requires a person", state)
+	}
+	if (state == Unassigned || state == Unknown || state == Ambiguous) && personID != "" {
+		return fmt.Errorf("state %q cannot have a person", state)
+	}
+	return nil
+}
+
+func previousState(current Assignment, err error) string {
+	if err != nil {
+		return ""
+	}
+	return string(current.State)
+}
+
+func previousPerson(current Assignment, err error) string {
+	if err != nil {
+		return ""
+	}
+	return current.PersonID
+}
+
+func nullableBool(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return boolInt(*value)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}

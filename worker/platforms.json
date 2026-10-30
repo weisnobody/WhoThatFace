@@ -1,0 +1,10 @@
+{
+  "python": ">=3.11,<3.12",
+  "providers": {
+    "CPUExecutionProvider": {
+      "packages": ["onnxruntime"],
+      "platforms": ["darwin-arm64", "linux-amd64", "linux-arm64", "windows-amd64"]
+    }
+  },
+  "notes": "Provider-specific GPU packages are not part of the MVP lock; use the CPU provider unless a future platform profile is added."
+}

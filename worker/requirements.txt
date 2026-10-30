@@ -1,0 +1,6 @@
+# Generated lock for the MVP worker environment.
+# Regenerate with: python3.11 -m pip install -r requirements.in && pip freeze
+insightface==2.0.0
+onnxruntime==1.30.0
+Pillow==11.3.0
+pillow-heif==1.8.1

@@ -1,0 +1,87 @@
+{
+  // Runtime data root. Relative paths below are resolved under this root.
+  // The default is platform-specific:
+  // macOS: ~/Library/Application Support/face_me_bro
+  // Linux: $XDG_DATA_HOME/face_me_bro, or ~/.local/share/face_me_bro
+  // Windows: %AppData%/face_me_bro
+  // "runtime_data_root": "<platform default>",
+
+  // SQLite database path. Relative to runtime_data_root by default.
+  // "database_path": "face_me_bro.sqlite3",
+
+  // InsightFace model directory. The setup script places models below this
+  // directory, for example models/buffalo_l/.
+  // "model_root": "models",
+
+  // Python executable used by the worker. The default is venv/bin/python
+  // below runtime_data_root (venv/Scripts/python.exe on Windows).
+  // "python_path": "venv/bin/python",
+
+  // Default ONNX Runtime execution provider used when registering a pipeline.
+  // Set this to the provider installed for this machine, such as
+  // CoreMLExecutionProvider or CUDAExecutionProvider.
+  // "provider": "CPUExecutionProvider",
+
+  // HTTP address for the authenticated review service.
+  // "serve_address": "127.0.0.1:8080",
+
+  // Application log directory.
+  // "log_root": "logs",
+
+  // Temporary processing files and worker-related transient data.
+  // "temp_root": "tmp",
+
+  // Metadata exports created by the export command.
+  // "export_root": "exports",
+
+  // Database backups created by the backup command.
+  // "backup_root": "backups",
+
+  // Analysis safety limits. Zero disables width/height limits; the default
+  // maximum decoded pixel count is 100000000.
+  // "analysis_max_pixels": 100000000,
+  // "analysis_max_width": 0,
+  // "analysis_max_height": 0,
+  // Admin-only scan override ceilings. These must be at least the configured
+  // analysis limits; zero uses the corresponding configured limit.
+  // "analysis_max_pixels_override": 200000000,
+  // "analysis_max_width_override": 0,
+  // "analysis_max_height_override": 0,
+
+  // Neighbor-search method for grouping. Use "exact" for the correctness
+  // reference path or "ann" for the evaluation ANN prototype. A collection
+  // can override this with `collection set-search`.
+  // "neighbor_search_method": "exact"
+
+  // Recognition evidence thresholds. Scores are fractions from 0 to 1.
+  // "recognition_high_similarity": 0.50,
+  // "recognition_direct_assignment_similarity": 0.75,
+  // "recognition_medium_similarity": 0.40,
+  // "recognition_low_similarity": 0.25,
+  // "recognition_margin": 0.05,
+  // "recognition_high_support": 5,
+  // "recognition_medium_support": 3,
+  // "recognition_high_quality": 0.75,
+  // "recognition_medium_quality": 0.60,
+  // "recognition_high_detection": 0.75,
+  // "recognition_medium_detection": 0.60,
+  // "recognition_high_purity": 0.95,
+  // "recognition_medium_purity": 0.90,
+  // "recognition_high_connectivity": 0.95,
+  // "recognition_medium_connectivity": 0.90,
+  // "recognition_require_agreement": true,
+
+  // Production clustering settings.
+  // "clustering_k": 40,
+  // "clustering_similarity_threshold": 0.45,
+  // "clustering_candidate_scope": "all"
+
+  // Possible-candidate discovery settings. These retain likely people for
+  // review without changing face assignments.
+  // "possible_max_provisional_faces": 5,
+  // "possible_max_temporary_faces": 50,
+  // "possible_max_candidates": 5,
+  // "possible_min_similarity": 0.25,
+  // "possible_include_assigned_system": false,
+  // "possible_include_dont_track": false
+}
