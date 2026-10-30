@@ -98,10 +98,10 @@ changing assignments or cluster membership.
  - [x] Add commands equivalent to:
 
    ```text
-   face-me-bro job possible-candidates --person-id PERSON_ID
-   face-me-bro job possible-candidates --collection-id COLLECTION_ID
-   face-me-bro job possible-candidates --all
-   face-me-bro face candidates --face-id FACE_ID
+   whothatface job possible-candidates --person-id PERSON_ID
+   whothatface job possible-candidates --collection-id COLLECTION_ID
+   whothatface job possible-candidates --all
+   whothatface face candidates --face-id FACE_ID
    ```
 
  - [x] Add options for candidate limit, provisional-person limit, similarity floor,

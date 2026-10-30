@@ -43,7 +43,7 @@ type ActivityProbe func() Activity
 // treated as proof that the machine is idle.
 func DefaultActivityProbe() ActivityProbe {
 	return func() Activity {
-		activity := strings.ToLower(os.Getenv("FACE_ME_BRO_ACTIVITY"))
+		activity := strings.ToLower(os.Getenv("WTFACE_ACTIVITY"))
 		if activity == "active" || activity == "busy" {
 			return Activity{UserActive: true, Available: true}
 		}
@@ -51,8 +51,8 @@ func DefaultActivityProbe() ActivityProbe {
 			return Activity{Available: true}
 		}
 		load := readLoadAverage()
-		thermal := strings.ToLower(os.Getenv("FACE_ME_BRO_THERMAL_PRESSURE"))
-		power := strings.ToLower(os.Getenv("FACE_ME_BRO_POWER_STATE"))
+		thermal := strings.ToLower(os.Getenv("WTFACE_THERMAL_PRESSURE"))
+		power := strings.ToLower(os.Getenv("WTFACE_POWER_STATE"))
 		available := load >= 0 || thermal != "" || power != ""
 		return Activity{Load: load, ThermalPressure: thermal, PowerState: power, Available: available}
 	}

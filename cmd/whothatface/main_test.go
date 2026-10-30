@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/db"
-	"github.com/pjg/face_me_bro/internal/jobs"
+	"github.com/weisnobody/whothatface/internal/db"
+	"github.com/weisnobody/whothatface/internal/jobs"
 )
 
 func TestHelpListsCommandsWithoutOpeningDatabase(t *testing.T) {
@@ -21,7 +21,7 @@ func TestHelpListsCommandsWithoutOpeningDatabase(t *testing.T) {
 	if err := run(context.Background(), []string{"help"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"Usage: face-me-bro", "collection", "cluster", "Global options", "help <command>"} {
+	for _, text := range []string{"Usage: whothatface", "collection", "cluster", "Global options", "help <command>"} {
 		if !strings.Contains(output.String(), text) {
 			t.Errorf("help output is missing %q", text)
 		}
@@ -33,7 +33,7 @@ func TestHelpFlagWithoutCommandListsCommands(t *testing.T) {
 	if err := run(context.Background(), []string{"--help"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"Usage: face-me-bro", "collection", "Global options"} {
+	for _, text := range []string{"Usage: whothatface", "collection", "Global options"} {
 		if !strings.Contains(output.String(), text) {
 			t.Errorf("help output is missing %q: %s", text, output.String())
 		}
@@ -123,7 +123,7 @@ func TestCommandHelpIncludesUsageParametersAndDescription(t *testing.T) {
 	if err := run(context.Background(), []string{"help", "face"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"Usage: face-me-bro face", "Inspect or change", "--face-id", "--yes"} {
+	for _, text := range []string{"Usage: whothatface face", "Inspect or change", "--face-id", "--yes"} {
 		if !strings.Contains(output.String(), text) {
 			t.Errorf("face help output is missing %q", text)
 		}
@@ -135,7 +135,7 @@ func TestHelpFlagCanSelectACommandWithoutOpeningDatabase(t *testing.T) {
 	if err := run(context.Background(), []string{"--help", "search"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "Usage: face-me-bro search") {
+	if !strings.Contains(output.String(), "Usage: whothatface search") {
 		t.Fatalf("unexpected help output: %s", output.String())
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/pjg/face_me_bro/internal/perf"
+	"github.com/weisnobody/whothatface/internal/perf"
 )
 
 func main() {

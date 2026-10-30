@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"path/filepath"
 
-	"github.com/pjg/face_me_bro/internal/review"
-	"github.com/pjg/face_me_bro/internal/worker"
+	"github.com/weisnobody/whothatface/internal/review"
+	"github.com/weisnobody/whothatface/internal/worker"
 )
 
 type Analyzer interface {

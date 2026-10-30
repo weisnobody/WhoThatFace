@@ -10,7 +10,7 @@ The proposed public identifiers are:
 | Display name: `Face-Me-Bro` / `face_me_bro` | `Who That Face` |
 | CLI command: `face-me-bro` | `whothatface` |
 | Benchmark command: `face-me-bro-benchmark` | `whothatface-benchmark` |
-| Go module/import path: `github.com/pjg/face_me_bro` | `github.com/weisnobody/WhoThatFace` |
+| Go module/import path: `github.com/pjg/face_me_bro` | `github.com/weisnobody/whothatface` |
 | Environment prefix: `FACE_ME_BRO_*` | `WTFACE_*` |
 | Config environment variable: `FACE_ME_PRO_CONFIG` | `WTFACE_CONFIG` |
 | Runtime data directory: `face_me_bro` | `whothatface` |

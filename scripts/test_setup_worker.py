@@ -20,8 +20,8 @@ class WorkerSetupTests(unittest.TestCase):
             environment = os.environ.copy()
             environment.update(
                 {
-                    "FACE_ME_BRO_VENV": str(venv),
-                    "FACE_ME_BRO_MODEL_ROOT": str(model_root),
+                    "WTFACE_VENV": str(venv),
+                    "WTFACE_MODEL_ROOT": str(model_root),
                     "PYTHON_BIN": "/opt/homebrew/bin/python3.11",
                     "PIP_INDEX_URL": "http://127.0.0.1:9/simple",
                     "PIP_RETRIES": "0",

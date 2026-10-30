@@ -18,17 +18,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/analysis"
-	"github.com/pjg/face_me_bro/internal/audit"
-	"github.com/pjg/face_me_bro/internal/auth"
-	"github.com/pjg/face_me_bro/internal/candidates"
-	"github.com/pjg/face_me_bro/internal/id"
-	"github.com/pjg/face_me_bro/internal/jobs"
-	"github.com/pjg/face_me_bro/internal/media"
-	"github.com/pjg/face_me_bro/internal/recognition"
-	"github.com/pjg/face_me_bro/internal/representative"
-	"github.com/pjg/face_me_bro/internal/review"
-	"github.com/pjg/face_me_bro/internal/search"
+	"github.com/weisnobody/whothatface/internal/analysis"
+	"github.com/weisnobody/whothatface/internal/audit"
+	"github.com/weisnobody/whothatface/internal/auth"
+	"github.com/weisnobody/whothatface/internal/candidates"
+	"github.com/weisnobody/whothatface/internal/id"
+	"github.com/weisnobody/whothatface/internal/jobs"
+	"github.com/weisnobody/whothatface/internal/media"
+	"github.com/weisnobody/whothatface/internal/recognition"
+	"github.com/weisnobody/whothatface/internal/representative"
+	"github.com/weisnobody/whothatface/internal/review"
+	"github.com/weisnobody/whothatface/internal/search"
 )
 
 type Server struct {
@@ -248,7 +248,7 @@ func newServer(authStore auth.Store, database *sql.DB, pythonPath string, thresh
  .candidate-list{margin-left:1.5em}
  .error{color:#a00}
 </style>{{with .PageStyle}}<style>{{.}}</style>{{end}}</head>
-<body><nav><a href="/">Face-Me-Bro</a>{{with .Breadcrumb}}<span class="breadcrumb">› {{.}}</span>{{end}}{{if .Account}}<span>{{.Account.Username}} <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
+<body><nav><a href="/">Who That Face</a>{{with .Breadcrumb}}<span class="breadcrumb">› {{.}}</span>{{end}}{{if .Account}}<span>{{.Account.Username}} <form method="post" action="/logout" style="display:inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Log out</button></form></span>{{end}}</nav><main>{{.Body}}</main></body></html>`))
 	return &Server{auth: authStore, db: database, pythonPath: pythonPath, recognitionThresholds: thresholds, templates: page}, nil
 }
 
@@ -314,7 +314,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "face-me-bro"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "whothatface"})
 }
 
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {

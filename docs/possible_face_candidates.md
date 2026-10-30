@@ -198,10 +198,10 @@ start a full clustering run as a side effect.
 The CLI should eventually provide commands equivalent to:
 
 ```text
-face-me-bro job possible-candidates --person-id PERSON_ID
-face-me-bro job possible-candidates --collection-id COLLECTION_ID
-face-me-bro job possible-candidates --all
-face-me-bro face candidates --face-id FACE_ID
+whothatface job possible-candidates --person-id PERSON_ID
+whothatface job possible-candidates --collection-id COLLECTION_ID
+whothatface job possible-candidates --all
+whothatface face candidates --face-id FACE_ID
 ```
 
 The command output should identify the job or run, target scope, number of

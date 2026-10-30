@@ -1,4 +1,4 @@
-# face_me_bro
+# Who That Face
 
 Local facial recognition and identification with a Go application and an
 InsightFace Python worker.
@@ -57,7 +57,7 @@ allowlist is JPEG/JPG, PNG, HEIF/HEIC, TIFF/TIF, and WebP.
 parameter, its purpose, and its default value. It uses JSONC comments for
 documentation; the application configuration file itself must be strict JSON.
 Copy the uncommented settings you need into `config.json`, use the
-`--config PATH` option, or set `FACE_ME_PRO_CONFIG` to an alternate JSON or
+`--config PATH` option, or set `WTFACE_CONFIG` to an alternate JSON or
 JSONC file (or a directory containing `config.json`). If both the environment
 variable and `--config` are supplied, they must resolve to the same file.
 
@@ -70,13 +70,13 @@ repository root:
 go version
 go mod download
 mkdir -p bin
-go build -o bin/face-me-bro ./cmd/face-me-bro
-go build -o bin/face-me-bro-benchmark ./cmd/face-me-bro-benchmark
+go build -o bin/whothatface ./cmd/whothatface
+go build -o bin/whothatface-benchmark ./cmd/whothatface-benchmark
 ```
 
 The first build produces the main CLI. The second produces the optional
 performance benchmark executable. The binaries can be run directly, for
-example `./bin/face-me-bro help`.
+example `./bin/whothatface help`.
 
 For a complete first-run workflow, continue with
 [`usage.md`](usage.md). The shorter installation notes are in
@@ -89,19 +89,19 @@ setting.
 Check the configured runtime:
 
 ```sh
-go run ./cmd/face-me-bro setup check
+go run ./cmd/whothatface setup check
 ```
 
 Start the local review service:
 
 ```sh
-go run ./cmd/face-me-bro serve
+go run ./cmd/whothatface serve
 ```
 
 Run the scale/performance harness:
 
 ```sh
-go run ./cmd/face-me-bro-benchmark --output performance.json
+go run ./cmd/whothatface-benchmark --output performance.json
 ```
 
 Run all Go tests and static checks:

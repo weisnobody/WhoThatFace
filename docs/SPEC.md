@@ -1037,8 +1037,8 @@ collection. This supports global people, cross-collection search, and
 cross-collection deduplication while retaining collection-specific queries.
 
 The default macOS runtime data root is
-`~/Library/Application Support/face_me_bro/`. The database is
-`face_me_bro.sqlite3` under that root. Configuration, models, logs, temporary
+`~/Library/Application Support/whothatface/`. The database is
+`whothatface.sqlite3` under that root. Configuration, models, logs, temporary
 files, exports, and backups use separate subdirectories.
 
 The CLI must provide an option to select an alternate configuration file or

@@ -56,7 +56,7 @@ func Validate(ctx context.Context, pythonPath, virtualEnv, modelRoot string) Rep
 	} else {
 		info, statErr := os.Stat(modelRoot)
 		add("model-root", statErr == nil && info.IsDir(), modelRoot)
-		modelName := os.Getenv("FACE_ME_BRO_MODEL")
+		modelName := os.Getenv("WTFACE_MODEL")
 		if modelName == "" {
 			modelName = "buffalo_l"
 		}

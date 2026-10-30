@@ -223,7 +223,7 @@ class WorkerContractTests(unittest.TestCase):
     def test_real_worker_process_negotiates_when_model_is_installed(self):
         if importlib.util.find_spec("insightface") is None:
             self.skipTest("InsightFace unavailable")
-        model_root = os.environ.get("FACE_ME_BRO_MODEL_ROOT", "")
+        model_root = os.environ.get("WTFACE_MODEL_ROOT", "")
         manifest = pathlib.Path(model_root) / "models" / "buffalo_l" / "checksums.json"
         if not model_root or not manifest.is_file():
             self.skipTest("buffalo_l model is not installed")
@@ -269,7 +269,7 @@ class WorkerContractTests(unittest.TestCase):
             from PIL import Image
         except ImportError:
             self.skipTest("Pillow unavailable")
-        model_root = os.environ.get("FACE_ME_BRO_MODEL_ROOT", "")
+        model_root = os.environ.get("WTFACE_MODEL_ROOT", "")
         manifest = pathlib.Path(model_root) / "models" / "buffalo_l" / "checksums.json"
         if not model_root or not manifest.is_file():
             self.skipTest("buffalo_l model is not installed")

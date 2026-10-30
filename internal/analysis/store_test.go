@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/pjg/face_me_bro/internal/db"
-	"github.com/pjg/face_me_bro/internal/worker"
+	"github.com/weisnobody/whothatface/internal/db"
+	"github.com/weisnobody/whothatface/internal/worker"
 )
 
 func TestRegisterPipelineIsDeterministicAndPersistStoresFaces(t *testing.T) {

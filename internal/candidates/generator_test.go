@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/pjg/face_me_bro/internal/db"
-	"github.com/pjg/face_me_bro/internal/recognition"
+	"github.com/weisnobody/whothatface/internal/db"
+	"github.com/weisnobody/whothatface/internal/recognition"
 )
 
 func TestGeneratorFindsCandidatesAndRecordsRun(t *testing.T) {

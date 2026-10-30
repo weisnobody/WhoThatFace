@@ -29,7 +29,7 @@ func TestOpenAndStatusReportResolvedPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status() error = %v", err)
 	}
-	if status.DatabasePath != filepath.Join(settings["runtime_data_root"], "face_me_bro.sqlite3") {
+	if status.DatabasePath != filepath.Join(settings["runtime_data_root"], "whothatface.sqlite3") {
 		t.Errorf("DatabasePath = %q", status.DatabasePath)
 	}
 	if _, err := os.Stat(status.DatabasePath); err != nil {

@@ -1,13 +1,13 @@
 {
   // Runtime data root. Relative paths below are resolved under this root.
   // The default is platform-specific:
-  // macOS: ~/Library/Application Support/face_me_bro
-  // Linux: $XDG_DATA_HOME/face_me_bro, or ~/.local/share/face_me_bro
-  // Windows: %AppData%/face_me_bro
+  // macOS: ~/Library/Application Support/whothatface
+  // Linux: $XDG_DATA_HOME/whothatface, or ~/.local/share/whothatface
+  // Windows: %AppData%/whothatface
   // "runtime_data_root": "<platform default>",
 
   // SQLite database path. Relative to runtime_data_root by default.
-  // "database_path": "face_me_bro.sqlite3",
+  // "database_path": "whothatface.sqlite3",
 
   // InsightFace model directory. The setup script places models below this
   // directory, for example models/buffalo_l/.

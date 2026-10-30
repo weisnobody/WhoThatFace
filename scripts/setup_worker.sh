@@ -2,10 +2,10 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-venv_dir="${FACE_ME_BRO_VENV:-${repo_root}/.venv}"
+venv_dir="${WTFACE_VENV:-${repo_root}/.venv}"
 python_bin="${PYTHON_BIN:-python3.11}"
-model_root="${FACE_ME_BRO_MODEL_ROOT:-${repo_root}/runtime/models}"
-model_name="${FACE_ME_BRO_MODEL:-buffalo_l}"
+model_root="${WTFACE_MODEL_ROOT:-${repo_root}/runtime/models}"
+model_name="${WTFACE_MODEL:-buffalo_l}"
 clean=0
 if [[ "${1:-}" == "--clean" ]]; then clean=1; fi
 
@@ -31,7 +31,7 @@ else
 fi
 
 mkdir -p "${model_root}"
-FACE_ME_BRO_MODEL_ROOT="${model_root}" "${venv_dir}/bin/python" "${repo_root}/scripts/setup_models.py" --model "${model_name}" --root "${model_root}"
+WTFACE_MODEL_ROOT="${model_root}" "${venv_dir}/bin/python" "${repo_root}/scripts/setup_models.py" --model "${model_name}" --root "${model_root}"
 "${venv_dir}/bin/python" "${repo_root}/scripts/setup_models.py" --model "${model_name}" --root "${model_root}" --offline
 "${venv_dir}/bin/python" -m pip freeze > "${venv_dir}/requirements.lock.txt"
 printf '{"python":"%s","model":"%s","model_root":"%s","completed":true}\n' "${python_bin}" "${model_name}" "${model_root}" > "${venv_dir}/setup-state.json"

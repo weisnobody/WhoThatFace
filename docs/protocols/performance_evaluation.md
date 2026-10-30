@@ -3,7 +3,7 @@
 Run the repeatable synthetic benchmark from the repository root:
 
 ```sh
-go run ./cmd/face-me-bro-benchmark --output performance.json
+go run ./cmd/whothatface-benchmark --output performance.json
 ```
 
 The default populations are 10,000, 50,000, 100,000, and 250,000 faces.
@@ -34,11 +34,11 @@ the intended photo library and keep the generated database and reports out of
 git:
 
 ```sh
-./bin/face-me-bro collection add --name benchmark --root /path/to/photos
-./bin/face-me-bro --json scan --collection-id COLLECTION_ID > scan.json
-./bin/face-me-bro --json job list > jobs.json
-./bin/face-me-bro --json job status --job-id JOB_ID > job-status.json
-./bin/face-me-bro --json face list --limit 1 --page 1 > face-sample.json
+./bin/whothatface collection add --name benchmark --root /path/to/photos
+./bin/whothatface --json scan --collection-id COLLECTION_ID > scan.json
+./bin/whothatface --json job list > jobs.json
+./bin/whothatface --json job status --job-id JOB_ID > job-status.json
+./bin/whothatface --json face list --limit 1 --page 1 > face-sample.json
 ```
 
 Record the machine label, OS, CPU/GPU/provider, core count, RAM, worker/model

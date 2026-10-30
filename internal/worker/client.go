@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/weisnobody/whothatface/internal/id"
 )
 
 // Client manages one persistent worker process. Calls are serialized because

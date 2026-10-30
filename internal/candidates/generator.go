@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/pjg/face_me_bro/internal/audit"
-	"github.com/pjg/face_me_bro/internal/recognition"
+	"github.com/weisnobody/whothatface/internal/audit"
+	"github.com/weisnobody/whothatface/internal/recognition"
 )
 
 type Request struct {

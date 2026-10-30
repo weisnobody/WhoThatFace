@@ -246,7 +246,7 @@ func TestDefaultRuntimeDataRootUsesPlatformConvention(t *testing.T) {
 	if root == "" {
 		t.Fatal("default root is empty")
 	}
-	if runtime.GOOS == "darwin" && filepath.Base(root) != "face_me_bro" {
+	if runtime.GOOS == "darwin" && filepath.Base(root) != "whothatface" {
 		t.Errorf("unexpected macOS default root: %q", root)
 	}
 }

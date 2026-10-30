@@ -6,7 +6,7 @@ uses a system Python 3.11 interpreter and a virtual environment.
 Build it from the repository root:
 
 ```sh
-docker build -f docker/Dockerfile -t face-me-bro-worker .
+docker build -f docker/Dockerfile -t whothatface-worker .
 ```
 
 The build downloads `buffalo_l` and records checksums in the image. Run it

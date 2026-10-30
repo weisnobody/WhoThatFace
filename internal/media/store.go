@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/id"
+	"github.com/weisnobody/whothatface/internal/id"
 )
 
 // Store persists scan results behind a small media-oriented repository API.

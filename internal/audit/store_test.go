@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/db"
+	"github.com/weisnobody/whothatface/internal/db"
 )
 
 func TestRecordAndPurge(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/pjg/face_me_bro/internal/audit"
+	"github.com/weisnobody/whothatface/internal/audit"
 )
 
 var ErrUndoConflict = errors.New("undo conflict")

@@ -12,7 +12,7 @@ adapters.
 | Supported platform | macOS on Apple Silicon | Define supported CPU and architecture, likely x86-64 and ARM64 | Define supported x86-64 and ARM64 hardware |
 | ML acceleration | CoreML with CPU fallback | CPU, CUDA, ROCm, or another supported ONNX Runtime provider | CPU, CUDA, DirectML, or another supported ONNX Runtime provider |
 | Benchmark results | M1/M4 throughput, memory, and output comparisons | Run separate hardware/provider benchmarks | Run separate hardware/provider benchmarks |
-| Runtime data path | `~/Library/Application Support/face_me_bro/` | Usually an XDG data directory such as `~/.local/share/face_me_bro/` | Usually `%LOCALAPPDATA%\\face_me_bro\\` |
+| Runtime data path | `~/Library/Application Support/whothatface/` | Usually an XDG data directory such as `~/.local/share/whothatface/` | Usually `%LOCALAPPDATA%\\whothatface\\` |
 | Configuration path | macOS application configuration conventions | XDG configuration paths or an explicit configuration file | `%APPDATA%` or `%LOCALAPPDATA%`, plus the explicit configuration-file option |
 | Installation | System Python plus a virtual environment | Same general approach, with platform-specific Python and ML wheels | Same general approach, with platform-specific Python and ML wheels |
 | Code signing | Apple signing and notarization before external distribution | Package signing or repository-specific distribution mechanisms | Authenticode, MSIX, or another Windows distribution mechanism |
@@ -135,7 +135,7 @@ when the application had to use modification time instead.
 ## Live Photos and motion photos
 
 iOS Live Photos and Android-style motion photos are not inherently tied to the
-operating system running `face_me_bro`. They are input-format concerns.
+operating system running `whothatface`. They are input-format concerns.
 
 The MVP should process only the reference still-image component and ignore the
 motion/video component. A portable container/parser layer should:

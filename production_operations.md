@@ -8,23 +8,23 @@ InsightFace worker. The default runtime uses system Python 3.11 with a local
 
 ```sh
 ./scripts/setup_worker.sh
-go build -o bin/face-me-bro ./cmd/face-me-bro
+go build -o bin/whothatface ./cmd/whothatface
 cp config.example.jsonc config.json
 ```
 
 Edit `config.json` so the database, runtime data root, worker command, model
 root, provider, and recognition/clustering settings point at the intended
-machine. Run `./bin/face-me-bro setup check` before processing photos.
+machine. Run `./bin/whothatface setup check` before processing photos.
 
 ### Specifying Alternate Config File
 
 1. Using CLI Option: `--config <file location>`
-2. Environment Variable: `export FACE_ME_PRO_CONFIG="./config.jsonc"`
+2. Environment Variable: `export WTFACE_CONFIG="./config.jsonc"`
 
 ## Create a Pipeline
 
 ```sh
-./bin/face-me-bro  pipeline register \
+./bin/whothatface  pipeline register \
   --model-family buffalo_l \
   --model-version 2.0.0 \
   --model-checksums-json "./runtime/models/models/buffalo_l/checksums.json"
@@ -35,9 +35,9 @@ machine. Run `./bin/face-me-bro setup check` before processing photos.
 Initialize the database and create a collection, then scan it:
 
 ```sh
-./bin/face-me-bro collection add --name family --root DIRECTORY
-./bin/face-me-bro scan --collection-id COLLECTION_ID
-./bin/face-me-bro worker --pipeline-id PIPELINE_ID
+./bin/whothatface collection add --name family --root DIRECTORY
+./bin/whothatface scan --collection-id COLLECTION_ID
+./bin/whothatface worker --pipeline-id PIPELINE_ID
 ```
 
 The scan records assets and paths. The analysis job sends each distinct asset
@@ -49,12 +49,12 @@ database-backed application configuration.
 Monitor work with:
 
 ```sh
-./bin/face-me-bro job list
-./bin/face-me-bro job status --job-id JOB_ID
-./bin/face-me-bro worker status
+./bin/whothatface job list
+./bin/whothatface job status --job-id JOB_ID
+./bin/whothatface worker status
 ```
 
-Start the authenticated review service with `./bin/face-me-bro serve` and
+Start the authenticated review service with `./bin/whothatface serve` and
 visit `http://127.0.0.1:8080/review/people`, `/review/photos`, or
 `/review/clusters`. Reviewers can assign faces, mark unknown/ambiguous or
 don't-track, approve references, and inspect recommendation evidence.

@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/audit"
-	"github.com/pjg/face_me_bro/internal/id"
-	"github.com/pjg/face_me_bro/internal/jobs"
+	"github.com/weisnobody/whothatface/internal/audit"
+	"github.com/weisnobody/whothatface/internal/id"
+	"github.com/weisnobody/whothatface/internal/jobs"
 )
 
 type AssignmentState string

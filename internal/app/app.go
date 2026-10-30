@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/pjg/face_me_bro/internal/config"
-	"github.com/pjg/face_me_bro/internal/db"
+	"github.com/weisnobody/whothatface/internal/config"
+	"github.com/weisnobody/whothatface/internal/db"
 )
 
 // App owns the process-wide configuration and database connection.

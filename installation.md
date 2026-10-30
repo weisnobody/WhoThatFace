@@ -20,8 +20,8 @@ pins are in `worker/requirements.lock`; the completed environment freeze is
 written to `.venv/requirements.lock.txt`. Supported Python/provider profiles
 are recorded in `worker/platforms.json`.
 
-Useful overrides include `PYTHON_BIN`, `FACE_ME_BRO_VENV`,
-`FACE_ME_BRO_MODEL_ROOT`, and `FACE_ME_BRO_MODEL`.
+Useful overrides include `PYTHON_BIN`, `WTFACE_VENV`,
+`WTFACE_MODEL_ROOT`, and `WTFACE_MODEL`.
 
 Validate an already-installed runtime without network access:
 
@@ -38,7 +38,7 @@ to `127.0.0.1:8080`, and `provider` defaults to `CPUExecutionProvider`.
 Register a pipeline, then start the worker:
 
 ```sh
-APP="$PWD/bin/face-me-bro"
+APP="$PWD/bin/whothatface"
 CONFIG="$PWD/config.json"
 
 "$APP" --config "$CONFIG" setup check
@@ -62,7 +62,7 @@ An optional Docker worker configuration is documented in `docker/README.md`.
 ## Configuration selection
 
 The application accepts strict JSON and JSONC configuration files. Select a
-file or directory with `--config PATH`, or set `FACE_ME_PRO_CONFIG`. A
+file or directory with `--config PATH`, or set `WTFACE_CONFIG`. A
 directory uses `config.json`. Supplying both is allowed only when both values
 resolve to the same file; conflicting values are rejected before the database
 is opened.

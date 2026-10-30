@@ -1,4 +1,4 @@
-# Implement the Face-Me-Bro MVP
+# Implement the Who That Face MVP
 
 ## Summary
 
@@ -18,7 +18,7 @@ The existing model-selection and review prototypes remain validation references,
 
 Create the production Go module and package boundaries:
 
-- `cmd/face-me-bro`
+- `cmd/whothatface`
 - `internal/app`
 - `internal/config`
 - `internal/db`
@@ -45,7 +45,7 @@ Keep SQL in a portable subset suitable for later PostgreSQL support. PostgreSQL 
 
 Implement:
 
-- default macOS data root: `~/Library/Application Support/face_me_bro/`;
+- default macOS data root: `~/Library/Application Support/whothatface/`;
 - alternate configuration file/location CLI option;
 - configuration-controlled runtime data root;
 - database, model, log, temporary, export, and backup directories;

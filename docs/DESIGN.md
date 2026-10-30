@@ -1,7 +1,7 @@
 # System Design
 
 This document describes the implementation structure and architectural
-boundaries of `face_me_bro`. Required behavior and acceptance criteria are
+boundaries of `whothatface`. Required behavior and acceptance criteria are
 defined in [SPEC.md](SPEC.md). Larger implementation milestones belong in
 [PLAN.md](PLAN.md). Smaller task, feature, and bug-fix plans belong in
 the `docs/plans/` directory.
@@ -9,12 +9,12 @@ the `docs/plans/` directory.
 ## Repository layout
 
 ```text
-face_me_bro/
+whothatface/
 ├── AGENTS.md
 ├── README.md
 ├── cmd/
-│   ├── face-me-bro/
-│   └── face-me-bro-benchmark/
+│   ├── whothatface/
+│   └── whothatface-benchmark/
 ├── internal/
 │   ├── analysis/
 │   ├── clustering/
@@ -631,8 +631,8 @@ MVP. A future protocol may support cooperative cancellation if needed.
 ## Runtime data layout
 
 The default macOS runtime data root is
-`~/Library/Application Support/face_me_bro/`. The database is
-`face_me_bro.sqlite3` under that root. Configuration, models, logs, temporary
+`~/Library/Application Support/whothatface/`. The database is
+`whothatface.sqlite3` under that root. Configuration, models, logs, temporary
 files, exports, and backups use separate subdirectories.
 
 The CLI supports an alternate configuration file or configuration location.

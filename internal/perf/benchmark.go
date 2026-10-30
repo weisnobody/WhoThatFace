@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/jobs"
+	"github.com/weisnobody/whothatface/internal/jobs"
 	_ "modernc.org/sqlite"
 )
 
@@ -312,7 +312,7 @@ func cosine(left, right []float32) float32 {
 }
 
 func measureDatabase(ctx context.Context, size int) ([]Measurement, error) {
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("face-me-bro-perf-%d.sqlite3", time.Now().UnixNano()))
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("whothatface-perf-%d.sqlite3", time.Now().UnixNano()))
 	defer os.Remove(path)
 	database, err := sql.Open("sqlite", path)
 	if err != nil {

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pjg/face_me_bro/internal/db"
-	"github.com/pjg/face_me_bro/internal/review"
+	"github.com/weisnobody/whothatface/internal/db"
+	"github.com/weisnobody/whothatface/internal/review"
 )
 
 func TestEnsureUsesReferencePriorityAndCreatesBoundedSquare(t *testing.T) {
