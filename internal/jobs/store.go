@@ -29,6 +29,7 @@ type Job struct {
 	Kind        string          `json:"kind"`
 	Priority    int             `json:"priority"`
 	Status      Status          `json:"status"`
+	PauseReason string          `json:"pause_reason,omitempty"`
 	Payload     json.RawMessage `json:"payload"`
 	Progress    json.RawMessage `json:"progress,omitempty"`
 	ErrorCode   string          `json:"error_code,omitempty"`
@@ -140,19 +141,21 @@ func (s Store) EnqueueReferenceReprocess(ctx context.Context, personID string) (
 func (s Store) Get(ctx context.Context, jobID string) (Job, error) {
 	var job Job
 	var payload, progress, summary, errorCode, errorMessage, started, completed sql.NullString
+	var pauseReason string
 	var created string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, kind, priority, status, payload_json, progress_json, summary_json,
-		       error_code, error_message, attempts, max_attempts, created_at, started_at, completed_at
+		       error_code, error_message, pause_reason, attempts, max_attempts, created_at, started_at, completed_at
 		FROM jobs WHERE id = ?`, jobID).Scan(
 		&job.ID, &job.Kind, &job.Priority, &job.Status, &payload, &progress, &summary,
-		&errorCode, &errorMessage, &job.Attempts, &job.MaxAttempts, &created, &started, &completed)
+		&errorCode, &errorMessage, &pauseReason, &job.Attempts, &job.MaxAttempts, &created, &started, &completed)
 	if err != nil {
 		return Job{}, err
 	}
 	job.Payload = json.RawMessage(payload.String)
 	job.ErrorCode = errorCode.String
 	job.Error = errorMessage.String
+	job.PauseReason = pauseReason
 	if progress.Valid {
 		job.Progress = json.RawMessage(progress.String)
 	}
@@ -355,7 +358,7 @@ func (s Store) SetStatus(ctx context.Context, jobID string, status Status, code,
 }
 
 func (s Store) Pause(ctx context.Context, jobID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ? WHERE id = ? AND status IN (?, ?)`, Paused, jobID, Pending, Running)
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, pause_reason = 'user' WHERE id = ? AND status IN (?, ?)`, Paused, jobID, Pending, Running)
 	return err
 }
 
@@ -364,19 +367,80 @@ func (s Store) Cancel(ctx context.Context, jobID string) error {
 	return err
 }
 
-func (s Store) Resume(ctx context.Context, jobID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ? WHERE id = ? AND status = ?`, Pending, jobID, Paused)
-	return err
-}
-
-// Retry returns a failed, cancelled, or completed-with-errors job to the
-// pending queue while retaining its original payload and history timestamps.
-func (s Store) Retry(ctx context.Context, jobID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, attempts = 0, error_code = NULL, error_message = NULL, started_at = NULL, completed_at = NULL WHERE id = ? AND status IN (?, ?, ?)`, Pending, jobID, Failed, Cancelled, CompletedWithError)
+// FinalizeCancel completes cancellation for a job whose worker is no longer
+// present to observe the cancelling state. The caller must establish that no
+// worker is still executing the job before invoking this operation.
+func (s Store) FinalizeCancel(ctx context.Context, jobID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE job_items SET status = 'pending', attempts = 0, error_code = NULL, error_message = NULL, updated_at = ? WHERE job_id = ? AND status IN ('failed', 'running', 'pending')`, time.Now().UTC().Format(time.RFC3339Nano), jobID)
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = ?, pause_reason = 'none', error_code = 'cancelled',
+		    error_message = 'job cancellation finalized after worker termination',
+		    completed_at = ?
+		WHERE id = ? AND status = ?`, Cancelled, time.Now().UTC().Format(time.RFC3339Nano), jobID, Cancelling)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("job %q is not cancelling", jobID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE job_items
+		SET status = 'skipped', error_code = 'cancelled',
+		    error_message = 'job cancellation finalized', updated_at = ?
+		WHERE job_id = ? AND status IN ('pending', 'running')`, time.Now().UTC().Format(time.RFC3339Nano), jobID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s Store) Resume(ctx context.Context, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, pause_reason = 'none' WHERE id = ? AND status = ?`, Pending, jobID, Paused)
+	return err
+}
+
+// Recover marks an abandoned running job as system-paused and releases any
+// in-flight item claims. The caller must establish that no worker is still
+// executing the job before invoking this operation.
+func (s Store) Recover(ctx context.Context, jobID, code, message string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs
+		SET status = ?, pause_reason = 'system', error_code = ?, error_message = ?,
+		    started_at = NULL, completed_at = NULL
+		WHERE id = ? AND status IN (?, ?)`, Paused, code, message, jobID, Running, Cancelling)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("job %q is not running or cancelling", jobID)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE job_items
+		SET status = 'pending', error_code = NULL, error_message = NULL, updated_at = ?
+		WHERE job_id = ? AND status = 'running'`, time.Now().UTC().Format(time.RFC3339Nano), jobID)
+	return err
+}
+
+// Retry returns an interrupted, failed, cancelled, or completed-with-errors
+// job to the pending queue and resets every item for a complete rerun.
+func (s Store) Retry(ctx context.Context, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = ?, pause_reason = 'none', attempts = 0, error_code = NULL, error_message = NULL, started_at = NULL, completed_at = NULL WHERE id = ? AND status IN (?, ?, ?, ?)`, Pending, jobID, Failed, Cancelled, CompletedWithError, Paused)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE job_items SET status = 'pending', attempts = 0, error_code = NULL, error_message = NULL, updated_at = ? WHERE job_id = ?`, time.Now().UTC().Format(time.RFC3339Nano), jobID)
 	return err
 }
 

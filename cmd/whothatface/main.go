@@ -262,7 +262,7 @@ var commandHelp = map[string]helpTopic{
 	"status":     {Usage: "whothatface [global options] status", Description: "Show resolved paths, pipeline, provider, and search configuration."},
 	"collection": {Usage: "whothatface collection <add|get|list|remove|set-search> [options]", Description: "Create, inspect, list, remove, or configure a photo collection.", Options: "add: --name NAME --root PATH; get: --collection-id ID; list: --limit N --page N; remove: --collection-id ID --yes; set-search: --collection-id ID --method exact|ann"},
 	"scan":       {Usage: "whothatface scan [start|status|pause|resume|cancel|retry] [options]", Description: "Scan collection paths, persist metadata, and control scan runs.", Options: "start: --collection-id ID; optional CLI-admin limit overrides: --max-pixels N --max-width N --max-height N; status: --limit N --page N; pause/resume/cancel/retry: SCAN_RUN_ID"},
-	"job":        {Usage: "whothatface job <list|get|status|reference-reprocess|reference-discovery|possible-candidates|pause|resume|cancel|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; possible-candidates: --person-id ID or --collection-id ID or --all; controls use JOB_ID"},
+	"job":        {Usage: "whothatface job <list|get|status|reference-reprocess|reference-discovery|possible-candidates|pause|resume|cancel|finalize-cancel|recover|retry> [options]", Description: "Inspect and control background processing jobs.", Options: "list: --limit N --page N; get: JOB_ID; status: --job-id ID; reference-reprocess: --person-id ID; reference-discovery: --person-id ID --since RFC3339 or --since-last; possible-candidates: --person-id ID or --collection-id ID or --all; finalize-cancel: JOB_ID --yes; recover: JOB_ID --yes; controls use JOB_ID"},
 	"account":    {Usage: "whothatface account <get|list|create|disable|enable|reset-password|grant> [options]", Description: "Manage accounts, passwords, roles, and collection permissions.", Options: "get: --account-id ID; list: --limit N --page N; create: --username USER --password PASSWORD --role ROLE; grant: --account-id ID --collection-id ID; identity changes require --yes"},
 	"setup":      {Usage: "whothatface setup check", Description: "Validate Python, dependencies, model checksums, and runtime compatibility."},
 	"serve":      {Usage: "whothatface serve [--address HOST:PORT]", Description: "Start the authenticated web review service."},
@@ -828,7 +828,7 @@ func scanCommand(ctx context.Context, application *app.App, args []string, jsonO
 
 func jobCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, possible-candidates, pause, resume, cancel, or retry")
+		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, possible-candidates, pause, resume, cancel, finalize-cancel, recover, or retry")
 	}
 	store := jobs.NewStore(application.DB)
 	if args[0] == "throttle" {
@@ -986,7 +986,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		if len(report.Summary) > 0 {
 			summary = string(report.Summary)
 		}
-		fmt.Fprintf(stdout, "Job:                         %s\nJob kind:                   %s\nStatus:                     %s\nItems completed:            %d\nItems remaining:             %d\nCurrent item:                %s\nPercentage complete:         %.1f%%\nTime started:                %s\nTime running:               %s\nEstimated time remaining:   %s\nFailed item count:           %d\nOperational progress:        %s\nCompleted summary:           %s\n", report.JobID, report.JobKind, report.Status, report.ItemsCompleted, report.ItemsRemaining, current, report.PercentageComplete, started, report.TimeRunning, eta, report.FailedItems, progress, summary)
+		fmt.Fprintf(stdout, "Job:                         %s\nJob kind:                   %s\nStatus:                     %s\nPause reason:               %s\nItems completed:            %d\nItems remaining:             %d\nCurrent item:                %s\nPercentage complete:         %.1f%%\nTime started:                %s\nTime running:               %s\nEstimated time remaining:   %s\nFailed item count:           %d\nOperational progress:        %s\nCompleted summary:           %s\n", report.JobID, report.JobKind, report.Status, report.PauseReason, report.ItemsCompleted, report.ItemsRemaining, current, report.PercentageComplete, started, report.TimeRunning, eta, report.FailedItems, progress, summary)
 		return nil
 	}
 	if args[0] == "get" {
@@ -1000,8 +1000,62 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		if jsonOutput {
 			return writeJSON(stdout, envelope("job get", job))
 		}
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\tattempts=%d/%d\n", job.ID, job.Kind, job.Status, job.Priority, job.Attempts, job.MaxAttempts)
+		fmt.Fprintf(stdout, "%s\t%s\t%s\tpause_reason=%s\t%d\tattempts=%d/%d\n", job.ID, job.Kind, job.Status, job.PauseReason, job.Priority, job.Attempts, job.MaxAttempts)
 		return nil
+	}
+	if args[0] == "recover" {
+		flags := flag.NewFlagSet("job recover", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		confirmed := flags.Bool("yes", false, "confirm that no worker is still executing this job")
+		controlArgs := make([]string, 0, len(args)-1)
+		for _, arg := range args[1:] {
+			if arg == "--yes" {
+				*confirmed = true
+				continue
+			}
+			controlArgs = append(controlArgs, arg)
+		}
+		if err := flags.Parse(controlArgs); err != nil {
+			return err
+		}
+		if flags.NArg() != 1 || !*confirmed {
+			return fmt.Errorf("job recover requires JOB_ID and --yes")
+		}
+		jobID := flags.Arg(0)
+		if err := store.Recover(ctx, jobID, "system_interrupted", "job recovered after worker termination or system interruption"); err != nil {
+			return err
+		}
+		if err := audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "job-recover", EntityType: "job", EntityID: jobID, New: map[string]any{"status": jobs.Paused, "pause_reason": "system"}}); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "job recover", map[string]any{"id": jobID, "status": jobs.Paused, "pause_reason": "system"})
+	}
+	if args[0] == "finalize-cancel" {
+		flags := flag.NewFlagSet("job finalize-cancel", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		confirmed := flags.Bool("yes", false, "confirm that no worker is still executing this job")
+		controlArgs := make([]string, 0, len(args)-1)
+		for _, arg := range args[1:] {
+			if arg == "--yes" {
+				*confirmed = true
+				continue
+			}
+			controlArgs = append(controlArgs, arg)
+		}
+		if err := flags.Parse(controlArgs); err != nil {
+			return err
+		}
+		if flags.NArg() != 1 || !*confirmed {
+			return fmt.Errorf("job finalize-cancel requires JOB_ID and --yes")
+		}
+		jobID := flags.Arg(0)
+		if err := store.FinalizeCancel(ctx, jobID); err != nil {
+			return err
+		}
+		if err := audit.NewStore(application.DB).Record(ctx, audit.Event{Action: "job-finalize-cancel", EntityType: "job", EntityID: jobID, New: map[string]any{"status": jobs.Cancelled, "reason": "worker termination"}}); err != nil {
+			return err
+		}
+		return writeCommandResult(stdout, jsonOutput, "job finalize-cancel", map[string]any{"id": jobID, "status": jobs.Cancelled})
 	}
 	if len(args) == 2 && (args[0] == "pause" || args[0] == "resume" || args[0] == "cancel" || args[0] == "retry") {
 		var err error
@@ -1025,7 +1079,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		return nil
 	}
 	if len(args) == 0 || args[0] != "list" {
-		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, possible-candidates, pause, resume, cancel, or retry")
+		return fmt.Errorf("job requires list, get, status, reference-reprocess, reference-discovery, possible-candidates, pause, resume, finalize-cancel, recover, cancel, or retry")
 	}
 	flags := flag.NewFlagSet("job list", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -1033,7 +1087,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	query, queryArgs, err := applyPagination("SELECT id, kind, priority, status, created_at, COALESCE(started_at, ''), attempts, max_attempts FROM jobs ORDER BY created_at DESC", nil, *limit, *page)
+	query, queryArgs, err := applyPagination("SELECT id, kind, priority, status, COALESCE(pause_reason, ''), created_at, COALESCE(started_at, ''), attempts, max_attempts FROM jobs ORDER BY created_at DESC", nil, *limit, *page)
 	if err != nil {
 		return err
 	}
@@ -1047,6 +1101,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 		Kind        string `json:"kind"`
 		Priority    int    `json:"priority"`
 		Status      string `json:"status"`
+		PauseReason string `json:"pause_reason,omitempty"`
 		CreatedAt   string `json:"created_at"`
 		StartedAt   string `json:"started_at"`
 		Attempts    int    `json:"attempts"`
@@ -1055,7 +1110,7 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 	var result []item
 	for rows.Next() {
 		var value item
-		if err := rows.Scan(&value.ID, &value.Kind, &value.Priority, &value.Status, &value.CreatedAt, &value.StartedAt, &value.Attempts, &value.MaxAttempts); err != nil {
+		if err := rows.Scan(&value.ID, &value.Kind, &value.Priority, &value.Status, &value.PauseReason, &value.CreatedAt, &value.StartedAt, &value.Attempts, &value.MaxAttempts); err != nil {
 			return err
 		}
 		result = append(result, value)
@@ -1063,9 +1118,9 @@ func jobCommand(ctx context.Context, application *app.App, args []string, jsonOu
 	if jsonOutput {
 		return writeJSON(stdout, envelope("job list", result))
 	}
-	fmt.Fprintln(stdout, "id\tkind\tstatus\tpriority\tstarted_at\tattempts")
+	fmt.Fprintln(stdout, "id\tkind\tstatus\tpause_reason\tpriority\tstarted_at\tattempts")
 	for _, value := range result {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\t%s\t%d/%d\n", value.ID, value.Kind, value.Status, value.Priority, value.StartedAt, value.Attempts, value.MaxAttempts)
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%s\t%d/%d\n", value.ID, value.Kind, value.Status, value.PauseReason, value.Priority, value.StartedAt, value.Attempts, value.MaxAttempts)
 	}
 	return rows.Err()
 }
@@ -1074,6 +1129,7 @@ type jobStatusReport struct {
 	JobID                         string          `json:"job_id"`
 	JobKind                       string          `json:"job_kind"`
 	Status                        jobs.Status     `json:"status"`
+	PauseReason                   string          `json:"pause_reason,omitempty"`
 	Progress                      json.RawMessage `json:"progress,omitempty"`
 	Summary                       json.RawMessage `json:"summary,omitempty"`
 	ItemsCompleted                int             `json:"items_completed"`
@@ -1134,7 +1190,7 @@ func currentJobStatus(ctx context.Context, store jobs.Store, jobID string) (jobS
 	if job.StartedAt != nil && end.After(job.StartedAt.UTC()) {
 		running = end.Sub(job.StartedAt.UTC())
 	}
-	report := jobStatusReport{JobID: job.ID, JobKind: job.Kind, Status: job.Status, Progress: job.Progress, Summary: job.Summary, ItemsCompleted: completed, ItemsProcessed: processed, ItemsRemaining: remaining, PercentageComplete: percentage, StartedAt: job.StartedAt, TimeRunning: running.String(), TimeRunningSeconds: running.Seconds(), FailedItems: failed}
+	report := jobStatusReport{JobID: job.ID, JobKind: job.Kind, Status: job.Status, PauseReason: job.PauseReason, Progress: job.Progress, Summary: job.Summary, ItemsCompleted: completed, ItemsProcessed: processed, ItemsRemaining: remaining, PercentageComplete: percentage, StartedAt: job.StartedAt, TimeRunning: running.String(), TimeRunningSeconds: running.Seconds(), FailedItems: failed}
 	if current != nil {
 		value := current.Key
 		report.CurrentItem = &value
