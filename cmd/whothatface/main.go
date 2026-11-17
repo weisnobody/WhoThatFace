@@ -779,6 +779,12 @@ func renderPeopleExport(collections []peopleExportCollection, options peopleExpo
 			}
 			for _, collection := range collections {
 				for _, photo := range collection.Photos {
+					if len(photo.Faces) == 0 {
+						if err := writer.Write(value(collection, photo, nil)); err != nil {
+							return nil, err
+						}
+						continue
+					}
 					for i := range photo.Faces {
 						row := value(collection, photo, &photo.Faces[i])
 						if err := writer.Write(row); err != nil {
@@ -807,17 +813,27 @@ func renderPeopleExport(collections []peopleExportCollection, options peopleExpo
 		}
 		return buffer.Bytes(), nil
 	case "json":
-		jsonCollections := collections
-		if !options.WithIDs {
-			jsonCollections = make([]peopleExportCollection, len(collections))
-			for i, collection := range collections {
-				jsonCollections[i] = collection
+		jsonCollections := make([]peopleExportCollection, len(collections))
+		for i, collection := range collections {
+			jsonCollections[i] = collection
+			jsonCollections[i].Photos = append([]peopleExportPhoto(nil), collection.Photos...)
+			if !options.WithIDs {
 				jsonCollections[i].ID = ""
-				jsonCollections[i].Photos = append([]peopleExportPhoto(nil), collection.Photos...)
-				for j := range jsonCollections[i].Photos {
+			}
+			for j := range jsonCollections[i].Photos {
+				jsonCollections[i].Photos[j].Faces = append([]peopleExportFace(nil), collection.Photos[j].Faces...)
+				if !options.WithIDs {
 					jsonCollections[i].Photos[j].CollectionID = ""
 					jsonCollections[i].Photos[j].PhotoPathID = ""
-					for k := range jsonCollections[i].Photos[j].Faces {
+				}
+				for k := range jsonCollections[i].Photos[j].Faces {
+					if !options.Scores {
+						jsonCollections[i].Photos[j].Faces[k].Confidence = nil
+						jsonCollections[i].Photos[j].Faces[k].Margin = nil
+						jsonCollections[i].Photos[j].Faces[k].Consistency = nil
+						jsonCollections[i].Photos[j].Faces[k].ClusterInfo = ""
+					}
+					if !options.WithIDs {
 						jsonCollections[i].Photos[j].Faces[k].FaceID = ""
 						jsonCollections[i].Photos[j].Faces[k].PersonID = ""
 						jsonCollections[i].Photos[j].Faces[k].ClusterID = ""

@@ -207,6 +207,7 @@ func TestPeopleExportFiltersFacesAndPreservesActualCounts(t *testing.T) {
 		INSERT INTO collections (id, name, root_path, created_at, updated_at) VALUES ('collection-1', 'Vacation', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO photo_assets (id, content_sha256, byte_size, media_kind, created_at, updated_at) VALUES ('asset-1', 'hash-1', 1, 'still', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO photo_paths (id, collection_id, asset_id, relative_path, first_seen_at, last_seen_at, file_size, media_kind) VALUES ('path-1', 'collection-1', 'asset-1', '2026/beach.jpg', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'still');
+		INSERT INTO photo_paths (id, collection_id, asset_id, relative_path, first_seen_at, last_seen_at, missing_at, file_size, media_kind) VALUES ('path-2', 'collection-1', 'asset-1', '2025/beach.jpg', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, 'still');
 		INSERT INTO pipelines (id, model_family, model_version, model_checksums_json, detector_config_json, preprocessing_config_json, embedding_dimension, embedding_dtype, normalization, execution_provider, dependency_versions_json, created_at) VALUES ('pipeline-1', 'test', 'test', '{}', '{}', '{}', 1, 'float32', 'l2', 'cpu', '{}', CURRENT_TIMESTAMP);
 		INSERT INTO analyses (id, asset_id, pipeline_id, status, created_at, completed_at) VALUES ('analysis-1', 'asset-1', 'pipeline-1', 'completed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO faces (id, analysis_id, face_index, box_left, box_top, box_right, box_bottom, detection_confidence, quality, created_at) VALUES
@@ -266,6 +267,30 @@ func TestPeopleExportFiltersFacesAndPreservesActualCounts(t *testing.T) {
 	if lines := strings.Count(output.String(), "\n"); lines != 3 {
 		t.Fatalf("CSV lines = %d, want header plus two faces: %s", lines, output.String())
 	}
+	output.Reset()
+	if err := run(ctx, []string{"--config", configPath, "export", "people", "collection", "--collection-id", "collection-1", "--include-unassigned", "--include-missing", "--format", "csv"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(output.String(), "\n"); lines != 5 {
+		t.Fatalf("missing/duplicate CSV lines = %d, want header plus four faces: %s", lines, output.String())
+	}
+	output.Reset()
+	if err := run(ctx, []string{"--config", configPath, "export", "people", "photo", "--collection-id", "collection-1", "--photo", "2025/beach.jpg", "--include-missing", "--format", "json"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	var photoResult struct {
+		Collections []struct {
+			Photos []struct {
+				RelativePath string `json:"relative_path"`
+			} `json:"photos"`
+		} `json:"collections"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &photoResult); err != nil {
+		t.Fatal(err)
+	}
+	if len(photoResult.Collections) != 1 || len(photoResult.Collections[0].Photos) != 1 || photoResult.Collections[0].Photos[0].RelativePath != "2025/beach.jpg" {
+		t.Fatalf("photo scope result = %+v", photoResult)
+	}
 }
 
 func TestPeopleExportValidationIncludesUsage(t *testing.T) {
@@ -286,6 +311,81 @@ func TestPeopleExportValidationIncludesUsage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPeopleExportRenderingAndFileSafety(t *testing.T) {
+	faceNumber := 2
+	confidence, margin, consistency := 0.91, 0.12, 0.84
+	collections := []peopleExportCollection{{
+		ID: "collection-1", Name: "Vacation", Photos: []peopleExportPhoto{
+			{CollectionID: "collection-1", PhotoPathID: "path-empty", RelativePath: "empty.jpg", FaceCount: 0},
+			{CollectionID: "collection-1", PhotoPathID: "path-face", RelativePath: "face.jpg", FaceCount: 1, Faces: []peopleExportFace{{
+				FaceID: "face-1", FaceNumber: &faceNumber, PersonID: "person-1", PersonName: "Alice", Assignment: "assigned-user",
+				Confidence: &confidence, Margin: &margin, Consistency: &consistency, ClusterInfo: "Alice", ClusterID: "cluster-1",
+			}}},
+		},
+	}}
+	query := map[string]any{"scope": "collection"}
+
+	columns, err := renderPeopleExport(collections, peopleExportOptions{Format: "columns"}, query, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(string(columns), "\n"); lines != 3 {
+		t.Fatalf("columns lines = %d, want header plus two photos: %s", lines, columns)
+	}
+
+	csvData, err := renderPeopleExport(collections, peopleExportOptions{Format: "csv"}, query, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(string(csvData), "\n"); lines != 3 {
+		t.Fatalf("CSV lines = %d, want header plus two photos: %s", lines, csvData)
+	}
+
+	jsonData, err := renderPeopleExport(collections, peopleExportOptions{Format: "json", Pretty: true}, query, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(jsonData), "\n  \"format\"") {
+		t.Fatalf("pretty JSON was not indented: %s", jsonData)
+	}
+	var withoutScores map[string]any
+	if err := json.Unmarshal(jsonData, &withoutScores); err != nil {
+		t.Fatal(err)
+	}
+	if withoutScores["format_version"] != "1" {
+		t.Fatalf("format version = %v, want 1", withoutScores["format_version"])
+	}
+
+	withScores, err := renderPeopleExport(collections, peopleExportOptions{Format: "json", Scores: true, WithIDs: true}, query, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(withScores), `"confidence":0.91`) || !strings.Contains(string(withScores), `"cluster_id":"cluster-1"`) {
+		t.Fatalf("JSON scores or IDs missing: %s", withScores)
+	}
+	if strings.Contains(string(jsonData), `"confidence"`) || strings.Contains(string(jsonData), `"cluster_info"`) {
+		t.Fatalf("JSON scores leaked without --scores: %s", jsonData)
+	}
+
+	path := filepath.Join(t.TempDir(), "export.json")
+	if err := writePeopleExport(path, false, []byte("first"), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePeopleExport(path, false, []byte("second"), &bytes.Buffer{}); err == nil {
+		t.Fatal("expected existing output protection")
+	}
+	if err := writePeopleExport(path, true, []byte("second"), &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "second" {
+		t.Fatalf("replacement contents = %q, want second", data)
 	}
 }
 
