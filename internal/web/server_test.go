@@ -542,6 +542,7 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person-1', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person-2', 'Second Person', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person-3', 'Stale Candidate', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		INSERT INTO people (id, name, created_at, updated_at) VALUES ('person-4', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
 		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-1', 'face-1', 'person-1', 1, 0.91, 0.12, 4, 0.90, 0.99, 'high', CURRENT_TIMESTAMP);
 		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-2', 'face-1', 'person-2', 2, 0.79, 0.03, 2, 0.90, 0.99, 'medium', CURRENT_TIMESTAMP);
 		INSERT INTO recognition_candidates (id, face_id, person_id, rank, similarity, margin, support_count, quality, detection_confidence, evidence, created_at) VALUES ('candidate-old', 'face-1', 'person-1', 1, 0.80, 0.10, 1, 0.90, 0.99, 'medium', '2020-01-01T00:00:00Z');
@@ -577,9 +578,11 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 		avoid string
 	}{
 		{query: "view=no-faces", want: "person-2", avoid: "person-1"},
+		{query: "view=no-faces", want: "Second Person", avoid: "person-4"},
 		{query: "assignment_user=true", want: "person-1", avoid: "person-2"},
 		{query: "name=named&view=no-faces", want: "Second Person", avoid: "person-1"},
 		{query: "name=unnamed&include_no_faces=true", want: "person-1", avoid: "Second Person"},
+		{query: "name=named&collection_id=collection-1&include_no_faces=true", want: "Second Person", avoid: "person-1"},
 		{query: "min_faces=2", want: "People (0/0)", avoid: "person-1"},
 		{query: "collection_id=collection-1", want: "person-1", avoid: "Second Person"},
 	} {
@@ -606,6 +609,9 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 	}
 	if !strings.Contains(clusterResponse.Body.String(), `value="person-2"`) {
 		t.Fatalf("cluster detail omitted named person with no assigned faces: %s", clusterResponse.Body.String())
+	}
+	if strings.Contains(clusterResponse.Body.String(), `value="person-4"`) {
+		t.Fatalf("cluster detail included unnamed person with no assigned faces: %s", clusterResponse.Body.String())
 	}
 	for _, value := range []string{"Who That Face", `class="breadcrumb">› <a href="/review/clusters">Clusters</a>`, "cluster-detail-controls", `value="to-assign">To Assign</option>`, "Proposed person", "Consistency", "Review version", "Candidate confidence", "class=\"grid cluster-grid\"", "class=\"card cluster-face assigned assigned-user\"", `value="person-1" selected`, "User:</strong> Cs:", `data-action="unknown"`, `data-action="ambiguous"`, `data-disposition="incorrect-assignment"`, `data-disposition="false-detection">No Face`, `data-disposition="dont-track">Don't Track`, "person-select-filter", "data-action=\"assign\"", "/review/photos?path_id=path-1", "/review/people/person-1"} {
 		if !strings.Contains(clusterResponse.Body.String(), value) {
@@ -791,6 +797,9 @@ func TestReviewPersonRendersPhotosFacesAndActions(t *testing.T) {
 		if !strings.Contains(unresolvedBody, value) {
 			t.Fatalf("unresolved photo review missing %q: %s", value, unresolvedBody)
 		}
+	}
+	if !strings.Contains(unresolvedBody, `value="person-2"`) {
+		t.Fatalf("photo assignment selector omitted named person with no assigned faces: %s", unresolvedBody)
 	}
 	if strings.Index(unresolvedBody, "Candidates:") > strings.Index(unresolvedBody, `class="photo-cluster"`) || strings.Index(unresolvedBody, `class="photo-cluster"`) > strings.Index(unresolvedBody, `data-disposition="incorrect-assignment"`) || strings.Index(unresolvedBody, `data-disposition="incorrect-assignment"`) > strings.Index(unresolvedBody, `data-assignment-person="face-1"`) {
 		t.Fatalf("unresolved photo review controls are out of order: %s", unresolvedBody)
