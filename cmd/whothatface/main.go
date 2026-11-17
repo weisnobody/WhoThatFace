@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -278,7 +280,7 @@ var commandHelp = map[string]helpTopic{
 	"audit":      {Usage: "whothatface audit <list|purge> [options]", Description: "List or purge retained audit events.", Options: "list: [--entity-type TYPE] [--entity-id ID] --limit N --page N; purge: --age-days N"},
 	"backup":     {Usage: "whothatface backup create", Description: "Create a database backup in the configured backup directory."},
 	"restore":    {Usage: "whothatface restore --input FILE --yes", Description: "Replace the configured database from a backup after explicit confirmation."},
-	"export":     {Usage: "whothatface export <metadata|assignments|embeddings> [--output FILE]", Description: "Export versioned metadata, identity assignments, or sensitive embeddings as JSON."},
+	"export":     {Usage: "whothatface export <people|metadata|assignments|embeddings> [options]", Description: "Export gallery people/faces or versioned database data.", Options: "people collection: --collection-id ID (repeatable); photo: --collection-id ID --photo PATH; person: --person-id ID; common: --format columns|csv|json --output FILE --scores --with-ids --include-unnamed --include-unassigned --include-missing --pretty --force"},
 	"purge":      {Usage: "whothatface purge derived --yes", Description: "Delete derived face, assignment, clustering, and job data after confirmation."},
 }
 
@@ -366,8 +368,11 @@ func purgeCommand(ctx context.Context, application *app.App, args []string, json
 }
 
 func exportCommand(ctx context.Context, application *app.App, args []string, jsonOutput bool, stdout, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "people" {
+		return peopleExportCommand(ctx, application, args[1:], stdout, stderr)
+	}
 	if len(args) == 0 || (args[0] != "metadata" && args[0] != "assignments" && args[0] != "embeddings") {
-		return fmt.Errorf("export requires metadata, assignments, or embeddings")
+		return fmt.Errorf("export requires metadata, assignments, embeddings, or people")
 	}
 	kind := args[0]
 	flags := flag.NewFlagSet("export "+kind, flag.ContinueOnError)
@@ -466,6 +471,437 @@ func exportCommand(ctx context.Context, application *app.App, args []string, jso
 		return writeJSON(stdout, envelope("export "+kind, map[string]string{"path": path, "format_version": "1", "kind": kind}))
 	}
 	fmt.Fprintln(stdout, path)
+	return nil
+}
+
+type peopleExportFace struct {
+	FaceID      string   `json:"face_id,omitempty"`
+	FaceNumber  *int     `json:"face_number"`
+	PersonID    string   `json:"person_id,omitempty"`
+	PersonName  string   `json:"person_name"`
+	Assignment  string   `json:"assignment_type"`
+	Confidence  *float64 `json:"confidence,omitempty"`
+	Margin      *float64 `json:"margin,omitempty"`
+	Consistency *float64 `json:"consistency,omitempty"`
+	ClusterInfo string   `json:"cluster_info,omitempty"`
+	ClusterID   string   `json:"cluster_id,omitempty"`
+}
+
+type peopleExportPhoto struct {
+	CollectionID   string             `json:"collection_id,omitempty"`
+	CollectionName string             `json:"collection_name,omitempty"`
+	PhotoPathID    string             `json:"photo_path_id,omitempty"`
+	RelativePath   string             `json:"relative_path"`
+	FaceCount      int                `json:"face_count"`
+	Faces          []peopleExportFace `json:"faces"`
+}
+
+type peopleExportCollection struct {
+	ID     string              `json:"id,omitempty"`
+	Name   string              `json:"name"`
+	Photos []peopleExportPhoto `json:"photos"`
+}
+
+type peopleExportOptions struct {
+	Scope             string
+	CollectionIDs     []string
+	Photo             string
+	PersonID          string
+	Format            string
+	Output            string
+	Force             bool
+	IncludeUnnamed    bool
+	IncludeUnassigned bool
+	IncludeMissing    bool
+	Scores            bool
+	WithIDs           bool
+	Pretty            bool
+}
+
+func peopleExportCommand(ctx context.Context, application *app.App, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return peopleExportUsageError("export people requires at least one of --collection-id, --person-id, or --photo", "")
+	}
+	if args[0] != "collection" && args[0] != "photo" && args[0] != "person" {
+		return peopleExportUsageError("export people requires a collection, photo, or person scope and at least one of --collection-id, --person-id, or --photo", "")
+	}
+	scope := args[0]
+	flags := flag.NewFlagSet("export people "+args[0], flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	collectionIDs := multiStringFlag{}
+	flags.Var(&collectionIDs, "collection-id", "collection ID (repeatable)")
+	photo := flags.String("photo", "", "collection-relative photo path")
+	personID := flags.String("person-id", "", "person ID")
+	format := flags.String("format", "columns", "output format: columns, csv, or json")
+	output := flags.String("output", "", "output path; stdout by default")
+	force := flags.Bool("force", false, "replace an existing output file")
+	includeUnnamed := flags.Bool("include-unnamed", false, "include assigned people without names")
+	includeUnassigned := flags.Bool("include-unassigned", false, "include unknown, ambiguous, and unassigned faces")
+	includeMissing := flags.Bool("include-missing", false, "include paths marked missing")
+	scores := flags.Bool("scores", false, "include recognition and cluster scores")
+	withIDs := flags.Bool("with-ids", false, "include entity IDs")
+	pretty := flags.Bool("pretty", false, "indent JSON with two spaces")
+	if err := flags.Parse(args[1:]); err != nil {
+		return peopleExportUsageError(err.Error(), scope)
+	}
+	if args[0] == "help" {
+		return peopleExportUsageError("", scope)
+	}
+	if flags.NArg() != 0 {
+		return peopleExportUsageError(fmt.Sprintf("unexpected argument %q", flags.Arg(0)), scope)
+	}
+	if *format != "columns" && *format != "csv" && *format != "json" {
+		return peopleExportUsageError("--format must be columns, csv, or json", scope)
+	}
+	options := peopleExportOptions{Scope: args[0], CollectionIDs: collectionIDs.values, Photo: *photo, PersonID: *personID, Format: *format, Output: *output, Force: *force, IncludeUnnamed: *includeUnnamed, IncludeUnassigned: *includeUnassigned, IncludeMissing: *includeMissing, Scores: *scores, WithIDs: *withIDs, Pretty: *pretty}
+	if options.Scope == "photo" && (len(options.CollectionIDs) != 1 || options.Photo == "") {
+		return peopleExportUsageError("export people photo requires exactly one --collection-id and --photo", scope)
+	}
+	if options.Scope == "collection" && len(options.CollectionIDs) == 0 {
+		return peopleExportUsageError("export people collection requires --collection-id", scope)
+	}
+	if options.Scope == "person" && options.PersonID == "" {
+		return peopleExportUsageError("export people person requires --person-id", scope)
+	}
+	if options.Scope != "photo" && options.Photo != "" {
+		return peopleExportUsageError("--photo is only valid for photo scope", scope)
+	}
+	if options.Scope != "person" && options.PersonID != "" {
+		return peopleExportUsageError("--person-id is only valid for person scope", scope)
+	}
+	collections, actualFaces, exportedFaces, err := loadPeopleExport(ctx, application.DB, options)
+	if err != nil {
+		return err
+	}
+	query := map[string]any{
+		"scope": options.Scope, "collection_ids": options.CollectionIDs, "photo": options.Photo, "person_id": options.PersonID,
+		"format": options.Format, "include_unnamed": options.IncludeUnnamed, "include_unassigned": options.IncludeUnassigned,
+		"include_missing": options.IncludeMissing, "scores": options.Scores, "with_ids": options.WithIDs, "pretty": options.Pretty,
+	}
+	data, err := renderPeopleExport(collections, options, query, actualFaces, exportedFaces)
+	if err != nil {
+		return err
+	}
+	return writePeopleExport(options.Output, options.Force, data, stdout)
+}
+
+func peopleExportUsageError(message, scope string) error {
+	usage := "Usage: whothatface export people <collection|photo|person> [options]\n\n"
+	if scope == "collection" {
+		usage = "Usage: whothatface export people collection --collection-id ID [--collection-id ID ...] [options]\n\n"
+	} else if scope == "photo" {
+		usage = "Usage: whothatface export people photo --collection-id ID --photo RELATIVE_PATH [options]\n\n"
+	} else if scope == "person" {
+		usage = "Usage: whothatface export people person --person-id ID [options]\n\n"
+	}
+	return fmt.Errorf("%s\n%sOptions: --format columns|csv|json (default columns), --output PATH, --scores, --with-ids, --include-unnamed, --include-unassigned, --include-missing, --pretty, --force", message, usage)
+}
+
+type multiStringFlag struct{ values []string }
+
+func (f *multiStringFlag) String() string { return strings.Join(f.values, ",") }
+func (f *multiStringFlag) Set(value string) error {
+	if value == "" {
+		return errors.New("value must not be empty")
+	}
+	f.values = append(f.values, value)
+	return nil
+}
+
+func loadPeopleExport(ctx context.Context, database *sql.DB, options peopleExportOptions) ([]peopleExportCollection, int, int, error) {
+	query := `WITH latest AS (
+		SELECT a.* FROM analyses a
+		WHERE a.status IN ('completed', 'completed_with_errors')
+		AND NOT EXISTS (SELECT 1 FROM analyses newer WHERE newer.asset_id = a.asset_id AND newer.status IN ('completed', 'completed_with_errors') AND (newer.completed_at > a.completed_at OR (newer.completed_at = a.completed_at AND newer.created_at > a.created_at)))
+	)
+	SELECT c.id, c.name, pp.id, pp.relative_path, COUNT(f.id) OVER (PARTITION BY pp.id),
+	       f.id, f.face_index, COALESCE(ca.person_id, ''), COALESCE(NULLIF(p.name, ''), ''), COALESCE(ca.state, 'unassigned'),
+	       rc.similarity, rc.margin, cl.consistency, COALESCE(cl.id, ''),
+	       CASE WHEN cl.id IS NULL THEN '' WHEN cl.is_mixed = 1 THEN 'Mixed'
+	            WHEN cl.people_count > 1 THEN 'Multiple'
+	            ELSE COALESCE(NULLIF(cl.person_name, ''), substr(cl.proposed_person_id, -8), '') END
+	FROM photo_paths pp
+	JOIN collections c ON c.id = pp.collection_id
+	LEFT JOIN latest a ON a.asset_id = pp.asset_id
+	LEFT JOIN faces f ON f.analysis_id = a.id
+	LEFT JOIN current_face_assignments ca ON ca.face_id = f.id
+	LEFT JOIN people p ON p.id = ca.person_id
+	LEFT JOIN recognition_candidates rc ON rc.id = (SELECT r2.id FROM recognition_candidates r2 WHERE r2.face_id = f.id ORDER BY r2.created_at DESC, r2.rank LIMIT 1)
+	LEFT JOIN (SELECT c0.id, c0.consistency, c0.is_mixed, c0.proposed_person_id,
+	                  COALESCE(p0.name, '') AS person_name, COUNT(DISTINCT ca0.person_id) AS people_count
+	           FROM clusters c0
+	           LEFT JOIN people p0 ON p0.id = c0.proposed_person_id
+	           LEFT JOIN cluster_memberships cm0 ON cm0.cluster_id = c0.id
+	           LEFT JOIN current_face_assignments ca0 ON ca0.face_id = cm0.face_id
+	           JOIN clustering_runs cr0 ON cr0.id = c0.clustering_run_id AND cr0.status = 'active'
+	           GROUP BY c0.id, c0.consistency, c0.is_mixed, c0.proposed_person_id, p0.name) cl
+	  ON cl.id = (SELECT cm.cluster_id FROM cluster_memberships cm JOIN clusters cx ON cx.id = cm.cluster_id JOIN clustering_runs crx ON crx.id = cx.clustering_run_id WHERE cm.face_id = f.id AND crx.status = 'active' ORDER BY cm.cluster_id LIMIT 1)
+	WHERE 1 = 1`
+	var args []any
+	if !options.IncludeMissing {
+		query += " AND pp.missing_at IS NULL"
+	}
+	switch options.Scope {
+	case "collection":
+		query += " AND pp.collection_id IN (" + exportPlaceholders(len(options.CollectionIDs)) + ")"
+		for _, value := range options.CollectionIDs {
+			args = append(args, value)
+		}
+	case "photo":
+		query += " AND pp.collection_id = ? AND pp.relative_path = ?"
+		args = append(args, options.CollectionIDs[0], options.Photo)
+	case "person":
+		query += " AND ca.person_id = ?"
+		args = append(args, options.PersonID)
+	}
+	query += " ORDER BY c.name, c.id, pp.relative_path, pp.id, f.face_index, f.id"
+	rows, err := database.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer rows.Close()
+	var result []peopleExportCollection
+	collectionIndex := map[string]int{}
+	photoIndex := map[string]int{}
+	actualFaces, exportedFaces := 0, 0
+	for rows.Next() {
+		var collectionID, collectionName, pathID, relativePath string
+		var faceCount int
+		var faceID, personID, personName, assignment, clusterID, clusterInfo sql.NullString
+		var faceNumber sql.NullInt64
+		var confidence, margin, consistency sql.NullFloat64
+		if err := rows.Scan(&collectionID, &collectionName, &pathID, &relativePath, &faceCount, &faceID, &faceNumber, &personID, &personName, &assignment, &confidence, &margin, &consistency, &clusterID, &clusterInfo); err != nil {
+			return nil, 0, 0, err
+		}
+		ci, ok := collectionIndex[collectionID]
+		if !ok {
+			ci = len(result)
+			collectionIndex[collectionID] = ci
+			result = append(result, peopleExportCollection{ID: collectionID, Name: collectionName})
+		}
+		key := collectionID + "\x00" + pathID
+		pi, ok := photoIndex[key]
+		if !ok {
+			pi = len(result[ci].Photos)
+			photoIndex[key] = pi
+			result[ci].Photos = append(result[ci].Photos, peopleExportPhoto{CollectionID: collectionID, CollectionName: collectionName, PhotoPathID: pathID, RelativePath: relativePath, FaceCount: faceCount})
+			actualFaces += faceCount
+		}
+		if faceID.Valid {
+			if options.Scope != "person" && !includePeopleExportFace(personName.String, assignment.String, options) {
+				continue
+			}
+			face := peopleExportFace{FaceID: faceID.String, PersonID: personID.String, PersonName: personName.String, Assignment: assignment.String, ClusterID: clusterID.String, ClusterInfo: clusterInfo.String}
+			if faceNumber.Valid {
+				value := int(faceNumber.Int64)
+				face.FaceNumber = &value
+			}
+			if confidence.Valid {
+				value := confidence.Float64
+				face.Confidence = &value
+			}
+			if margin.Valid {
+				value := margin.Float64
+				face.Margin = &value
+			}
+			if consistency.Valid {
+				value := consistency.Float64
+				face.Consistency = &value
+			}
+			result[ci].Photos[pi].Faces = append(result[ci].Photos[pi].Faces, face)
+			exportedFaces++
+		}
+	}
+	return result, actualFaces, exportedFaces, rows.Err()
+}
+
+func includePeopleExportFace(personName, assignment string, options peopleExportOptions) bool {
+	if assignment == "provisional" || assignment == "assigned-system" || assignment == "assigned-user" {
+		return strings.TrimSpace(personName) != "" || options.IncludeUnnamed
+	}
+	return options.IncludeUnassigned && (assignment == "unknown" || assignment == "ambiguous" || assignment == "unassigned")
+}
+
+func exportPlaceholders(count int) string {
+	values := make([]string, count)
+	for i := range values {
+		values[i] = "?"
+	}
+	return strings.Join(values, ",")
+}
+
+func renderPeopleExport(collections []peopleExportCollection, options peopleExportOptions, query map[string]any, actualFaces, exportedFaces int) ([]byte, error) {
+	fields := []string{"collection_name", "relative_path", "face_count", "face_number", "person_name", "assignment_type"}
+	if options.Scores {
+		fields = append(fields, "confidence", "margin", "consistency", "cluster_info")
+	}
+	if options.WithIDs {
+		fields = append(fields, "collection_id", "photo_path_id", "face_id", "person_id", "cluster_id")
+	}
+	value := func(collection peopleExportCollection, photo peopleExportPhoto, face *peopleExportFace) []string {
+		row := []string{collection.Name, photo.RelativePath, strconv.Itoa(photo.FaceCount), "", "", ""}
+		if face != nil {
+			if face.FaceNumber != nil {
+				row[3] = strconv.Itoa(*face.FaceNumber)
+			}
+			row[4], row[5] = face.PersonName, face.Assignment
+		}
+		if options.Scores {
+			for _, score := range [](*float64){faceScore(face, 0), faceScore(face, 1), faceScore(face, 2)} {
+				if score == nil {
+					row = append(row, "")
+				} else {
+					row = append(row, strconv.FormatFloat(*score, 'g', -1, 64))
+				}
+			}
+			if face == nil {
+				row = append(row, "")
+			} else {
+				row = append(row, face.ClusterInfo)
+			}
+		}
+		if options.WithIDs {
+			if face == nil {
+				row = append(row, collection.ID, photo.PhotoPathID, "", "", "")
+			} else {
+				row = append(row, collection.ID, photo.PhotoPathID, face.FaceID, face.PersonID, face.ClusterID)
+			}
+		}
+		return row
+	}
+	switch options.Format {
+	case "columns", "csv":
+		var buffer bytes.Buffer
+		if options.Format == "csv" {
+			writer := csv.NewWriter(&buffer)
+			if err := writer.Write(fields); err != nil {
+				return nil, err
+			}
+			for _, collection := range collections {
+				for _, photo := range collection.Photos {
+					for i := range photo.Faces {
+						row := value(collection, photo, &photo.Faces[i])
+						if err := writer.Write(row); err != nil {
+							return nil, err
+						}
+					}
+				}
+			}
+			writer.Flush()
+			if err := writer.Error(); err != nil {
+				return nil, err
+			}
+		} else {
+			buffer.WriteString(strings.Join(fields, "\t") + "\n")
+			for _, collection := range collections {
+				for _, photo := range collection.Photos {
+					if len(photo.Faces) == 0 {
+						buffer.WriteString(strings.Join(value(collection, photo, nil), "\t") + "\n")
+						continue
+					}
+					for i := range photo.Faces {
+						buffer.WriteString(strings.Join(value(collection, photo, &photo.Faces[i]), "\t") + "\n")
+					}
+				}
+			}
+		}
+		return buffer.Bytes(), nil
+	case "json":
+		jsonCollections := collections
+		if !options.WithIDs {
+			jsonCollections = make([]peopleExportCollection, len(collections))
+			for i, collection := range collections {
+				jsonCollections[i] = collection
+				jsonCollections[i].ID = ""
+				jsonCollections[i].Photos = append([]peopleExportPhoto(nil), collection.Photos...)
+				for j := range jsonCollections[i].Photos {
+					jsonCollections[i].Photos[j].CollectionID = ""
+					jsonCollections[i].Photos[j].PhotoPathID = ""
+					for k := range jsonCollections[i].Photos[j].Faces {
+						jsonCollections[i].Photos[j].Faces[k].FaceID = ""
+						jsonCollections[i].Photos[j].Faces[k].PersonID = ""
+						jsonCollections[i].Photos[j].Faces[k].ClusterID = ""
+					}
+				}
+			}
+		}
+		result := struct {
+			FormatVersion string                   `json:"format_version"`
+			Format        string                   `json:"format"`
+			ExportedAt    string                   `json:"exported_at"`
+			Query         map[string]any           `json:"query"`
+			Counts        map[string]int           `json:"counts"`
+			Collections   []peopleExportCollection `json:"collections"`
+		}{FormatVersion: "1", Format: "people", ExportedAt: time.Now().UTC().Format(time.RFC3339Nano), Query: query, Counts: map[string]int{"collections": len(collections), "photos": countExportPhotos(collections), "actual_faces": actualFaces, "exported_faces": exportedFaces}, Collections: jsonCollections}
+		if options.Pretty {
+			return json.MarshalIndent(result, "", "  ")
+		}
+		return json.Marshal(result)
+	default:
+		return nil, fmt.Errorf("unsupported export format %q", options.Format)
+	}
+}
+
+func faceScore(face *peopleExportFace, index int) *float64 {
+	if face == nil {
+		return nil
+	}
+	switch index {
+	case 0:
+		return face.Confidence
+	case 1:
+		return face.Margin
+	case 2:
+		return face.Consistency
+	default:
+		return nil
+	}
+}
+
+func countExportPhotos(collections []peopleExportCollection) int {
+	count := 0
+	for _, collection := range collections {
+		count += len(collection.Photos)
+	}
+	return count
+}
+
+func writePeopleExport(path string, force bool, data []byte, stdout io.Writer) error {
+	if path == "" {
+		_, err := stdout.Write(data)
+		return err
+	}
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("output file %q already exists; use --force to replace it", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, ".whothatface-export-*")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return err
+	}
 	return nil
 }
 
