@@ -25,7 +25,7 @@ func (s RunStore) CreateRun(ctx context.Context, config Config, scope string, fa
 	}
 	algorithmVersion := config.AlgorithmVersion
 	if algorithmVersion == "" {
-		algorithmVersion = "mutual-knn-v1"
+		algorithmVersion = "mutual-knn-v2-anchor-safe"
 	}
 	method := config.NeighborSearchMethod
 	if method == "" {

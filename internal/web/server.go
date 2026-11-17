@@ -96,7 +96,7 @@ func renderRecognitionCandidates(candidates []recognitionCandidateView, faceID, 
 		if candidate.PersonID == assignedPersonID {
 			name = `<strong>` + name + `</strong>`
 		}
-		body.WriteString(name + ` (S: ` + formatScore(candidate.Similarity) + `% M: ` + formatScore(candidate.Margin) + `% Sp: ` + fmt.Sprint(candidate.Support) + ` Q: ` + formatScore(candidate.Quality) + `% D: ` + formatScore(candidate.Detection) + `%)`)
+		body.WriteString(name + ` (C: ` + formatScore(candidate.Similarity) + `% M: ` + formatScore(candidate.Margin) + `% Sp: ` + fmt.Sprint(candidate.Support) + ` Q: ` + formatScore(candidate.Quality) + `% D: ` + formatScore(candidate.Detection) + `%)`)
 		if canAssign {
 			body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="">Assign</button>`)
 		}
@@ -166,7 +166,7 @@ func renderPossibleMatches(candidates []possibleCandidateView, faceID, assignedP
 		if candidate.PersonID == assignedPersonID {
 			name = `<strong>` + name + `</strong>`
 		}
-		body.WriteString(`<div class="possible-match">` + name + ` (S: ` + formatScore(candidate.Similarity) + `% M: ` + formatScore(candidate.Margin) + `% Sp: ` + fmt.Sprint(candidate.Support) + ` Q: ` + formatScore(candidate.Quality) + `% D: ` + formatScore(candidate.Detection) + `% <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
+		body.WriteString(`<div class="possible-match">` + name + ` (C: ` + formatScore(candidate.Similarity) + `% M: ` + formatScore(candidate.Margin) + `% Sp: ` + fmt.Sprint(candidate.Support) + ` Q: ` + formatScore(candidate.Quality) + `% D: ` + formatScore(candidate.Detection) + `% <a href="/review/candidate-runs/` + template.HTMLEscapeString(candidate.RunID) + `">run</a>)`)
 		if canAssign {
 			body.WriteString(` <button type="button" data-action="assign-candidate" data-face-id="` + template.HTMLEscapeString(faceID) + `" data-person-id="` + template.HTMLEscapeString(candidate.PersonID) + `" data-candidate-id="` + template.HTMLEscapeString(candidate.ID) + `">Assign</button>`)
 		}

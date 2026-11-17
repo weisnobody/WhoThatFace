@@ -72,7 +72,7 @@
   // "recognition_require_agreement": true,
 
   // Production clustering settings.
-  // "clustering_k": 40,
+  // "clustering_k": 10,
   // "clustering_similarity_threshold": 0.45,
   // "clustering_candidate_scope": "all"
 

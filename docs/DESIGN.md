@@ -414,13 +414,16 @@ defaults are:
 
 | Recognition context | Similarity | Margin | Grouping `k` | Face-to-face edge threshold |
 | --- | ---: | ---: | ---: | ---: |
-| Person has approved references | 0.25 | 0.05 | 40 | 0.45 |
-| Person has no approved references | 0.40 | 0.05 | 40 | 0.45 |
+| Person has approved references | 0.25 | 0.05 | 10 | 0.45 |
+| Person has no approved references | 0.40 | 0.05 | 10 | 0.45 |
 
 All values are configurable. Similarity and margin apply to person recognition;
 the face-to-face threshold applies when constructing grouping graph edges.
-Grouping uses a k-nearest-neighbor graph with mutual-nearest-neighbor edges in
-the initial implementation. Connected components form the provisional groups.
+Grouping uses a conservative k-nearest-neighbor graph with
+mutual-nearest-neighbor edges. The default implementation uses `K=10` and
+excludes edges between faces already assigned to different people, preventing
+known identity assignments from becoming graph bridges between mixed groups.
+Connected components form the provisional groups.
 
 ### Subset clustering and active-run invalidation
 

@@ -35,8 +35,29 @@ func TestGroupReportsMixedCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Clusters[0].Mixed || result.Clusters[0].Purity != 0.5 {
+	if len(result.Clusters) != 2 {
+		t.Fatalf("clusters = %+v, want conflicting known identities split", result.Clusters)
+	}
+	for _, cluster := range result.Clusters {
+		if cluster.Mixed {
+			t.Fatalf("cluster = %+v, want no mixed known-identity cluster", cluster)
+		}
+	}
+	if result.Clusters[0].Purity != 1 || result.Clusters[1].Purity != 1 {
 		t.Errorf("cluster = %+v", result.Clusters[0])
+	}
+}
+
+func TestGroupAllowsUnknownFaceToConnectToKnownFace(t *testing.T) {
+	result, err := Group([]Face{
+		{ID: "known", Embedding: []float32{1, 0}, PersonID: "alice"},
+		{ID: "unknown", Embedding: []float32{.99, .1}},
+	}, Config{K: 1, SimilarityThreshold: .9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Clusters) != 1 || len(result.Clusters[0].FaceIDs) != 2 {
+		t.Fatalf("result = %+v, want known and unknown faces grouped", result)
 	}
 }
 

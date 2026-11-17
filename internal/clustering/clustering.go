@@ -27,7 +27,7 @@ type Config struct {
 }
 
 func DefaultConfig() Config {
-	return Config{K: 40, SimilarityThreshold: 0.45, AlgorithmVersion: "mutual-knn-v1", NeighborSearchMethod: "exact", CandidateScope: "all", RecognitionThresholds: recognition.DefaultThresholds()}
+	return Config{K: 10, SimilarityThreshold: 0.45, AlgorithmVersion: "mutual-knn-v2-anchor-safe", NeighborSearchMethod: "exact", CandidateScope: "all", RecognitionThresholds: recognition.DefaultThresholds()}
 }
 
 type Neighbor struct {
@@ -176,6 +176,12 @@ func GroupContext(ctx context.Context, faces []Face, config Config) (Result, err
 		}
 		for _, neighbor := range list {
 			otherIndex := indices[neighbor.FaceID]
+			// Do not create a bridge between two faces that current assignment
+			// evidence already identifies as different people. Unknown faces
+			// remain eligible to connect to either side for later review.
+			if faces[index].PersonID != "" && faces[otherIndex].PersonID != "" && faces[index].PersonID != faces[otherIndex].PersonID {
+				continue
+			}
 			if !containsNeighbor(neighbors[otherIndex], faces[index].ID) || faces[index].ID >= neighbor.FaceID {
 				continue
 			}
