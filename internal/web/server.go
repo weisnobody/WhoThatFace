@@ -936,7 +936,7 @@ func (s *Server) reviewPhotoDetail(w http.ResponseWriter, r *http.Request, pathI
 	body.WriteString(`</div></div><div class="photo-face-grid">`)
 	peopleQuery := `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people`
 	peopleArgs := []any{collectionID}
-	peopleQuery += ` WHERE EXISTS (SELECT 1 FROM current_face_assignments ca2 JOIN faces f2 ON f2.id = ca2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE ca2.person_id = people.id AND pp2.collection_id = ?)`
+	peopleQuery += ` WHERE (TRIM(COALESCE(name, '')) <> '' OR EXISTS (SELECT 1 FROM current_face_assignments ca2 JOIN faces f2 ON f2.id = ca2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE ca2.person_id = people.id AND pp2.collection_id = ?))`
 	peopleQuery += ` ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8))), id`
 	peopleRows, peopleErr := s.db.QueryContext(r.Context(), peopleQuery, peopleArgs...)
 	if peopleErr != nil {
@@ -1099,6 +1099,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	if view != "possibles" && view != "dont-track" && view != "no-faces" {
 		view = "all"
 	}
+	includeNoFaces := query.Get("include_no_faces") == "true"
 	possibleCount := `(SELECT COUNT(DISTINCT pc.face_id) FROM possible_face_candidates pc WHERE pc.person_id = p.id AND pc.is_current = 1)`
 	clusterCount := `(SELECT COUNT(DISTINCT c.id) FROM clusters c JOIN clustering_runs cr ON cr.id = c.clustering_run_id WHERE cr.status = 'active' AND (c.proposed_person_id = p.id OR EXISTS (SELECT 1 FROM cluster_memberships cm JOIN current_face_assignments cca ON cca.face_id = cm.face_id WHERE cm.cluster_id = c.id AND cca.person_id = p.id)))`
 	var possibleArgs []any
@@ -1135,8 +1136,11 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 		for i := range visibleCollectionIDs {
 			placeholders[i] = "?"
 		}
-		peopleQuery += ` (EXISTS (SELECT 1 FROM faces f2 JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id JOIN current_face_assignments ca2 ON ca2.face_id = f2.id WHERE ca2.person_id = p.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
-		peopleQuery += `)`
+		collectionPeople := `EXISTS (SELECT 1 FROM faces f2 JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id JOIN current_face_assignments ca2 ON ca2.face_id = f2.id WHERE ca2.person_id = p.id AND pp2.collection_id IN (` + strings.Join(placeholders, ",") + `))`
+		if includeNoFaces {
+			collectionPeople = `(TRIM(COALESCE(p.name, '')) <> '' OR ` + collectionPeople + `)`
+		}
+		peopleQuery += ` (` + collectionPeople + `)`
 		for _, id := range visibleCollectionIDs {
 			args = append(args, id)
 		}
@@ -1177,7 +1181,6 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	includeDontTrack := query.Get("include_dont_track") == "true"
 	includePossibles := query.Get("include_possibles") != "false"
-	includeNoFaces := query.Get("include_no_faces") == "true"
 	minFaces, maxFaces := parseIntFilter(query.Get("min_faces")), parseIntFilter(query.Get("max_faces"))
 	assignmentFiltersSpecified := false
 	for _, name := range []string{"assignment_user", "assignment_system", "assignment_provisional", "assignment_other"} {
@@ -1214,7 +1217,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		case "no-faces":
-			if person.Faces != 0 {
+			if person.Faces != 0 || person.Named == 0 {
 				continue
 			}
 		}
@@ -1230,7 +1233,7 @@ func (s *Server) reviewPeople(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		other := person.Faces - person.User - person.System - person.Provisional
-		if view == "no-faces" {
+		if view == "no-faces" || (includeNoFaces && person.Faces == 0 && person.Named != 0) {
 			filtered = append(filtered, person)
 			continue
 		}
@@ -2828,7 +2831,18 @@ func (s *Server) reviewCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	representedRows.Close()
-	peopleRows, err := s.db.QueryContext(r.Context(), `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8))), id`)
+	peopleQuery := `SELECT id, COALESCE(NULLIF(name, ''), substr(id, -8)) FROM people WHERE TRIM(COALESCE(name, '')) <> ''`
+	peopleArgs := []any{}
+	if accessibleCollections == nil {
+		peopleQuery += ` OR EXISTS (SELECT 1 FROM current_face_assignments ca2 WHERE ca2.person_id = people.id)`
+	} else {
+		peopleQuery += ` OR EXISTS (SELECT 1 FROM current_face_assignments ca2 JOIN faces f2 ON f2.id = ca2.face_id JOIN analyses a2 ON a2.id = f2.analysis_id JOIN photo_assets pa2 ON pa2.id = a2.asset_id JOIN photo_paths pp2 ON pp2.asset_id = pa2.id WHERE ca2.person_id = people.id AND pp2.collection_id IN (` + placeholders(len(accessibleCollections)) + `))`
+		for _, id := range accessibleCollections {
+			peopleArgs = append(peopleArgs, id)
+		}
+	}
+	peopleQuery += ` ORDER BY LOWER(COALESCE(NULLIF(name, ''), substr(id, -8))), id`
+	peopleRows, err := s.db.QueryContext(r.Context(), peopleQuery, peopleArgs...)
 	if err != nil {
 		http.Error(w, "people lookup failed", http.StatusInternalServerError)
 		return

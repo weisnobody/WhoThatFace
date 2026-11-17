@@ -131,8 +131,16 @@ func TestPauseResumeAndRetry(t *testing.T) {
 	if err := store.Pause(context.Background(), job.ID); err != nil {
 		t.Fatal(err)
 	}
+	paused, err := store.Get(context.Background(), job.ID)
+	if err != nil || paused.PauseReason != "user" {
+		t.Fatalf("paused = %+v, error=%v", paused, err)
+	}
 	if err := store.Resume(context.Background(), job.ID); err != nil {
 		t.Fatal(err)
+	}
+	resumed, err := store.Get(context.Background(), job.ID)
+	if err != nil || resumed.PauseReason != "none" {
+		t.Fatalf("resumed = %+v, error=%v", resumed, err)
 	}
 	if err := store.SetStatus(context.Background(), job.ID, Failed, "test", "failed"); err != nil {
 		t.Fatal(err)
@@ -143,5 +151,110 @@ func TestPauseResumeAndRetry(t *testing.T) {
 	got, err := store.Get(context.Background(), job.ID)
 	if err != nil || got.Status != Pending {
 		t.Fatalf("got %+v, error=%v", got, err)
+	}
+}
+
+func TestRecoverSystemInterruptionReleasesRunningItems(t *testing.T) {
+	database, err := db.Open(context.Background(), t.TempDir()+"/job-recovery.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewStore(database)
+	job, err := store.Enqueue(context.Background(), "test", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_items (id, job_id, item_key, status, updated_at) VALUES ('item-running', ?, 'asset-1', 'running', '2026-01-01T00:00:00Z'), ('item-complete', ?, 'asset-2', 'completed', '2026-01-01T00:00:00Z')`, job.ID, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = 'running' WHERE id = ?`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Recover(context.Background(), job.ID, "system_interrupted", "worker exited"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != Paused || got.PauseReason != "system" || got.ErrorCode != "system_interrupted" {
+		t.Fatalf("recovered job = %+v", got)
+	}
+	items, err := store.Items(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Status != "pending" || items[1].Status != "completed" {
+		t.Fatalf("recovered items = %+v", items)
+	}
+}
+
+func TestRetryResetsAllItems(t *testing.T) {
+	database, err := db.Open(context.Background(), t.TempDir()+"/job-retry-all.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewStore(database)
+	job, err := store.Enqueue(context.Background(), "test", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_items (id, job_id, item_key, status, attempts, updated_at) VALUES ('item-complete', ?, 'asset-1', 'completed', 2, '2026-01-01T00:00:00Z'), ('item-failed', ?, 'asset-2', 'failed', 3, '2026-01-01T00:00:00Z')`, job.ID, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = 'failed' WHERE id = ?`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Retry(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.Items(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Status != "pending" || item.Attempts != 0 {
+			t.Fatalf("retry item = %+v", item)
+		}
+	}
+}
+
+func TestFinalizeCancelPreservesCompletedItems(t *testing.T) {
+	database, err := db.Open(context.Background(), t.TempDir()+"/job-finalize-cancel.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	store := NewStore(database)
+	job, err := store.Enqueue(context.Background(), "test", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_items (id, job_id, item_key, status, updated_at) VALUES ('item-complete', ?, 'asset-1', 'completed', '2026-01-01T00:00:00Z'), ('item-running', ?, 'asset-2', 'running', '2026-01-01T00:00:00Z'), ('item-pending', ?, 'asset-3', 'pending', '2026-01-01T00:00:00Z')`, job.ID, job.ID, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = 'cancelling' WHERE id = ?`, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeCancel(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(context.Background(), job.ID)
+	if err != nil || got.Status != Cancelled {
+		t.Fatalf("job = %+v, error=%v", got, err)
+	}
+	items, err := store.Items(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Key == "asset-1" && item.Status != "completed" {
+			t.Fatalf("completed item = %+v", item)
+		}
+		if item.Key != "asset-1" && item.Status != "skipped" {
+			t.Fatalf("unfinished item = %+v", item)
+		}
 	}
 }
